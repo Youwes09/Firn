@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Mon, 26 Oct 2026 00:03:54 -0500
+Subject: [PATCH 41/41] arm64: dts: apple: t8132-j713: Add CPU die temperature
+ channels
+
+Expose the SMC's CPU die temperatures through macsmc-hwmon, reporting
+only. From a read-only survey of the J713 SMC keys: TCMz followed the
+hottest Tp/Te key within 0.5 C in every sample under idle, P-cluster
+and E-cluster load; the Tp keys track the P cores and the Te keys the E
+cores, matching the channels upstream reads on T8140.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native), released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 41 ++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 398dcfaae..afc512af2 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -150,6 +150,47 @@ tp_accel {
+ 
+ #include "hwmon-laptop.dtsi"
+ 
++/*
++ * CPU die temperatures, for reporting only. TCMz is the hottest of the
++ * Tp (P cluster) and Te (E cluster) keys.
++ */
++&smc_hwmon {
++	temperature-TCMz {
++		apple,key-id = "TCMz";
++		label = "CPU Die Max";
++	};
++
++	temperature-Tp01 {
++		apple,key-id = "Tp01";
++		label = "P-cluster Temperature 1";
++	};
++
++	temperature-Tp05 {
++		apple,key-id = "Tp05";
++		label = "P-cluster Temperature 2";
++	};
++
++	temperature-Tp09 {
++		apple,key-id = "Tp09";
++		label = "P-cluster Temperature 3";
++	};
++
++	temperature-Tp0D {
++		apple,key-id = "Tp0D";
++		label = "P-cluster Temperature 4";
++	};
++
++	temperature-Te05 {
++		apple,key-id = "Te05";
++		label = "E-cluster Temperature 1";
++	};
++
++	temperature-Te0S {
++		apple,key-id = "Te0S";
++		label = "E-cluster Temperature 2";
++	};
++};
++
+ /*
+  * The J713 has two Type-C ports (atc0/atc1). The atc2/atc3 power domains
+  * never reach the on state here and stop the boot, so delete their pmgr

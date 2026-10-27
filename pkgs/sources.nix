@@ -1,11 +1,8 @@
 # Published, hash-pinned inputs from the Omarchy-M4-Native project.
 # The hex hashes are the ones that project pins in its own tree or release:
-#   payload: packaging/omarchy-m4/linux-m4-omarchy/PKGBUILD (pkgrel 2)
-#   Image.gz: packaging/omarchy-m4/channel.json kernel.image_sha256
 #   dtb: tools/m4-boot-compose.py KNOWN_DTBS 'j713-cpu-temperature'
 #   loader: the update 4 installer's installer_data.json m4_boot.loader
 {
-  lib,
   fetchurl,
   runCommand,
   python3,
@@ -21,13 +18,6 @@ let
   installerRevision = "6c6d2e4dd48b6306416c28686b5212b6bc4f77dc";
 in
 rec {
-  kernelPayload = fetchurl {
-    url = "${base}/package-inputs/linux-m4-omarchy-7.1.9.m4.20261008-payload.tar.zst";
-    # b160686fa06c437343f85aab10be41a669f2a23106b7e4e83e0911c921e6388f
-    hash = "sha256-sWBob6BsQ3ND+FqrEL5BpmnyojEGt+ToPgkRySHmOI8=";
-  };
-  kernelImageSha256 = "c3704cfd2afb7760e73f0b9939a68864a30bd916fcd478bd960e538373123dc9";
-
   # Lineage: alpha.1 base -> update.1 (SMC poweroff cells) -> bounded cpufreq
   # (E 900 MHz, P up to 1800 MHz, the clocks iBoot hands over) -> reporting-only
   # CPU die temperature. Nothing later: no E-cluster raise, no P boost, no front

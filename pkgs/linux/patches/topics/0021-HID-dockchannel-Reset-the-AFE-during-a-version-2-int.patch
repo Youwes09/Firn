@@ -1,0 +1,152 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 21:29:08 -0500
+Subject: [PATCH 21/41] HID: dockchannel: Reset the AFE during a version 2
+ interface reset
+
+With the version 2 interface reset, the multi-touch firmware expects the
+host to reset the AFE between the two phases of each state change, and
+to report the result in the second phase. Sending both phases without
+the reset leaves the AFE as it was, and the trackpad starts only when
+the AFE happens to come up anyway. Otherwise the firmware logs:
+
+  AFE Chip Boot Failure for HBPP[0]: No HINT_L
+  AFE[0] bootload failed: 1
+
+and the interface never reports ready.
+
+On the J713 the AFE reset is an SMC action on the afe-reset pin, with
+argument 1 to hold the AFE in reset for 50 ms and argument 0 to release
+it. Run it between the phases and pass a failure on as kIOReturnError.
+
+The action and its timing follow Omarchy-M4-Native's notes on the AFE
+reset function of the J713.
+
+Link: https://github.com/Kb2uka/Omarchy-M4-Native/blob/develop/docs/j713-afe-native-action.md
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/hid/dockchannel-hid/Kconfig           |  1 +
+ drivers/hid/dockchannel-hid/dockchannel-hid.c | 54 +++++++++++++++++--
+ 2 files changed, 52 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/hid/dockchannel-hid/Kconfig b/drivers/hid/dockchannel-hid/Kconfig
+index 254961ad1..d8c30ab68 100644
+--- a/drivers/hid/dockchannel-hid/Kconfig
++++ b/drivers/hid/dockchannel-hid/Kconfig
+@@ -5,6 +5,7 @@ menu "DockChannel HID support"
+ config HID_DOCKCHANNEL
+ 	tristate "HID over DockChannel transport layer for Apple Silicon SoCs"
+ 	depends on APPLE_DOCKCHANNEL && INPUT && OF && HID
++	depends on GPIO_MACSMC || !GPIO_MACSMC
+ 	help
+ 	  Say Y here if you use an M2 or later Apple Silicon based laptop.
+ 	  The keyboard and touchpad are HID based devices connected via the
+diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+index e37600f92..f53b3c1b4 100644
+--- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
++++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+@@ -12,6 +12,7 @@
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/hid.h>
++#include <linux/mfd/macsmc.h>
+ #include <linux/platform_device.h>
+ #include <linux/property.h>
+ #include <linux/slab.h>
+@@ -24,6 +25,13 @@
+ #define COMMAND_TIMEOUT_MS 1000
+ #define START_TIMEOUT_MS 2000
+ 
++/* The AFE reset action and how long the AFE stays in reset */
++#define AFE_RESET_ACTION 0x10000
++#define AFE_RESET_MS 50
++
++/* kIOReturnError, for a failed host step */
++#define IORETURN_ERROR 0xe00002bc
++
+ #define MAX_INTERFACES 16
+ 
+ /* Data + checksum */
+@@ -183,6 +191,7 @@ struct dockchannel_hid {
+ 	struct dockchannel *dc;
+ 	struct device_link *helper_link;
+ 	unsigned int reset_version;
++	struct gpio_desc *afe_reset;
+ 
+ 	bool id_ready;
+ 	struct dchid_stm_id device_id;
+@@ -370,6 +379,29 @@ static int dchid_enable_interface(struct dchid_iface *iface)
+ 	return dchid_comm_cmd(iface->dchid, msg, sizeof(msg));
+ }
+ 
++/*
++ * With version 2 firmware the host resets the multi-touch AFE itself, through
++ * an SMC action on the afe-reset pin: argument 1 holds the AFE in reset and
++ * argument 0 releases it.
++ */
++static int dchid_reset_afe(struct dchid_iface *iface, int state)
++{
++	struct dockchannel_hid *dchid = iface->dchid;
++	int ret;
++
++	if (!dchid->afe_reset || strcmp(iface->name, "multi-touch"))
++		return 0;
++
++	ret = macsmc_gpio_action(dchid->afe_reset, AFE_RESET_ACTION | !state);
++	if (ret < 0)
++		return ret;
++
++	if (!state)
++		msleep(AFE_RESET_MS);
++
++	return 0;
++}
++
+ static int dchid_reset_interface(struct dchid_iface *iface, int state)
+ {
+ 	struct {
+@@ -386,18 +418,27 @@ static int dchid_reset_interface(struct dchid_iface *iface, int state)
+ 		.iface = iface->index,
+ 		.state = state,
+ 	};
+-	int ret;
++	int ret, afe_ret;
+ 
+ 	if (msg.version < 2)
+ 		return dchid_comm_cmd(iface->dchid, &msg, offsetof(typeof(msg), phase));
+ 
+-	/* Version 2 firmware takes each state change in two phases */
++	/*
++	 * Version 2 firmware takes each state change in two phases, with the
++	 * host's part in between. The second phase reports how that went.
++	 */
+ 	ret = dchid_comm_cmd(iface->dchid, &msg, sizeof(msg));
+ 	if (ret < 0)
+ 		return ret;
+ 
++	afe_ret = dchid_reset_afe(iface, state);
++	if (afe_ret < 0)
++		msg.status = cpu_to_le32(IORETURN_ERROR);
++
+ 	msg.phase = 1;
+-	return dchid_comm_cmd(iface->dchid, &msg, sizeof(msg));
++	ret = dchid_comm_cmd(iface->dchid, &msg, sizeof(msg));
++
++	return afe_ret < 0 ? afe_ret : ret;
+ }
+ 
+ static int dchid_send_firmware(struct dchid_iface *iface, void *firmware, size_t size)
+@@ -1140,6 +1181,13 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
+ 	dchid->dev = dev;
+ 	dchid->reset_version = (uintptr_t)device_get_match_data(dev);
+ 
++	if (dchid->reset_version >= 2) {
++		dchid->afe_reset = devm_gpiod_get_optional(dev, "apple,afe-reset", GPIOD_ASIS);
++		if (IS_ERR(dchid->afe_reset))
++			return dev_err_probe(dev, PTR_ERR(dchid->afe_reset),
++					     "Failed to get the AFE reset GPIO\n");
++	}
++
+ 	/*
+ 	 * First make sure all the GPIOs are available, in cased we need to defer.
+ 	 * This is necessary because MTP will request them by name later, and by then

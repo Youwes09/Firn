@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Wed, 14 Oct 2026 18:41:39 -0400
+Subject: [PATCH 35/41] arm64: dts: apple: t8132: Keep board-wired parts
+ disabled outside J713
+
+The shared T8132 patches enabled the SPMI PMIC, the SEP mailbox and DART,
+and both USB-C PHYs with their display crossbars on every M4 board. They
+were checked on the J713 only. Keep them disabled in t8132.dtsi, like the
+SEP, DWC3 and PCIe nodes that use them, and enable them in t8132-j713.dts.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native), released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 33 ++++++++++++++++++++++++
+ arch/arm64/boot/dts/apple/t8132.dtsi     |  7 +++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index dbd7df404..e5a57bbb1 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -143,3 +143,36 @@ tp_accel {
+ /delete-node/ &ps_atc3_usb;
+ /delete-node/ &ps_atc3_usb_aon;
+ /delete-node/ &ps_atc3_common;
++
++/*
++ * Board-wired parts the shared T8132 files keep disabled until a board is
++ * qualified: the SPMI PMIC, the SEP mailbox and DART, and the two USB-C PHYs
++ * with their display crossbars. Checked on this board only.
++ */
++&nub_spmi {
++	status = "okay";
++};
++
++&sep_dart {
++	status = "okay";
++};
++
++&sep_mbox {
++	status = "okay";
++};
++
++&atcphy0 {
++	status = "okay";
++};
++
++&atcphy0_xbar {
++	status = "okay";
++};
++
++&atcphy1 {
++	status = "okay";
++};
++
++&atcphy1_xbar {
++	status = "okay";
++};
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 8d82c42d1..fa919fce5 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -241,6 +241,7 @@ nub_spmi: spmi@388714000 {
+ 			reg = <0x3 0x88714000 0x0 0x100>;
+ 			#address-cells = <2>;
+ 			#size-cells = <0>;
++			status = "disabled";
+ 
+ 			pmic1: pmic@e {
+ 				compatible = "apple,abbey-pmic", "apple,spmi-nvmem";
+@@ -573,6 +574,7 @@ sep_dart: iommu@3a8c80000 {
+ 			#iommu-cells = <1>;
+ 			interrupt-parent = <&aic>;
+ 			interrupts = <AIC_IRQ 399 IRQ_TYPE_LEVEL_HIGH>;
++			status = "disabled";
+ 		};
+ 
+ 		sep: sep@3aa600000 {
+@@ -595,6 +597,7 @@ sep_mbox: mbox@3aa608000 {
+ 			interrupt-names = "send-empty", "send-not-empty",
+ 					  "recv-empty", "recv-not-empty";
+ 			#mbox-cells = <0>;
++			status = "disabled";
+ 		};
+ 
+ 		i2c0: i2c@3ad010000 {
+@@ -821,6 +824,7 @@ atcphy0: phy@403000000 {
+ 			orientation-switch;
+ 			mode-switch;
+ 			power-domains = <&ps_atc0_usb>;
++			status = "disabled";
+ 
+ 			ports {
+ 				#address-cells = <1>;
+@@ -847,6 +851,7 @@ atcphy0_xbar: mux@40304c000 {
+ 			reg = <0x4 0x0304c000 0x0 0x4000>;
+ 			#mux-control-cells = <1>;
+ 			power-domains = <&ps_atc0_usb>;
++			status = "disabled";
+ 		};
+ 
+ 		dwc3_1: usb@40a280000 {
+@@ -922,6 +927,7 @@ atcphy1: phy@40b000000 {
+ 			orientation-switch;
+ 			mode-switch;
+ 			power-domains = <&ps_atc1_usb>;
++			status = "disabled";
+ 
+ 			ports {
+ 				#address-cells = <1>;
+@@ -948,6 +954,7 @@ atcphy1_xbar: mux@40b04c000 {
+ 			reg = <0x4 0x0b04c000 0x0 0x4000>;
+ 			#mux-control-cells = <1>;
+ 			power-domains = <&ps_atc1_usb>;
++			status = "disabled";
+ 		};
+ 
+ 		ans_mbox: mbox@481608000 {

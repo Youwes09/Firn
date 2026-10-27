@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 12:29:36 -0500
+Subject: [PATCH 05/41] dt-bindings: spmi: apple,spmi: Add t8132 compatible
+
+The SPMI controllers on t8132 (M4) are compatible with those on t8103.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/spmi/apple,spmi.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/spmi/apple,spmi.yaml b/Documentation/devicetree/bindings/spmi/apple,spmi.yaml
+index fceed47b2..8763cd76c 100644
+--- a/Documentation/devicetree/bindings/spmi/apple,spmi.yaml
++++ b/Documentation/devicetree/bindings/spmi/apple,spmi.yaml
+@@ -25,6 +25,7 @@ properties:
+               - apple,t8012-spmi
+               - apple,t8015-spmi
+               - apple,t8122-spmi
++              - apple,t8132-spmi
+           - const: apple,t8103-spmi
+       - items:
+           - enum:

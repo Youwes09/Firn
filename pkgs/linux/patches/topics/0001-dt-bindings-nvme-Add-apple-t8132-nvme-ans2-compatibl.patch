@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yureka Lilian <yureka@cyberchaos.dev>
+Date: Sun, 6 Sep 2026 22:15:29 +0200
+Subject: [PATCH 01/41] dt-bindings: nvme: Add apple,t8132-nvme-ans2 compatible
+
+Add a new base compatible for the ANS2 NVMe on the Apple t8132 (M4) SoC,
+which requires the IO queues to be registered using additional MMIO writes.
+
+Signed-off-by: Yureka Lilian <yureka@cyberchaos.dev>
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/nvme/apple,nvme-ans.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/nvme/apple,nvme-ans.yaml b/Documentation/devicetree/bindings/nvme/apple,nvme-ans.yaml
+index 352251c80..0eb3b951f 100644
+--- a/Documentation/devicetree/bindings/nvme/apple,nvme-ans.yaml
++++ b/Documentation/devicetree/bindings/nvme/apple,nvme-ans.yaml
+@@ -18,6 +18,7 @@ properties:
+               - apple,t6020-nvme-ans2
+               - apple,t8122-nvme-ans2
+           - const: apple,t8103-nvme-ans2
++      - const: apple,t8132-nvme-ans2
+       - items:
+           - enum:
+               # Do not add additional SoC to this list.

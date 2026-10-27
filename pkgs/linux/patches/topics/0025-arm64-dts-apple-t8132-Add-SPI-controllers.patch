@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Sun, 25 Oct 2026 23:54:45 -0500
+Subject: [PATCH 25/41] arm64: dts: apple: t8132: Add SPI controllers
+
+Add the SPI2 and SPI4 controllers.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native), released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 2b7852f2f..3169ae9a9 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -456,6 +456,30 @@ fpwm1: pwm@3ad044000 {
+ 			status = "disabled";
+ 		};
+ 
++		spi2: spi@3ad108000 {
++			compatible = "apple,t8132-spi", "apple,t8103-spi";
++			reg = <0x3 0xad108000 0x0 0x4000>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1056 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&clkref>;
++			power-domains = <&ps_spi2>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
++		spi4: spi@3ad110000 {
++			compatible = "apple,t8132-spi", "apple,t8103-spi";
++			reg = <0x3 0xad110000 0x0 0x4000>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1058 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&clkref>;
++			power-domains = <&ps_spi4>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
+ 		serial0: serial@3ad200000 {
+ 			compatible = "apple,s5l-uart";
+ 			reg = <0x3 0xad200000 0x0 0x1000>;

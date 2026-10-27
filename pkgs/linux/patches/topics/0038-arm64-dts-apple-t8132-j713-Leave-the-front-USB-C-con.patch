@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 11:44:02 -0500
+Subject: [PATCH 38/41] arm64: dts: apple: t8132-j713: Leave the front USB-C
+ controller off
+
+Only the hinge-side port (atc1) works on the J713 so far. Leave the front
+port's controller and its DARTs disabled, and alias the GPU for the
+loader's handoff.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 13 +------------
+ 1 file changed, 1 insertion(+), 12 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index e4b3d937a..398dcfaae 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -20,6 +20,7 @@ / {
+ 
+ 	aliases {
+ 		bluetooth0 = &bluetooth0;
++		gpu = &gpu;
+ 		keyboard = &keyboard;
+ 		wifi0 = &wifi0;
+ 	};
+@@ -76,18 +77,6 @@ bluetooth0: bluetooth@0,1 {
+ 	};
+ };
+ 
+-&dwc3_0 {
+-	status = "okay";
+-};
+-
+-&dwc3_0_dart_0 {
+-	status = "okay";
+-};
+-
+-&dwc3_0_dart_1 {
+-	status = "okay";
+-};
+-
+ &dwc3_1 {
+ 	status = "okay";
+ };

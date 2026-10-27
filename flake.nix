@@ -12,9 +12,23 @@
       ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       minimal = self.nixosConfigurations.minimal;
+
+      # The M4 Mesa replaces mesa in every stage, so a cross build takes its
+      # asahi_clc from the same source.
+      m4Overlay = final: prev: {
+        mesa = prev.callPackage ./pkgs/mesa { inherit (prev) mesa; };
+      };
+      # aarch64-linux package set built on (and, if foreign, cross-compiled from) system.
+      aarch64From =
+        system:
+        import nixpkgs {
+          localSystem = system;
+          crossSystem = if system == "aarch64-linux" then null else "aarch64-linux";
+          overlays = [ m4Overlay ];
+        };
     in
     {
-      nixosModules.default = ./modules/j713.nix;
+      nixosModules.default = ./modules;
 
       nixosConfigurations.minimal = nixpkgs.lib.nixosSystem {
         modules = [
@@ -26,14 +40,18 @@
 
       packages = forAll (
         pkgs:
+        let
+          # Built natively on aarch64, cross-compiled elsewhere.
+          aarch64 = aarch64From pkgs.stdenv.hostPlatform.system;
+        in
         {
           m4-nix-boot = pkgs.callPackage ./pkgs/m4-nix-boot { };
           # The installer kit; data assembly runs on this system's own tools.
           kit = pkgs.callPackage ./pkgs/kit { nixos = minimal; };
           minimal = minimal.config.system.build.toplevel;
-        }
-        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "aarch64-linux") {
-          linux-m4 = pkgs.callPackage ./pkgs/linux-m4.nix { kernelPatches = [ ]; };
+          linux = aarch64.callPackage ./pkgs/linux { kernelPatches = [ ]; };
+          inherit (aarch64) mesa;
+          m1n1 = aarch64.callPackage ./pkgs/m1n1 { };
         }
       );
 
@@ -42,6 +60,19 @@
         policy = import ./tests/policy.nix {
           inherit pkgs;
           nixos = minimal;
+        };
+        kernel-modules = import ./tests/kernel-modules.nix {
+          inherit pkgs;
+          kernel = self.packages.${pkgs.stdenv.hostPlatform.system}.linux;
+        };
+        devicetree = import ./tests/devicetree {
+          inherit pkgs;
+          kernel = self.packages.${pkgs.stdenv.hostPlatform.system}.linux;
+          releaseDtb = (pkgs.callPackage ./pkgs/sources.nix { }).dtb;
+        };
+        devicetree-schema = import ./tests/devicetree/schema.nix {
+          inherit pkgs;
+          kernel = self.packages.${pkgs.stdenv.hostPlatform.system}.linux;
         };
         # Needs an aarch64 builder (binfmt on x86_64) for the system itself.
         vm-boot = import ./tests/vm {

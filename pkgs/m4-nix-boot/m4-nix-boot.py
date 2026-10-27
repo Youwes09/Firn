@@ -16,8 +16,8 @@ boot, so they are not in the file.
 
 This keeps the installed loader and firmware and writes the generation's own
 kernel, devicetree, initrd and kernel parameters in the installer's layout.
-Kernel, devicetree and loader must be pinned below, and the parameters must
-keep the hardware switches the installer shipped.
+The devicetree and loader must be pinned below, and the parameters must keep
+the kernel's hardware switches.
 
 Nothing is written without --apply. The first boot.bin this tool replaces (the
 installer's) is kept as boot.bin.original and never overwritten; every apply
@@ -31,10 +31,6 @@ import struct
 import sys
 import zlib
 
-KERNELS = {
-    'c3704cfd2afb7760e73f0b9939a68864a30bd916fcd478bd960e538373123dc9':
-        'linux-m4-omarchy 7.1.9-m4-gpu-backport-20261008 (alpha.1)',
-}
 DTBS = {
     '08e8e719381f88a1e50d821c145dad5b2d97fd772609e13d7778e19795e9cad1':
         'j713-cputemp: poweroff cells, bounded cpufreq, CPU temperature reporting',
@@ -54,15 +50,12 @@ REFUSED_LOADERS = {
     'f2417a74d13838004847a6fbdf946b524005301b88b5a403b1e79cb36d0ec7ca':
         'stage 2 with the notch shown; notch mode is off in this profile',
 }
-# Hardware switches from the update 4 installer's bootargs. The kernel was
-# qualified with them; a generation without any of them is refused.
+# Kernel parameters the J713 does not boot reliably without; a generation
+# that drops one is refused. WFIT in __delay() stops the M4 at EL2.
 REQUIRED_ARGS = (
     'maxcpus=10',
     'idle=nop',
-    'dockchannel_hid.m4_power_v2=1',
-    'dockchannel_hid.m4_afe_action=1',
-    'pcie_apple.m4_link_diag=1',
-    'pcie_apple.m4_keep_clocks=1',
+    'arm64.nowfxt',
 )
 BOARD = b'apple,j713'
 BOOTARGS = b'chosen.bootargs='
@@ -208,7 +201,7 @@ def check_firmware(firmware):
 def bootargs_line(args, init):
     require(not any(arg.startswith('init=') for arg in args), 'Kernel parameters already set init=')
     missing = [arg for arg in REQUIRED_ARGS if arg not in args]
-    require(not missing, 'Kernel parameters lack the qualified hardware switches: ' + ' '.join(missing))
+    require(not missing, "Kernel parameters lack the kernel's hardware switches: " + ' '.join(missing))
     unique = list(dict.fromkeys(args))
     line = BOOTARGS + ' '.join(unique + ['init=' + init]).encode() + b'\n'
     require(len(line) - len(BOOTARGS) - 1 <= MAX_BOOTARGS,
@@ -221,21 +214,28 @@ def describe(table, digest):
     return table.get(digest, 'unknown')
 
 
-def compose(current, kernel, dtb, initrd, args, init, allowed_loaders=()):
-    """Return (new boot.bin bytes, report lines). Refuses anything unpinned."""
+def compose(current, kernel, dtb, initrd, args, init, allowed_loaders=(), unpinned=(),
+            loader=None):
+    """Return (new boot.bin bytes, report lines). Refuses an unpinned loader or
+    devicetree, unless unpinned names 'dtb' for the generation's own source
+    build, which still gets every format check. A loader passed in comes from
+    the generation's own source build and replaces the installed one."""
     layout = parse(current)
-    loader = sha(layout['loader'])
-    require(loader not in REFUSED_LOADERS,
-            f'Installed loader {loader} is the {REFUSED_LOADERS.get(loader)}. '
+    if loader is not None:
+        layout['loader'] = loader
+    loader_sha = sha(layout['loader'])
+    require(loader_sha not in REFUSED_LOADERS,
+            f'Loader {loader_sha} is the {REFUSED_LOADERS.get(loader_sha)}. '
             'Pass --loader-from with a boot.bin that has a non-backlight loader')
-    require(loader in LOADERS or loader in allowed_loaders,
-            f'Installed loader {loader} is not one this tool knows. Review it, then pass '
-            '--allow-loader ' + loader)
+    require(loader is not None or loader_sha in LOADERS or loader_sha in allowed_loaders,
+            f'Installed loader {loader_sha} is not one this tool knows. Review it, then pass '
+            '--allow-loader ' + loader_sha)
     require(len(layout['loader']) <= LIMITS['loader'], 'Loader is too large')
-    require(sha(kernel) in KERNELS, f'Kernel {sha(kernel)} is not pinned')
     require(kernel[:3] == GZIP and gzip_end(kernel, 0) == len(kernel), 'Kernel is not one gzip member')
-    require(sha(dtb) in DTBS, f'Devicetree {sha(dtb)} is not pinned')
+    require(len(kernel) <= LIMITS['kernel'], 'The kernel is larger than the installer allows')
+    require(sha(dtb) in DTBS or 'dtb' in unpinned, f'Devicetree {sha(dtb)} is not pinned')
     require(fdt_size(dtb, 0) == len(dtb), 'Devicetree is not one flattened devicetree')
+    require(len(dtb) <= LIMITS['dtb'], 'The devicetree is larger than the installer allows')
     require(BOARD + b'\0' in dtb, 'Devicetree is not for apple,j713')
     require(initrd[:3] == GZIP and gzip_end(initrd, 0) == len(initrd),
             'The initrd must be one gzip member (boot.initrd.compressor = "gzip")')
@@ -253,9 +253,10 @@ def compose(current, kernel, dtb, initrd, args, init, allowed_loaders=()):
     require(split_initramfs(check['initramfs']) == (initrd, firmware), 'Composed initramfs does not split back')
 
     report = [
-        f'loader     {loader}  {describe({**LOADERS, **dict.fromkeys(allowed_loaders, "allowed by flag")}, loader)}',
-        f'kernel     {sha(kernel)}  {KERNELS[sha(kernel)]}',
-        f'devicetree {sha(dtb)}  {DTBS[sha(dtb)]}',
+        f'loader     {loader_sha}  ' + ('from this generation' if loader is not None else describe(
+            {**LOADERS, **dict.fromkeys(allowed_loaders, 'allowed by flag')}, loader_sha)),
+        f'kernel     {sha(kernel)}  {len(kernel)} bytes, from this generation',
+        f'devicetree {sha(dtb)}  {DTBS.get(sha(dtb), "unpinned, from this generation")}',
         f'firmware   {len(names)} entries, {len(firmware)} bytes, kept from the installed boot.bin',
         f'initrd     {sha(initrd)}  {len(initrd)} bytes',
         'bootargs   ' + new['bootargs'][len(BOOTARGS):-1].decode(),
@@ -297,6 +298,8 @@ def read_toplevel(toplevel):
         'initrd': (toplevel / 'initrd').read_bytes(),
         'args': (toplevel / 'kernel-params').read_text().split(),
         'init': str(toplevel / 'init'),
+        # Present when the generation builds m1n1 from source.
+        'loader': (toplevel / 'm1n1.bin').read_bytes() if (toplevel / 'm1n1.bin').exists() else None,
     }
 
 
@@ -313,7 +316,8 @@ def install(args):
         layout['loader'] = parse(Path(args.loader_from).read_bytes())['loader']
         base = join(layout)
     data, report = compose(base, generation['kernel'], generation['dtb'], generation['initrd'],
-                           generation['args'], generation['init'], tuple(args.allow_loader))
+                           generation['args'], generation['init'], tuple(args.allow_loader),
+                           tuple(args.allow_unpinned), generation['loader'])
     print('\n'.join(report))
     if data == current:
         print('boot.bin is already this generation')
@@ -342,7 +346,7 @@ def inspect(args):
     layout = parse(data)
     loader = sha(layout['loader'])
     print(f'loader     {loader}  {describe({**LOADERS, **REFUSED_LOADERS}, loader)}')
-    print(f'kernel     {sha(layout["kernel"])}  {describe(KERNELS, sha(layout["kernel"]))}')
+    print(f'kernel     {sha(layout["kernel"])}  {len(layout["kernel"])} bytes')
     print(f'devicetree {sha(layout["dtb"])}  {describe(DTBS, sha(layout["dtb"]))}')
     print('bootargs   ' + layout['bootargs'][len(BOOTARGS):-1].decode())
     try:
@@ -366,6 +370,8 @@ def main(argv=None):
     put.add_argument('--loader-from', help='take the m1n1 loader from this boot.bin instead')
     put.add_argument('--allow-loader', action='append', default=[], metavar='SHA256',
                      help='accept a reviewed loader this tool does not know')
+    put.add_argument('--allow-unpinned', action='append', default=[], choices=('dtb',),
+                     help="accept the generation's own source-built devicetree")
     put.add_argument('--sys-root', default='/', help=argparse.SUPPRESS)
     put.set_defaults(run=install)
     args = parser.parse_args(argv)

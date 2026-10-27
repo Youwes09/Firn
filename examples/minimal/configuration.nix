@@ -7,6 +7,9 @@
 
   hardware.m4-j713.enable = true;
   hardware.m4-j713.wifiRegion = "US";
+  # The release devicetree lacks the compatible that selects the trackpad's
+  # version 2 interface reset.
+  hardware.m4-j713.devicetree = "source";
 
   # For `nixos-rebuild --flake` and `nix shell` on the Air.
   nix.settings.experimental-features = [
@@ -16,6 +19,17 @@
 
   networking.hostName = "m4-air";
   networking.wireless.iwd.enable = true;
+  # With Ethernet and Wi-Fi on one network, answer ARP only on the interface
+  # that owns the address, so DHCP does not see its own other link as a conflict.
+  boot.kernel.sysctl = {
+    "net.ipv4.conf.all.arp_ignore" = 1;
+    "net.ipv4.conf.all.arp_announce" = 2;
+  };
+
+  hardware.bluetooth.enable = true;
+
+  # Japanese (JIS) keyboard.
+  console.keyMap = "jp106";
 
   users.users.m4 = {
     isNormalUser = true;
@@ -28,6 +42,7 @@
     iw
     lm_sensors
     pciutils
+    tmux
     usbutils
   ];
 

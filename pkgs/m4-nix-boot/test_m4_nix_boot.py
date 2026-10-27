@@ -67,13 +67,15 @@ FIRMWARE = cpio([('vendorfw', 0o40755, b''),
                  ('vendorfw/brcm/fw.bin', 0o100644, b'\x01\x02\x03')])
 INITRD = gzip.compress(cpio([('init', 0o100755, b'#!/bin/sh\n')]), mtime=0)
 NEW_INITRD = gzip.compress(cpio([('init', 0o100755, b'nixos stage 1\n')]), mtime=0)
-QUALIFIED = ('maxcpus=10 idle=nop panic=0 console=tty0 fbcon=nodefer loglevel=4 log_buf_len=1M '
-             'm4trace_hit=999 dockchannel_hid.m4_power_v2=1 pcie_apple.m4_link_diag=1 '
-             'pcie_apple.m4_keep_clocks=1 dockchannel_hid.m4_afe_action=1')
-NIXOS_ARGS = QUALIFIED.split() + ['root=fstab', 'loglevel=4']
+# What the installer wrote, and what a generation passes.
+INSTALLER_ARGS = ('maxcpus=10 idle=nop panic=0 console=tty0 fbcon=nodefer loglevel=4 log_buf_len=1M '
+                  'm4trace_hit=999 dockchannel_hid.m4_power_v2=1 pcie_apple.m4_link_diag=1 '
+                  'pcie_apple.m4_keep_clocks=1 dockchannel_hid.m4_afe_action=1')
+PARAMS = 'maxcpus=10 idle=nop panic=0 console=tty0 fbcon=nodefer loglevel=4 log_buf_len=1M arm64.nowfxt'
+NIXOS_ARGS = PARAMS.split() + ['root=fstab', 'loglevel=4']
 
 
-def installed(loader=LOADER, args=QUALIFIED + ' init=/nix/store/a-nixos-system/init',
+def installed(loader=LOADER, args=INSTALLER_ARGS + ' init=/nix/store/a-nixos-system/init',
               kernel=KERNEL, dtb=DTB, initrd=INITRD, firmware=FIRMWARE):
     """boot.bin as the installer writes it (src/m4boot.py compose)."""
     initramfs = initrd + bytes(-len(initrd) % 4) + firmware
@@ -83,13 +85,12 @@ def installed(loader=LOADER, args=QUALIFIED + ' init=/nix/store/a-nixos-system/i
 
 class Pinned(unittest.TestCase):
     def setUp(self):
-        self.saved = boot.KERNELS, boot.DTBS, boot.LOADERS
-        boot.KERNELS = {sha(NEW_KERNEL): 'test kernel'}
+        self.saved = boot.DTBS, boot.LOADERS
         boot.DTBS = {sha(NEW_DTB): 'test dtb'}
         boot.LOADERS = {sha(LOADER): 'test loader'}
 
     def tearDown(self):
-        boot.KERNELS, boot.DTBS, boot.LOADERS = self.saved
+        boot.DTBS, boot.LOADERS = self.saved
 
     def compose(self, current=None, **overrides):
         values = dict(current=installed() if current is None else current, kernel=NEW_KERNEL,
@@ -139,12 +140,12 @@ class Compose(Pinned):
     def test_bootargs_are_the_generation_params(self):
         data, _ = self.compose()
         line = boot.parse(data)['bootargs'].decode()
-        self.assertEqual(line, 'chosen.bootargs=' + QUALIFIED +
+        self.assertEqual(line, 'chosen.bootargs=' + PARAMS +
                          ' root=fstab init=/nix/store/x-nixos-system/init\n')
 
     def test_missing_hardware_switch_refused(self):
-        args = [arg for arg in NIXOS_ARGS if arg != 'dockchannel_hid.m4_power_v2=1']
-        with self.assertRaisesRegex(boot.Refused, 'dockchannel_hid.m4_power_v2=1'):
+        args = [arg for arg in NIXOS_ARGS if arg != 'arm64.nowfxt']
+        with self.assertRaisesRegex(boot.Refused, 'arm64.nowfxt'):
             self.compose(args=args)
 
     def test_init_in_params_refused(self):
@@ -164,13 +165,18 @@ class Compose(Pinned):
         with self.assertRaisesRegex(boot.Refused, 'gzip'):
             self.compose(initrd=b'\x28\xb5\x2f\xfd' + b'zstd frame')
 
-    def test_unpinned_kernel_refused(self):
-        with self.assertRaisesRegex(boot.Refused, 'Kernel .* is not pinned'):
-            self.compose(kernel=KERNEL)
-
     def test_unpinned_dtb_refused(self):
         with self.assertRaisesRegex(boot.Refused, 'Devicetree .* is not pinned'):
             self.compose(dtb=DTB)
+
+    def test_source_built_dtb_accepted_only_when_named(self):
+        data, report = self.compose(dtb=DTB, unpinned=('dtb',))
+        self.assertEqual(boot.parse(data)['dtb'], DTB)
+        self.assertIn('unpinned, from this generation', report[2])
+
+    def test_kernel_format_checked(self):
+        with self.assertRaisesRegex(boot.Refused, 'gzip member'):
+            self.compose(kernel=b'not gzip')
 
     def test_unknown_loader_refused_unless_allowed(self):
         other = b'OTHER-LOADER' * 8
@@ -188,6 +194,28 @@ class Compose(Pinned):
         finally:
             del boot.REFUSED_LOADERS[sha(backlight)]
 
+    def test_generation_loader_replaces_installed(self):
+        ours = b'SOURCE-M1N1' * 8
+        data, report = self.compose(loader=ours)
+        self.assertEqual(boot.parse(data)['loader'], ours)
+        self.assertIn('from this generation', report[0])
+
+    def test_generation_without_loader_keeps_only_a_known_one(self):
+        data, _ = self.compose(loader=b'SOURCE-M1N1' * 8)
+        with self.assertRaisesRegex(boot.Refused, 'not one this tool knows'):
+            self.compose(current=data)
+
+    def test_generation_loader_still_checked(self):
+        with self.assertRaisesRegex(boot.Refused, 'too large'):
+            self.compose(loader=b'\0' * (boot.LIMITS['loader'] + 1))
+        backlight = b'BACKLIGHT' * 8
+        boot.REFUSED_LOADERS[sha(backlight)] = 'backlight stage 2'
+        try:
+            with self.assertRaisesRegex(boot.Refused, 'backlight'):
+                self.compose(loader=backlight)
+        finally:
+            del boot.REFUSED_LOADERS[sha(backlight)]
+
     def test_overlong_bootargs_refused(self):
         with self.assertRaisesRegex(boot.Refused, 'exceed'):
             self.compose(args=NIXOS_ARGS + ['x' * 1100])
@@ -199,7 +227,7 @@ class InstallerContract(Pinned):
 
     def installer_bootbin(self, initrd=INITRD):
         parts = {'loader': LOADER, 'kernel': KERNEL, 'dtb': DTB, 'initramfs': initrd}
-        return INSTALLER.compose(parts, QUALIFIED + ' init=/nix/store/a-nixos-system/init', FIRMWARE)
+        return INSTALLER.compose(parts, INSTALLER_ARGS + ' init=/nix/store/a-nixos-system/init', FIRMWARE)
 
     def test_installer_output_parses_and_splits(self):
         data = self.installer_bootbin()
@@ -210,7 +238,7 @@ class InstallerContract(Pinned):
     def test_recompose_matches_what_the_installer_would_write(self):
         data, _ = self.compose(current=self.installer_bootbin())
         parts = {'loader': LOADER, 'kernel': NEW_KERNEL, 'dtb': NEW_DTB, 'initramfs': NEW_INITRD}
-        expected = INSTALLER.compose(parts, QUALIFIED + ' root=fstab init=/nix/store/x-nixos-system/init',
+        expected = INSTALLER.compose(parts, PARAMS + ' root=fstab init=/nix/store/x-nixos-system/init',
                                      FIRMWARE)
         self.assertEqual(data, expected)
 

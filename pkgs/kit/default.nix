@@ -2,7 +2,6 @@
 # own tools (it only copies and archives data), so on an x86_64 host only the
 # aarch64 system itself needs emulation.
 {
-  lib,
   callPackage,
   runCommand,
   python3,

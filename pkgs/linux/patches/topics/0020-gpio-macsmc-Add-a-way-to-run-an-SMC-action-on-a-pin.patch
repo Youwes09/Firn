@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 21:28:23 -0500
+Subject: [PATCH 20/41] gpio: macsmc: Add a way to run an SMC action on a pin
+
+Besides the output, input and configuration commands, the SMC GPIO keys
+take an action command (CMD_ACTION). Some pins are driven only through
+it: on the J713 (t8132) the trackpad's AFE reset is an action on gP1c,
+and setting the pin's output does not reset the AFE.
+
+Export macsmc_gpio_action() so that the consumer of such a pin can run
+the action with the argument its firmware asks for.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpio/gpio-macsmc.c | 27 +++++++++++++++++++++++++++
+ include/linux/mfd/macsmc.h | 11 +++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/drivers/gpio/gpio-macsmc.c b/drivers/gpio/gpio-macsmc.c
+index c3ca445a8..acdf68232 100644
+--- a/drivers/gpio/gpio-macsmc.c
++++ b/drivers/gpio/gpio-macsmc.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/bitmap.h>
+ #include <linux/device.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/gpio/driver.h>
+ #include <linux/hex.h>
+ #include <linux/mfd/core.h>
+@@ -199,6 +200,32 @@ static int macsmc_gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
+ 	return ret;
+ }
+ 
++/**
++ * macsmc_gpio_action() - Run an SMC action on a GPIO
++ * @desc: GPIO of an SMC GPIO controller
++ * @action: action and argument, bits 23:0 of the command
++ *
++ * Some pins are driven by an action, a function of the pin in the SMC
++ * firmware, instead of by the output command.
++ *
++ * Return: 0 on success or a negative error code.
++ */
++int macsmc_gpio_action(struct gpio_desc *desc, u32 action)
++{
++	struct gpio_chip *gc = gpio_device_get_chip(gpiod_to_gpio_device(desc));
++	struct macsmc_gpio *smcgp;
++	smc_key key;
++
++	if (!gc || gc->set != macsmc_gpio_set || action & ~GENMASK(23, 0))
++		return -EINVAL;
++
++	smcgp = gpiochip_get_data(gc);
++	key = macsmc_gpio_key(smcgp->base_key, gpiod_hwgpio(desc));
++
++	return apple_smc_write_u32(smcgp->smc, key, CMD_ACTION | action);
++}
++EXPORT_SYMBOL_GPL(macsmc_gpio_action);
++
+ static int macsmc_gpio_init_valid_mask(struct gpio_chip *gc,
+ 				       unsigned long *valid_mask, unsigned int ngpios)
+ {
+diff --git a/include/linux/mfd/macsmc.h b/include/linux/mfd/macsmc.h
+index cc09ecce0..3fbae7d44 100644
+--- a/include/linux/mfd/macsmc.h
++++ b/include/linux/mfd/macsmc.h
+@@ -277,4 +277,15 @@ static inline int apple_smc_write_flag_atomic(struct apple_smc *smc, smc_key key
+ 	return apple_smc_write_u8_atomic(smc, key, state ? 1 : 0);
+ }
+ 
++struct gpio_desc;
++
++#if IS_ENABLED(CONFIG_GPIO_MACSMC)
++int macsmc_gpio_action(struct gpio_desc *desc, u32 action);
++#else
++static inline int macsmc_gpio_action(struct gpio_desc *desc, u32 action)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++
+ #endif

@@ -9,53 +9,37 @@ let
   login = cfg.services.logind.settings.Login;
   sleep = cfg.systemd.sleep.settings.Sleep;
 
-  qualified = [
-    "maxcpus=10"
-    "idle=nop"
-    "panic=0"
-    "console=tty0"
-    "fbcon=nodefer"
-    "log_buf_len=1M"
-    "m4trace_hit=999"
-    "dockchannel_hid.m4_power_v2=1"
-    "pcie_apple.m4_link_diag=1"
-    "pcie_apple.m4_keep_clocks=1"
-    "dockchannel_hid.m4_afe_action=1"
-  ];
-  offModules = [
-    "snd_soc_tas2764"
-    "snd_soc_tas2770"
-    "snd_soc_apple_mca"
-    "snd_soc_macaudio"
-    "snd_soc_cs42l84"
-  ];
-  unported = [
-    "speakers"
-    "headphones"
-    "gpu"
-    "cpuIdle"
-    "cpuBoost"
-    "backlight"
-    "frontUsb"
-    "notch"
-  ];
-
   rules = {
-    "kernel is the pinned linux-m4 build" =
-      kernel.pname == "linux-m4-j713" && kernel.modDirVersion == "7.1.9-m4-gpu-backport-20261008";
-    "no out-of-tree kernel modules" = cfg.boot.extraModulePackages == [ ];
-    "no kernel patches" = cfg.boot.kernelPatches == [ ];
+    "kernel is this repository's source build" =
+      kernel.modDirVersion == "7.1.9-m4-gpu-backport-20261008";
+    "the kernel builds no GPU or speaker codec driver" =
+      lib.all
+        (
+          option:
+          !(lib.elem (kernel.config."CONFIG_${option}" or "n") [
+            "y"
+            "m"
+          ])
+        )
+        [
+          "DRM_ASAHI"
+          "SND_SOC_TAS2764"
+          "SND_SOC_TAS2770"
+          "SND_SOC_APPLE_MCA"
+          "SND_SOC_CS42L84"
+        ];
+    "no out-of-tree modules" = cfg.boot.extraModulePackages == [ ];
+    "no kernel patches from the configuration" = cfg.boot.kernelPatches == [ ];
     "no devicetree overlays" = cfg.hardware.deviceTree.overlays == [ ];
-    "kernel parameters keep every qualified switch" = lib.all (p: lib.elem p params) qualified;
+    "kernel parameters keep the hardware switches" = lib.all (p: lib.elem p params) [
+      "maxcpus=10"
+      "idle=nop"
+      "arm64.nowfxt"
+    ];
+    "nvme-apple's delayed flush is off (#167)" = lib.elem "nvme_apple.flush_interval=0" params;
     "kernel parameters do not set init= or idle= twice" =
       !(lib.any (lib.hasPrefix "init=") params)
       && lib.length (lib.filter (lib.hasPrefix "idle=") params) == 1;
-    "speaker and headphone drivers are blacklisted" = lib.all (
-      m: lib.elem m cfg.boot.blacklistedKernelModules
-    ) offModules;
-    "no off-profile driver is loaded explicitly" =
-      !(lib.any (m: lib.elem m offModules) (cfg.boot.kernelModules ++ cfg.boot.initrd.kernelModules));
-    "every unported option is off" = lib.all (n: !cfg.hardware.m4-j713.${n}.enable) unported;
     "suspend and hibernate are off" =
       sleep.AllowSuspend == "no"
       && sleep.AllowHibernation == "no"

@@ -4,7 +4,6 @@
 # Apple hardware: QEMU's devicetree describes a virtual machine, not the Air.
 { pkgs, nixos }:
 let
-  inherit (pkgs) lib;
   test = nixos.extendModules { modules = [ ./selftest.nix ]; };
   cfg = test.config;
   toplevel = cfg.system.build.toplevel;

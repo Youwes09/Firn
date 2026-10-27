@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Sun, 25 Oct 2026 23:54:47 -0500
+Subject: [PATCH 33/41] arm64: dts: apple: t8132: Add AOP
+
+Add the AOP co-processor with its mailbox, DART and ADMAC, and its audio
+and ambient light sensor endpoints.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native), released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 56 ++++++++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index f8a0dd127..8d82c42d1 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -365,6 +365,62 @@ pinctrl_smc: pinctrl@38c820000 {
+ 			             <AIC_IRQ 558 IRQ_TYPE_LEVEL_HIGH>;
+ 		};
+ 
++		aop_mbox: mbox@390608000 {
++			compatible = "apple,t8132-asc-mailbox", "apple,asc-mailbox-v4";
++			reg = <0x3 0x90608000 0x0 0x4000>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 433 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 434 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 435 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 436 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "send-empty", "send-not-empty",
++					  "recv-empty", "recv-not-empty";
++			#mbox-cells = <0>;
++			status = "disabled";
++		};
++
++		aop_dart: iommu@390f00000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x3 0x90f00000 0x0 0x4000>;
++			#iommu-cells = <1>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 457 IRQ_TYPE_LEVEL_HIGH>;
++			status = "disabled";
++		};
++
++		aop_admac: dma-controller@393300000 {
++			compatible = "apple,t8132-admac", "apple,t8122-admac";
++			reg = <0x3 0x93300000 0x0 0x34000>;
++			#dma-cells = <1>;
++			dma-channels = <9>;
++			interrupts-extended = <0>,
++					      <0>,
++					      <&aic AIC_IRQ 478 IRQ_TYPE_LEVEL_HIGH>,
++					      <0>;
++			iommus = <&aop_dart 10>;
++			status = "disabled";
++		};
++
++		aop: aop@390c00000 {
++			compatible = "apple,t8132-aop", "apple,t6020-aop";
++			reg = <0x3 0x90c00000 0x0 0x1e0000>,
++			      <0x3 0x90600000 0x0 0x4000>;
++			mboxes = <&aop_mbox>;
++			mbox-names = "mbox";
++			iommus = <&aop_dart 0>;
++			status = "disabled";
++
++			aop_audio: audio {
++				compatible = "apple,t8132-aop-audio", "apple,t6030-aop-audio";
++				dmas = <&aop_admac 1>;
++				dma-names = "dma";
++			};
++
++			aop_als: als {
++				compatible = "apple,t8132-aop-als", "apple,aop-als";
++			};
++		};
++
+ 		pinctrl_aop: pinctrl@390824000 {
+ 			compatible = "apple,t8132-pinctrl", "apple,t8103-pinctrl";
+ 			reg = <0x3 0x90824000 0x0 0x4000>;

@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 08:42:30 -0500
+Subject: [PATCH 23/41] arm64: Allow FEAT_WFxT to be disabled on the command
+ line
+
+The kernel uses WFIT in __delay() whenever the CPUs implement FEAT_WFxT.
+Some systems need it off: Apple t8132 (M4) advertises FEAT_WFxT, but a
+kernel running at EL2 hangs in __delay() when it uses WFIT.
+
+Make the WFxT field of ID_AA64ISAR2_EL1 overridable, as MOPS already
+is, and add arm64.nowfxt as a shorthand for id_aa64isar2.wfxt=0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/admin-guide/kernel-parameters.txt | 3 +++
+ arch/arm64/kernel/pi/idreg-override.c           | 2 ++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
+index 208b6e996..7882a2e1e 100644
+--- a/Documentation/admin-guide/kernel-parameters.txt
++++ b/Documentation/admin-guide/kernel-parameters.txt
+@@ -588,6 +588,9 @@ Kernel parameters
+ 	arm64.nosve	[ARM64] Unconditionally disable Scalable Vector
+ 			Extension support
+ 
++	arm64.nowfxt	[ARM64] Unconditionally disable the WFET and WFIT
++			instructions (FEAT_WFxT)
++
+ 	ataflop=	[HW,M68k]
+ 
+ 	atarimouse=	[HW,MOUSE] Atari Mouse
+diff --git a/arch/arm64/kernel/pi/idreg-override.c b/arch/arm64/kernel/pi/idreg-override.c
+index bc57b290e..3099842b8 100644
+--- a/arch/arm64/kernel/pi/idreg-override.c
++++ b/arch/arm64/kernel/pi/idreg-override.c
+@@ -179,6 +179,7 @@ static const struct ftr_set_desc isar2 __prel64_initconst = {
+ 		FIELD("gpa3", ID_AA64ISAR2_EL1_GPA3_SHIFT, NULL),
+ 		FIELD("apa3", ID_AA64ISAR2_EL1_APA3_SHIFT, NULL),
+ 		FIELD("mops", ID_AA64ISAR2_EL1_MOPS_SHIFT, NULL),
++		FIELD("wfxt", ID_AA64ISAR2_EL1_WFxT_SHIFT, NULL),
+ 		{}
+ 	},
+ };
+@@ -243,6 +244,7 @@ static const struct {
+ 	  "id_aa64isar1.api=0 id_aa64isar1.apa=0 "
+ 	  "id_aa64isar2.gpa3=0 id_aa64isar2.apa3=0"	   },
+ 	{ "arm64.nomops",		"id_aa64isar2.mops=0" },
++	{ "arm64.nowfxt",		"id_aa64isar2.wfxt=0" },
+ 	{ "arm64.nomte",		"id_aa64pfr1.mte=0" },
+ 	{ "nokaslr",			"arm64_sw.nokaslr=1" },
+ 	{ "rodata=off",			"arm64_sw.rodataoff=1" },

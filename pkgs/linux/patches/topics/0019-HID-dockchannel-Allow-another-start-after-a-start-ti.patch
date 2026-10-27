@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 18:53:54 -0500
+Subject: [PATCH 19/41] HID: dockchannel: Allow another start after a start
+ timeout
+
+When an interface does not report ready in time, dchid_open() returns
+-ETIMEDOUT but leaves the interface marked as starting. Every later
+open then fails with -EINPROGRESS until the driver is reloaded, which
+it cannot be.
+
+Clear the flag on timeout so that the next open starts the interface
+again.
+
+Link: https://github.com/Kb2uka/Omarchy-M4-Native/blob/develop/docs/j713-input-startup-retry.md
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/hid/dockchannel-hid/dockchannel-hid.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+index 4bb603443..e37600f92 100644
+--- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
++++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+@@ -592,6 +592,7 @@ static int dchid_open(struct hid_device *hdev)
+ 
+ 		if (!wait_for_completion_timeout(&iface->ready, msecs_to_jiffies(START_TIMEOUT_MS))) {
+ 			dev_err(iface->dchid->dev, "iface %s start timed out\n", iface->name);
++			iface->starting = false;
+ 			return -ETIMEDOUT;
+ 		}
+ 	}

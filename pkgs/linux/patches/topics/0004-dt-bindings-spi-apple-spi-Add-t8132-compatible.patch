@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 26 Oct 2026 12:29:35 -0500
+Subject: [PATCH 04/41] dt-bindings: spi: apple,spi: Add t8132 compatible
+
+The SPI controllers on t8132 (M4) are compatible with those on t8103.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/spi/apple,spi.yaml | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/spi/apple,spi.yaml b/Documentation/devicetree/bindings/spi/apple,spi.yaml
+index 9356b9c33..abd6a13cf 100644
+--- a/Documentation/devicetree/bindings/spi/apple,spi.yaml
++++ b/Documentation/devicetree/bindings/spi/apple,spi.yaml
+@@ -16,7 +16,9 @@ properties:
+   compatible:
+     oneOf:
+       - items:
+-          - const: apple,t6020-spi
++          - enum:
++              - apple,t6020-spi
++              - apple,t8132-spi
+           - const: apple,t8103-spi
+       - items:
+           - enum:

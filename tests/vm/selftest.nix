@@ -50,7 +50,7 @@ in
       }
       efi=${lib.escapeShellArg cfg.efiMountPoint}
 
-      check "booted the pinned kernel" '[ "$(uname -r)" = ${modDirVersion} ]'
+      check "booted this repository's kernel" '[ "$(uname -r)" = ${modDirVersion} ]'
       check "first boot registered the store" '[ ! -e /nix-path-registration ] && nix-store --verify-path "$(readlink -f /run/current-system)"'
       check "system profile points at this generation" '[ "$(readlink -f /nix/var/nix/profiles/system)" = "$(readlink -f /run/current-system)" ]'
       check "root filesystem grew to its device" '
@@ -67,13 +67,12 @@ in
         [ "$(sha256sum "$efi/omarchy/boot.bin")" = "$before" ] && [ ! -e "$efi/omarchy/boot.bin.original" ]'
       check "suspend is refused" '! systemctl suspend'
       check "lid close powers off" 'grep -rqs "HandleLidSwitch=poweroff" /etc/systemd/logind.conf /etc/systemd/logind.conf.d'
-      check "speaker and headphone drivers are blacklisted" '
-        for m in snd_soc_tas2764 snd_soc_tas2770 snd_soc_apple_mca snd_soc_macaudio snd_soc_cs42l84; do
-          grep -qs "blacklist $m" /etc/modprobe.d/nixos.conf || exit 1
-          ! grep -q "^$m " /proc/modules || exit 1
+      check "no speaker codec driver is available" '
+        for m in snd_soc_tas2764 snd_soc_tas2770 snd_soc_apple_mca snd_soc_cs42l84; do
+          ! modinfo "$m" >/dev/null 2>&1 || exit 1
         done'
-      check "the qualified switches are on the kernel command line" '
-        for p in maxcpus=10 idle=nop dockchannel_hid.m4_power_v2=1 dockchannel_hid.m4_afe_action=1 pcie_apple.m4_link_diag=1 pcie_apple.m4_keep_clocks=1; do
+      check "the hardware switches are on the kernel command line" '
+        for p in maxcpus=10 idle=nop arm64.nowfxt; do
           grep -qw "$p" /proc/cmdline || exit 1
         done'
 

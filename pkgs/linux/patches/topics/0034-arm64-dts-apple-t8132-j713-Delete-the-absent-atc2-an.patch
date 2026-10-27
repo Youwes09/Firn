@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Tue, 1 Sep 2026 18:27:54 -0400
+Subject: [PATCH 34/41] arm64: dts: apple: t8132-j713: Delete the absent atc2
+ and atc3 domains
+
+The J713 has only atc0 and atc1. With the atc2 and atc3 power domains
+present, apple-pmgr-pwrstate fails to power them on ("PS atc2_common:
+Failed to reach power state on") and the boot stops. Delete their pmgr
+subtrees at board level, as t6022-j475d does for its absent ATC
+instances.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native), released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 05be5e9f8..dbd7df404 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -123,3 +123,23 @@ tp_accel {
+ };
+ 
+ #include "hwmon-laptop.dtsi"
++
++/*
++ * The J713 has two Type-C ports (atc0/atc1). The atc2/atc3 power domains
++ * never reach the on state here and stop the boot, so delete their pmgr
++ * subtrees, as t6022-j475d.dts does for its absent ATC instances.
++ */
++/delete-node/ &ps_atc2_pcie;
++/delete-node/ &ps_atc2_cio_pcie;
++/delete-node/ &ps_atc2_cio_usb;
++/delete-node/ &ps_atc2_cio;
++/delete-node/ &ps_atc2_usb;
++/delete-node/ &ps_atc2_usb_aon;
++/delete-node/ &ps_atc2_common;
++/delete-node/ &ps_atc3_pcie;
++/delete-node/ &ps_atc3_cio_pcie;
++/delete-node/ &ps_atc3_cio_usb;
++/delete-node/ &ps_atc3_cio;
++/delete-node/ &ps_atc3_usb;
++/delete-node/ &ps_atc3_usb_aon;
++/delete-node/ &ps_atc3_common;
