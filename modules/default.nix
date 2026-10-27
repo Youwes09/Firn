@@ -34,7 +34,7 @@
         "installed"
         "source"
       ];
-      default = "installed";
+      default = "source";
       description = ''
         The m1n1 stage 2 in boot.bin. "installed" keeps the installer's;
         "source" builds pkgs/m1n1 and makes it part of the generation, so a
@@ -47,7 +47,7 @@
         "release"
         "source"
       ];
-      default = "release";
+      default = "source";
       description = ''
         The devicetree in boot.bin. "release" is Omarchy-M4-Native's
         j713-cputemp binary; "source" is t8132-j713.dtb built with the kernel

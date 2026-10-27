@@ -141,21 +141,28 @@ certificates or timestamps before the network is up.
 - `arm64.nowfxt`: WFIT in `__delay()` reportedly stops the M4 at EL2. Not
   yet confirmed by booting without it.
 
-## 6. The loader from source has not booted
+## 6. Loader and devicetree from source: one open check
 
-`hardware.m4-j713.loader` defaults to the installer's m1n1. The `"source"`
-setting builds m1n1 from `c9ef56f7` with the stage 2 patch and the trust
-cache reservation, but has not booted yet. It cannot be compared with the
-installer's loader by hash: that one was built with a distribution
-toolchain (Rust 1.93), so the binaries differ even for the same source.
+`hardware.m4-j713.loader` and `hardware.m4-j713.devicetree` default to
+`"source"` since both booted; the installer's binaries stay selectable.
 
-The devicetree from the kernel series (`hardware.m4-j713.devicetree =
-"source"`, used by the example configuration) booted on 2026-10-27, five
-times: SMC, NVMe, Wi-Fi, Bluetooth, keyboard and trackpad came up, with
-the mailbox interrupts in binding order and no `nvmmu` window.
-`checks.devicetree` lists every difference from the release binary. The
-release devicetree still works with this kernel, but without the
-trackpad: it lacks the compatible that selects the version 2 reset.
+- The devicetree from the kernel series booted on 2026-10-27, six times:
+  SMC, NVMe, Wi-Fi, Bluetooth, keyboard and trackpad came up, with the
+  mailbox interrupts in binding order and no `nvmmu` window.
+  `checks.devicetree` lists every difference from the release binary. The
+  release devicetree still boots this kernel, but without the trackpad: it
+  lacks the compatible that selects the version 2 reset.
+- m1n1 from `c9ef56f7` with the stage 2 patch and the trust cache
+  reservation booted on 2026-10-27 (`asahi,m1n1-stage2-version` is
+  `m4-nix-c9ef56f-stage2`). It cannot be compared with the installer's
+  loader by hash: that one was built with a distribution toolchain
+  (Rust 1.93), so the binaries differ even for the same source.
+
+Open: which `/memreserve/` entry is the trust cache. The patch stops the
+boot if the reservation fails, and it did not, but confirming the address
+needs the ADT, which m1n1 passes as a `phram` region. The kernel has no
+MTD support and `STRICT_DEVMEM` blocks `/dev/mem`, so neither the ADT nor
+m1n1's log can be read on the Air as configured.
 
 ## 7. Not yet at Asahi standard
 

@@ -7,9 +7,6 @@
 
   hardware.m4-j713.enable = true;
   hardware.m4-j713.wifiRegion = "US";
-  # The release devicetree lacks the compatible that selects the trackpad's
-  # version 2 interface reset.
-  hardware.m4-j713.devicetree = "source";
 
   # For `nixos-rebuild --flake` and `nix shell` on the Air.
   nix.settings.experimental-features = [
