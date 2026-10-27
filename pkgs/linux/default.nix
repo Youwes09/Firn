@@ -5,7 +5,7 @@
   fetchFromGitHub,
   linuxKernel,
   llvmPackages_21,
-  ccache,
+  buildPackages,
   # Compile through the host's ccache (/var/cache/ccache, which must be in
   # nix.settings.extra-sandbox-paths). It changes no output, only build time.
   useCcache ? false,
@@ -46,7 +46,7 @@
     "LLVM=1"
   ]
   # Later CC= wins over the unwrapped clang the kernel build sets.
-  ++ lib.optional useCcache "CC=${lib.getExe ccache} ${lib.getExe llvmPackages_21.stdenv.cc.cc}";
+  ++ lib.optional useCcache "CC=${lib.getExe buildPackages.ccache} ${lib.getExe llvmPackages_21.stdenv.cc.cc}";
 
   extraMeta.platforms = [ "aarch64-linux" ];
 }).overrideAttrs
@@ -59,9 +59,12 @@
       installTargets = [ "zinstall" ];
     }
     // lib.optionalAttrs useCcache {
-      CCACHE_DIR = "/var/cache/ccache";
-      CCACHE_UMASK = "007";
-      # Generated headers get new timestamps in every build.
-      CCACHE_SLOPPINESS = "include_file_mtime,include_file_ctime,time_macros";
+      # The kernel builds with structured attributes, which export only env.
+      env = (old.env or { }) // {
+        CCACHE_DIR = "/var/cache/ccache";
+        CCACHE_UMASK = "007";
+        # Generated headers get new timestamps in every build.
+        CCACHE_SLOPPINESS = "include_file_mtime,include_file_ctime,time_macros";
+      };
     }
   )
