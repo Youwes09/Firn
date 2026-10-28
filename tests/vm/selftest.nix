@@ -18,7 +18,7 @@ in
     wantedBy = [ "multi-user.target" ];
     after = [
       "multi-user.target"
-      "firn-esp.service"
+      "firn-esp-tidy.service"
     ];
     path = with pkgs; [
       coreutils
@@ -59,6 +59,10 @@ in
         [ "$fs" -gt $(( size * 99 / 100 )) ]'
       check "installer firmware reached /lib/firmware" '[ "$(cat /lib/firmware/brcm/firn-test.bin)" = firn-test-firmware ] && [ -f /run/vendorfw/.vendorfw.manifest ]'
       check "EFI partition named by m1n1 is mounted" 'findmnt -n "$efi" && [ -f "$efi/m1n1/boot.bin" ]'
+      check "installer files moved off the EFI partition" '
+        [ ! -e "$efi/asahi" ] && [ ! -e "$efi/vendorfw" ]
+        [ "$(cat /var/lib/firn/installer/asahi/installer.log)" = firn-test-installer-data ]
+        [ -s /var/lib/firn/installer/vendorfw/manifest.txt ]'
       check "firn-boot reads the installer boot.bin as this generation" 'firn-boot install /run/current-system --efi "$efi" | tee /dev/stderr | grep -q "already this generation"'
       check "firn-boot refuses to write on a board that is not J713" '
         before=$(sha256sum "$efi/m1n1/boot.bin")

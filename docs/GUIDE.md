@@ -219,8 +219,9 @@ ls -l /boot/efi/m1n1/
 sudo reboot
 ```
 
-You should now see `boot.bin.original` (what the installer wrote) and
-`boot.bin.previous`, and the Mac boots the new version.
+You should now see `boot.bin.original` (what the installer wrote), and the
+Mac boots the new version. From the second update on there is also
+`boot.bin.previous`, the version before the current one.
 
 ### Stage F: recovery drill (read-only)
 
@@ -239,9 +240,9 @@ way before you ever need it.
    `EFI`, right next to the large Linux partition. Not the EFI partition at
    the very start of `disk0`.
 3. `sudo diskutil mount diskXsY` (your identifier from step 2), then
-   `ls /Volumes/*/m1n1/` should show `boot.bin` (and `boot.bin.original`,
-   `boot.bin.previous` after any update).
-4. Go back one version:
+   `ls /Volumes/*/m1n1/` should show `boot.bin`, and after updates
+   `boot.bin.original` and `boot.bin.previous`.
+4. Go back one version, if there is a `boot.bin.previous`:
    `sudo cp /Volumes/NAME/m1n1/boot.bin.previous /Volumes/NAME/m1n1/boot.bin`.
    Or to exactly what the installer wrote: use `boot.bin.original`.
 5. `sudo diskutil unmount diskXsY`, then restart into Firn.

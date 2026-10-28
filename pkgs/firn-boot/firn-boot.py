@@ -19,8 +19,8 @@ generation: m1n1 stage 2, kernel, devicetree, initrd and kernel parameters.
 The parameters must keep the kernel's hardware switches.
 
 Nothing is written without --apply. The first boot.bin this tool replaces (the
-installer's) is kept as boot.bin.original and never overwritten; every apply
-also keeps the replaced file as boot.bin.previous.
+installer's) is kept as boot.bin.original and never overwritten; every later
+apply keeps the replaced file as boot.bin.previous.
 """
 import argparse
 import hashlib
@@ -227,13 +227,25 @@ def compose(current, loader, kernel, dtb, initrd, args, init):
     return data, report
 
 
+def temporary(path):
+    return path.with_name(path.name + '.firn-tmp')
+
+
 def write_file(path, data):
-    temporary = path.with_name(path.name + '.firn-tmp')
-    with open(temporary, 'wb') as handle:
+    with open(temporary(path), 'wb') as handle:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    os.replace(temporary(path), path)
+
+
+def free_space(path):
+    stat = os.statvfs(path)
+    return stat.f_bavail * stat.f_frsize
+
+
+def megabytes(size):
+    return -(-size // 1000000)
 
 
 def sync_dir(path):
@@ -283,17 +295,29 @@ def install(args):
 
     original = boot.with_name(ORIGINAL)
     previous = boot.with_name(PREVIOUS)
-    stat = os.statvfs(boot.parent)
-    need = len(data) + len(current) + (0 if original.exists() else len(current))
-    require(stat.f_bavail * stat.f_frsize >= need + MARGIN, 'Not enough free space on the EFI partition')
-    if not original.exists():
+    for path in (boot, original, previous):
+        temporary(path).unlink(missing_ok=True)
+    # FAT has no links, so every kept file is a full copy. On the first apply
+    # the replaced file is the installer's, kept as boot.bin.original, so
+    # boot.bin.previous is written from the second apply on, after the old one
+    # is removed; boot.bin.original stays the fallback meanwhile. The new
+    # boot.bin is written beside the current one before it replaces it.
+    first = not original.exists()
+    freed = 0 if first or not previous.exists() else previous.stat().st_size
+    need = len(current) + len(data) + MARGIN
+    free = free_space(boot.parent) + freed
+    require(free >= need, f'Not enough free space on the EFI partition: '
+            f'{megabytes(need)} MB needed, {megabytes(free)} MB free')
+    if first:
         write_file(original, current)
         print(f'Kept the installed boot.bin as {original}')
-    write_file(previous, current)
+    else:
+        previous.unlink(missing_ok=True)
+        write_file(previous, current)
     write_file(boot, data)
     sync_dir(boot.parent)
     require(boot.read_bytes() == data, 'boot.bin did not read back after writing')
-    print(f'Wrote {boot}; the replaced file is {previous}')
+    print(f'Wrote {boot}; the replaced file is {original if first else previous}')
 
 
 def inspect(args):

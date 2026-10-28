@@ -17,6 +17,31 @@ let
     }).callPackage
       ../pkgs/m1n1
       { };
+  # The installer also leaves its data (asahi/) and the firmware it collected
+  # (vendorfw/) on the 500 MB partition. Firn reads neither: its firmware is
+  # in boot.bin. firn-boot needs the room for boot.bin.original and
+  # boot.bin.previous, so they move to the root filesystem, copied before
+  # they are removed.
+  esp-tidy = pkgs.writeShellScript "firn-esp-tidy" ''
+    set -eu
+    PATH=${lib.makeBinPath [ pkgs.coreutils ]}
+    esp=${lib.escapeShellArg cfg.efiMountPoint}
+    dest=/var/lib/firn/installer
+    mkdir -p "$dest"
+    chmod 700 "$dest"
+    for name in asahi vendorfw; do
+      [ -e "$esp/$name" ] || continue
+      target=$dest/$name
+      [ -e "$target" ] && target=$dest/$name-$(date +%Y%m%d%H%M%S)
+      rm -rf "$target.part"
+      cp -r --preserve=timestamps "$esp/$name" "$target.part"
+      sync -f "$target.part"
+      mv "$target.part" "$target"
+      rm -rf "''${esp:?}/$name"
+      echo "moved $esp/$name to $target"
+    done
+    sync -f "$esp"
+  '';
 in
 {
   config = lib.mkIf cfg.enable {
@@ -69,6 +94,18 @@ in
       '';
     };
 
+    systemd.services.firn-esp-tidy = {
+      description = "Move the installer's files off the EFI system partition";
+      wantedBy = [ "multi-user.target" ];
+      requires = [ "firn-esp.service" ];
+      after = [ "firn-esp.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = esp-tidy;
+      };
+    };
+
     boot.loader.grub.enable = false;
     boot.loader.external = {
       enable = true;
@@ -77,6 +114,8 @@ in
         if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg cfg.efiMountPoint}; then
           ${config.systemd.package}/bin/systemctl start firn-esp.service
         fi
+        # Run directly: a generation installed with "boot" is not running yet.
+        ${esp-tidy}
         exec ${lib.getExe firn-boot} install "$1" --efi ${lib.escapeShellArg cfg.efiMountPoint} --apply
       '';
     };

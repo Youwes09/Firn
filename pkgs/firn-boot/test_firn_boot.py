@@ -237,11 +237,53 @@ class Install(unittest.TestCase):
         layout = boot.parse(self.boot.read_bytes())
         self.assertEqual(layout['loader'], NEW_LOADER)
         self.assertIn('init=' + str(self.toplevel.resolve() / 'init'), layout['bootargs'].decode())
+        # The replaced file is the installer's, already kept once.
+        self.assertFalse((self.dir / 'boot.bin.previous').exists())
         (self.toplevel / 'kernel-params').write_text(' '.join(NIXOS_ARGS + ['quiet']))
         first = self.boot.read_bytes()
         self.assertEqual(self.run_tool('--apply')[0], 0)
         self.assertEqual((self.dir / 'boot.bin.original').read_bytes(), original)
         self.assertEqual((self.dir / 'boot.bin.previous').read_bytes(), first)
+        (self.toplevel / 'kernel-params').write_text(' '.join(NIXOS_ARGS))
+        second = self.boot.read_bytes()
+        self.assertEqual(self.run_tool('--apply')[0], 0)
+        self.assertEqual((self.dir / 'boot.bin.previous').read_bytes(), second)
+        self.assertEqual(sorted(os.listdir(self.dir)), ['boot.bin', 'boot.bin.original', 'boot.bin.previous'])
+
+    def with_free_space(self, size):
+        saved = boot.free_space
+        boot.free_space = lambda path: size
+        self.addCleanup(setattr, boot, 'free_space', saved)
+
+    def test_first_apply_needs_room_for_two_files(self):
+        current = len(self.boot.read_bytes())
+        new = len(boot.compose(self.boot.read_bytes(), **boot.read_toplevel(self.link))[0])
+        self.with_free_space(current + new + boot.MARGIN - 1)
+        before = self.boot.read_bytes()
+        status, _, err = self.run_tool('--apply')
+        self.assertEqual(status, 1)
+        self.assertIn('Not enough free space on the EFI partition', err)
+        self.assertIn('MB needed', err)
+        self.assertEqual(sorted(os.listdir(self.dir)), ['boot.bin'])
+        self.assertEqual(self.boot.read_bytes(), before)
+        self.with_free_space(current + new + boot.MARGIN)
+        self.assertEqual(self.run_tool('--apply')[0], 0)
+
+    def test_old_previous_counts_as_free(self):
+        self.assertEqual(self.run_tool('--apply')[0], 0)
+        (self.toplevel / 'kernel-params').write_text(' '.join(NIXOS_ARGS + ['quiet']))
+        self.assertEqual(self.run_tool('--apply')[0], 0)
+        previous = (self.dir / 'boot.bin.previous').stat().st_size
+        (self.toplevel / 'kernel-params').write_text(' '.join(NIXOS_ARGS))
+        current = len(self.boot.read_bytes())
+        new = len(boot.compose(self.boot.read_bytes(), **boot.read_toplevel(self.link))[0])
+        self.with_free_space(current + new + boot.MARGIN - previous)
+        self.assertEqual(self.run_tool('--apply')[0], 0)
+
+    def test_interrupted_write_is_cleaned_up(self):
+        (self.dir / 'boot.bin.firn-tmp').write_bytes(b'partial')
+        self.assertEqual(self.run_tool('--apply')[0], 0)
+        self.assertEqual(sorted(os.listdir(self.dir)), ['boot.bin', 'boot.bin.original'])
 
     def test_already_current_is_left_alone(self):
         self.assertEqual(self.run_tool('--apply')[0], 0)

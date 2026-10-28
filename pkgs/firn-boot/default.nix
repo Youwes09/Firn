@@ -10,7 +10,7 @@ let
 in
 stdenvNoCC.mkDerivation {
   pname = "firn-boot";
-  version = "0.3.0";
+  version = "0.4.0";
   src = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [

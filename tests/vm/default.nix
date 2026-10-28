@@ -53,6 +53,11 @@ pkgs.runCommand "firn-vm-boot"
     export MTOOLS_SKIP_CHECK=1
     mmd -i fat.img ::/m1n1
     mcopy -i fat.img parts/boot.bin ::/m1n1/boot.bin
+    # Stand-ins for what the installer also leaves there, which Firn moves.
+    mmd -i fat.img ::/asahi ::/vendorfw
+    echo firn-test-installer-data > installer.log
+    mcopy -i fat.img installer.log ::/asahi/installer.log
+    mcopy -i fat.img installer.log ::/vendorfw/manifest.txt
     dd if=fat.img of=esp.img bs=512 seek=2048 conv=notrunc status=none
 
     # QEMU's own devicetree plus the property m1n1 stage 1 sets.
