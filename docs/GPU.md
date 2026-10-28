@@ -24,9 +24,12 @@ There is no G15 (M3) support and no firmware ABI newer than macOS 13.5.
 ## What the M4 needs
 
 - A new generation, G16 (`gpu,t8132` in the ADT).
-- A new firmware ABI: the J713's GPU firmware is `mBoot-18000.161.10`
-  (macOS 26). Its structures differ from 13.5 in ways the reference
-  implementation documents.
+- A new firmware ABI. Linux runs the GPU firmware of the boot stub, which
+  the installer builds from macOS 26.5.1: `mBoot-18000.120.36`. Its
+  structures differ from 13.5 in ways the reference implementation
+  documents. The reference's firmware data maps onto Asahi's structures:
+  its root block is `InitData` field for field, and its main block is
+  `RuntimePointers` with the same 17 channels, each now 0x20 bytes.
 - A 43-bit GPU address space and a different page-table and initialisation
   flow, per the reference.
 
@@ -42,7 +45,8 @@ shim". It runs on the Air, but:
   `hw`, `fw`, `queue`, `mmu` or `alloc` modules, and duplicates the page
   tables (`m4_pgtable.rs`), VM, firmware bootstrap, queues and power
   management;
-- it accepts only firmware `mBoot-18000.161.10`;
+- it accepts firmware `mBoot-18000.161.10`, and `mBoot-18000.120.36` on
+  the J713 with `air_bootstrap_test=1`; both use the same structures;
 - it carries bring-up scaffolding: about 50 `unsafe` blocks, 26 info and
   warning prints, and benchmark, qualification and tracing code;
 - it changes the UAPI (`include/uapi/drm/asahi_drm.h`), which its Mesa
@@ -79,7 +83,7 @@ and are tested on the J713 where they can be.
 6. **Power.** Performance states and power management through the existing
    paths.
 7. **UAPI and Mesa.** Keep Asahi's UAPI if the hardware allows, otherwise
-   extend it the way Asahi versions it, and align `pkgs/mesa`.
+   extend it the way Asahi versions it, and package a matching Mesa.
 
 ## Rules for this work
 

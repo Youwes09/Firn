@@ -1,21 +1,23 @@
-# M4-Nix
+# Firn
 
 NixOS on the 13-inch M4 MacBook Air (Mac16,12 / J713). Experimental and
-unofficial; installed and booting on one Air.
+unofficial.
 
-The kernel is Asahi Linux's `asahi-7.1.9-1` with a series of J713 patches,
-the devicetree comes from the same series, and m1n1 stage 2 is upstream
-m1n1 with two patches, all built from source. The installer comes from
-[Omarchy-M4-Native](https://github.com/Kb2uka/Omarchy-M4-Native)'s alpha.1
-release. Their release loader and devicetree remain selectable with
-`hardware.m4-j713.loader = "installed"` and
-`hardware.m4-j713.devicetree = "release"`; the release devicetree has no
-trackpad with this kernel.
+Everything that runs on the Air is built from source here:
+
+- the kernel: Asahi Linux's `asahi-7.1.9-1` with a series of J713 patches,
+  which also carries the devicetree;
+- m1n1 stage 1 and stage 2: upstream m1n1 with one patch each;
+- the macOS-side installer: upstream asahi-installer with patches for the M4
+  and macOS 26.
+
+The installer runs under python.org's Python for macOS and Homebrew's libffi,
+both pinned by hash, as Asahi Linux's own installer does.
 
 ## What works
 
 Keyboard, trackpad, NVMe, Wi-Fi, Bluetooth, hinge-side USB-C and the
-simpledrm console. Set `hardware.m4-j713.wifiRegion` (for example `"US"`)
+simpledrm console. Set `hardware.firn.wifiRegion` (for example `"US"`)
 for 5 GHz Wi-Fi.
 
 Not supported: speakers, headphones, GPU, CPU idle states,
@@ -29,26 +31,24 @@ the storage controller; see [docs/ISSUES.md](docs/ISSUES.md).
 |---|---|
 | `modules/` | The NixOS module: kernel, boot, firmware, power, root image |
 | `pkgs/linux/` | The kernel and devicetree: configuration, patch series, module list |
-| `pkgs/m1n1/` | m1n1 stage 2 built from source |
-| `pkgs/mesa/` | Mesa for the M4 GPU (not yet used) |
-| `pkgs/m4-nix-boot/` | Writes each generation into `boot.bin`, with tests |
-| `pkgs/kit/` | The installer kit |
-| `pkgs/sources.nix` | Downloads pinned from Omarchy-M4-Native's release |
-| `tests/` | Policy checks, kernel module list, devicetree comparison, VM boot |
+| `pkgs/m1n1/` | m1n1 stage 1 and stage 2 |
+| `pkgs/installer/` | The macOS-side installer |
+| `pkgs/firn-boot/` | Writes each generation into `boot.bin`, with tests |
+| `pkgs/firn-report/` | A read-only hardware report |
+| `pkgs/kit/` | The installer kit: installer, OS package and guide |
+| `tests/` | Policy checks, kernel module list, devicetree schema, VM boot |
 | `examples/minimal/` | A console-only system |
 
 ## Booting
 
-The installer writes `<ESP>/omarchy/boot.bin`: m1n1 stage 2, kernel
-parameters, kernel, devicetree, initrd and the Apple firmware it collected.
-Every `nixos-rebuild boot|switch` runs
-[`m4-nix-boot`](pkgs/m4-nix-boot/m4-nix-boot.py), which writes the
-generation's loader, kernel, devicetree, initrd and parameters in the same
-layout and keeps the firmware. It refuses an unknown installed loader or
-release devicetree,
-parameters without `maxcpus=10 idle=nop arm64.nowfxt`, and any board but J713.
-The installer's file is kept as `boot.bin.original`, the last one as
-`boot.bin.previous`.
+The installer registers m1n1 stage 1 in a small macOS stub, which loads
+`<ESP>/m1n1/boot.bin`: m1n1 stage 2, kernel parameters, kernel, devicetree,
+and an initrd with the Apple firmware the installer collected. Every
+`nixos-rebuild boot|switch` runs [`firn-boot`](pkgs/firn-boot/firn-boot.py),
+which writes the generation's m1n1, kernel, devicetree, initrd and parameters
+in the same layout and keeps the firmware. It refuses parameters without
+`maxcpus=10 idle=nop arm64.nowfxt`, and any board but J713. The installer's
+file is kept as `boot.bin.original`, the last one as `boot.bin.previous`.
 
 ## Building
 
@@ -70,11 +70,12 @@ git tree leaves untracked files out, so build the system with
 
 ## Provenance
 
-The kernel patches keep their authors: upstream patches as posted, and
-Omarchy-M4-Native's changes credited to KB2UKA. The installer bundle, and
-the release m1n1 stage 2 and devicetree when selected, are downloaded
-unmodified from Omarchy-M4-Native's releases (MIT for the installer and
-m1n1, GPL-2.0-only for the devicetree);
-the installer's notices ship in the kit. `Install.command` is adapted from
-theirs (MIT, © studioxradio aka kb2uka). This project is not affiliated with or
-endorsed by Omarchy-M4-Native, Omarchy, Asahi Linux or Apple.
+Patches keep their authors. Upstream kernel patches are as posted, and
+changes from [Omarchy-M4-Native](https://github.com/Kb2uka/Omarchy-M4-Native)
+are credited to KB2UKA, in the kernel series and in m1n1's stage 1 patch.
+The installer patches credit the Gravity Linux installer, as shipped by
+Omarchy-M4-Native, where they follow it. The installer kit ships the
+licence notices of everything in the installer.
+
+Firn is not affiliated with or endorsed by Asahi Linux, Omarchy-M4-Native,
+Gravity Linux or Apple.

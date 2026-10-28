@@ -156,7 +156,7 @@ The series:
 `dockchannel_hid.m4_afe_action=1` are in the installer's qualified set, but
 no kernel tree defines them. `m4trace_hit=999` only arms a watchdog reset at
 a trace point that never fires. The source kernel and this repository drop
-all of them; only the installer's own boot.bin still carries them.
+all of them.
 
 ## 4. The clock is months behind in early boot
 
@@ -175,22 +175,22 @@ certificates or timestamps before the network is up.
 - `arm64.nowfxt`: WFIT in `__delay()` reportedly stops the M4 at EL2. Not
   yet confirmed by booting without it.
 
-## 6. Loader and devicetree from source: one open check
+## 6. The boot chain from source: what has booted
 
-`hardware.m4-j713.loader` and `hardware.m4-j713.devicetree` default to
-`"source"` since both booted; the installer's binaries stay selectable.
+Booted on a J713 (2026-10-27, six boots): the devicetree from the kernel
+series (SMC, NVMe, Wi-Fi, Bluetooth, keyboard and trackpad came up), and
+m1n1 stage 2 from `c9ef56f7` with the trust cache reservation and
+Omarchy-M4-Native's GPU handoff patch, behind their installer and stage 1.
 
-- The devicetree from the kernel series booted on 2026-10-27, six times:
-  SMC, NVMe, Wi-Fi, Bluetooth, keyboard and trackpad came up, with the
-  mailbox interrupts in binding order and no `nvmmu` window.
-  `checks.devicetree` lists every difference from the release binary. The
-  release devicetree still boots this kernel, but without the trackpad: it
-  lacks the compatible that selects the version 2 reset.
-- m1n1 from `c9ef56f7` with the stage 2 patch and the trust cache
-  reservation booted on 2026-10-27 (`asahi,m1n1-stage2-version` is
-  `m4-nix-c9ef56f-stage2`). It cannot be compared with the installer's
-  loader by hash: that one was built with a distribution toolchain
-  (Rust 1.93), so the binaries differ even for the same source.
+Not yet booted on hardware:
+
+- the installer built from asahi-installer with `pkgs/installer/patches`,
+  which writes `<ESP>/m1n1/boot.bin` and passes the EFI partition as
+  `asahi,efi-system-partition`;
+- m1n1 stage 1 built from `c9ef56f7` with the issue #82 patch;
+- m1n1 stage 2 without the GPU handoff patch: upstream m1n1 reports the
+  T8132 GPU as unsupported and leaves its devicetree node alone, and the
+  GPU's memory regions stay disabled.
 
 Open: which `/memreserve/` entry is the trust cache. The patch stops the
 boot if the reservation fails, and it did not, but confirming the address
@@ -209,8 +209,6 @@ m1n1's log can be read on the Air as configured.
 - The CPU frequency tables stop at the clocks iBoot hands over. That keeps
   the Air cool without a thermal policy, but it is policy in the
   devicetree, which upstream does not take.
-- The unported GPU driver (about 8,500 lines in `drivers/gpu/drm/asahi`, plus
-  RTKit and Rust binding changes it needs) is not in the series.
+- The GPU: Asahi's driver is in the tree but has no G16 support yet, and
+  the kernel does not build it; see [GPU.md](GPU.md).
 - The kernel links with GNU ld; their build used LLD.
-- The kernel keeps the installer kernel's version string,
-  `7.1.9-m4-gpu-backport-20261008`.
