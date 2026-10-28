@@ -25,9 +25,6 @@
 
   hardware.bluetooth.enable = true;
 
-  # Japanese (JIS) keyboard.
-  console.keyMap = "jp106";
-
   users.users.m4 = {
     isNormalUser = true;
     extraGroups = [ "wheel" ];
