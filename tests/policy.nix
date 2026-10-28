@@ -11,7 +11,7 @@ let
 
   rules = {
     "kernel is this repository's source build" =
-      kernel.modDirVersion == "7.1.9-m4-gpu-backport-20261008";
+      kernel.modDirVersion == "7.1.9-firn";
     "the kernel builds no GPU or speaker codec driver" =
       lib.all
         (
@@ -48,7 +48,7 @@ let
     "closing the lid powers off" =
       login.HandleLidSwitch == "poweroff" && login.HandleLidSwitchExternalPower == "poweroff";
     "initrd is gzip, as the installer requires" = cfg.boot.initrd.compressor == "gzip";
-    "boot.bin is written by m4-nix-boot" =
+    "boot.bin is written by firn-boot" =
       cfg.boot.loader.external.enable && !cfg.boot.loader.grub.enable;
     "no audio server is enabled" =
       !cfg.services.pipewire.enable && !(cfg.services.pulseaudio.enable or false);
@@ -56,7 +56,7 @@ let
   };
   failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) rules);
 in
-pkgs.runCommand "m4-nix-policy" { } (
+pkgs.runCommand "firn-policy" { } (
   if failed == [ ] then
     ''
       cat > $out <<'EOF'
@@ -64,5 +64,5 @@ pkgs.runCommand "m4-nix-policy" { } (
       EOF
     ''
   else
-    throw "M4-Nix policy violated:\n${lib.concatMapStrings (r: "  - ${r}\n") failed}"
+    throw "Firn policy violated:\n${lib.concatMapStrings (r: "  - ${r}\n") failed}"
 )

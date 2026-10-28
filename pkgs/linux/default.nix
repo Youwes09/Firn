@@ -17,8 +17,8 @@
 (linuxKernel.manualConfig {
   inherit randstructSeed features;
   version = "7.1.9";
-  # The configuration keeps the qualified kernel's LOCALVERSION.
-  modDirVersion = "7.1.9-m4-gpu-backport-20261008";
+  # CONFIG_LOCALVERSION in j713.config.
+  modDirVersion = "7.1.9-firn";
 
   src = fetchFromGitHub {
     owner = "AsahiLinux";
