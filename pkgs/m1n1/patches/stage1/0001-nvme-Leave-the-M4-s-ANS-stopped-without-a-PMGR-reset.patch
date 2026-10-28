@@ -1,0 +1,74 @@
+From a2509f76dfa5ad9cb514118d399e1586b4895deb Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Tue, 27 Oct 2026 22:06:39 -0500
+Subject: [PATCH] nvme: Leave the M4's ANS stopped without a PMGR reset
+
+On some 13-inch M4 MacBook Airs (J713, system firmware
+mBoot-18000.161.10) stage 1 freezes on the logo at every boot. Markers
+placed through nvme_shutdown() show rtkit_sleep() returning and the
+first pmgr_reset(die, "ANS") never returning. Other Airs boot the same
+loader.
+
+Skip the PMGR reset of ANS on T8132 after the co-processor is put to
+sleep. Linux's apple-nvme driver resets the stopped ANS itself before
+booting it again.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native, issue #82), released under
+the MIT license.
+---
+ src/nvme.c | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/src/nvme.c b/src/nvme.c
+index 5ced2c79..0775fdbf 100644
+--- a/src/nvme.c
++++ b/src/nvme.c
+@@ -176,6 +176,22 @@ static void free_queue(struct nvme_queue *q)
+     free(q->cqes);
+ }
+ 
++static void nvme_reset_ans(void)
++{
++    /*
++     * M4 (T8132): leave ANS asleep and stopped. A PMGR reset issued right after
++     * rtkit_sleep() stops the ANS CPU can wedge the machine on some units
++     * (J713, issue #82). Linux's apple-nvme driver resets the stopped ANS
++     * itself before booting it again.
++     */
++    if (nvme_type == NVME_T8132)
++        return;
++
++    // Some machines call this ANS, some ANS2...
++    pmgr_reset(nvme_die, "ANS");
++    pmgr_reset(nvme_die, "ANS2");
++}
++
+ static void nvme_poll_syslog(void)
+ {
+     struct rtkit_message msg;
+@@ -449,9 +465,7 @@ out_disable_ctrl:
+     nvme_poll_syslog();
+ out_shutdown:
+     rtkit_sleep(nvme_rtkit);
+-    // Some machines call this ANS, some ANS2...
+-    pmgr_reset(nvme_die, "ANS");
+-    pmgr_reset(nvme_die, "ANS2");
++    nvme_reset_ans();
+ out_rtkit:
+     rtkit_free(nvme_rtkit);
+ out_sart:
+@@ -537,9 +551,7 @@ void nvme_shutdown(void)
+         printf("nvme: timeout while waiting for CSTS.RDY to clear\n");
+ 
+     rtkit_sleep(nvme_rtkit);
+-    // Some machines call this ANS, some ANS2...
+-    pmgr_reset(nvme_die, "ANS");
+-    pmgr_reset(nvme_die, "ANS2");
++    nvme_reset_ans();
+     rtkit_free(nvme_rtkit);
+     sart_free(nvme_sart);
+     asc_free(nvme_asc);
+-- 
+2.54.0
+
