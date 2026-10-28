@@ -1,0 +1,203 @@
+From 0c77ba031442b06bf67a07bed5a152a08c32d760 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 27 Oct 2026 22:04:20 -0500
+Subject: [PATCH 6/8] osinstall: Build next_object from m1n1 payloads
+
+The M4 machines have no bootloader after m1n1 yet: Linux boots from m1n1
+stage 2 directly, with the kernel, devicetree and initramfs appended to it
+as payloads. The firmware the installer collects has to reach Linux in
+that initramfs, so next_object cannot be shipped prebuilt in the OS
+package.
+
+Let an OS template describe the parts instead:
+
+    "payloads": {
+        "m1n1": {"file": ..., "sha256": ...},
+        "kernel": ..., "dtb": ..., "initramfs": ...,
+        "bootargs": "..."
+    }
+
+The parts are read from the package and checked (SHA-256, size, gzip for
+the kernel and initramfs, the devicetree header) when the package is
+loaded, before the disk is touched. After the firmware is collected, the
+installer appends its cpio archive to the initramfs, joins stage 2, the
+boot arguments and the payloads in the layout m1n1's payload parser reads,
+and writes the result to next_object on the EFI partition. It ends without
+a terminator, since stage 1 appends its variables to the image it
+chainloads.
+
+The approach and the part checks follow the Gravity Linux installer (MIT)
+as shipped by Omarchy-M4-Native, which writes a fixed path; this writes
+the template's next_object.
+---
+ src/osinstall.py | 35 +++++++++++++++++++-
+ src/payloads.py  | 86 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 120 insertions(+), 1 deletion(-)
+ create mode 100644 src/payloads.py
+
+diff --git a/src/osinstall.py b/src/osinstall.py
+index c721fcb..eaa1f00 100644
+--- a/src/osinstall.py
++++ b/src/osinstall.py
+@@ -1,7 +1,7 @@
+ # SPDX-License-Identifier: MIT
+ import os, shutil, sys, stat, subprocess, urlcache, zipfile, logging
+ 
+-import m1n1
++import m1n1, payloads
+ from util import *
+ import unicodedata
+ 
+@@ -15,6 +15,7 @@ class OSInstaller(PackageInstaller):
+         self.name = template["default_os_name"]
+         self.ucache = None
+         self.efi_part = None
++        self.payloads = None
+         self.idata_targets = []
+         self.install_size = self.min_size
+ 
+@@ -60,6 +61,15 @@ class OSInstaller(PackageInstaller):
+         self.flush_progress()
+         logging.info(f"OS package opened")
+ 
++        spec = self.template.get("payloads", None)
++        if spec is not None:
++            if not self.template.get("next_object", None) or not self.needs_firmware:
++                raise Exception("payloads needs a next_object and a partition with copy_firmware")
++            p_progress("Checking the boot payloads...")
++            self.payloads = payloads.read(self.pkg, spec)
++            self.flush_progress()
++            logging.info(f"Boot payloads checked")
++
+     def flush_progress(self):
+         if self.ucache:
+             self.ucache.flush_progress()
+@@ -109,6 +119,26 @@ class OSInstaller(PackageInstaller):
+ 
+             prev = info.name
+ 
++    def write_next_object(self):
++        p_progress("Building the boot object...")
++        logging.info("OSInstaller.write_next_object()")
++
++        if not self.firmware_package.closed:
++            raise Exception("The firmware must be collected before the boot object is built")
++        with open(self.firmware_package.cpio_path, "rb") as fd:
++            firmware = fd.read()
++        data = payloads.build(self.payloads, self.template["payloads"]["bootargs"], firmware)
++
++        mountpoint = self.dutil.mount(self.efi_part.name)
++        path = os.path.join(mountpoint, self.template["next_object"])
++        logging.info(f"Boot object ({len(data)} bytes) -> {path}")
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(path + ".new", "wb") as fd:
++            fd.write(data)
++            fd.flush()
++            os.fsync(fd.fileno())
++        os.replace(path + ".new", path)
++
+     def download_extras(self):
+         p_progress("Downloading extra files...")
+         logging.info("OSInstaller.download_extras()")
+@@ -176,6 +206,9 @@ class OSInstaller(PackageInstaller):
+             assert self.efi_part is not None
+             self.download_extras()
+ 
++        if self.payloads is not None:
++            self.write_next_object()
++
+         p_progress("Preparing to finish installation...")
+ 
+         logging.info(f"Building boot object")
+diff --git a/src/payloads.py b/src/payloads.py
+new file mode 100644
+index 0000000..4d25fe8
+--- /dev/null
++++ b/src/payloads.py
+@@ -0,0 +1,86 @@
++# SPDX-License-Identifier: MIT
++"""Build next_object from m1n1 stage 2 and its payloads.
++
++Machines with no bootloader after m1n1 yet boot Linux from m1n1 stage 2
++directly: next_object is stage 2 followed by its boot arguments, the kernel,
++the devicetree and the initramfs. The firmware the installer collects has to
++be in that initramfs, so the installer joins the parts from the OS package
++with the firmware archive, instead of the package shipping next_object.
++
++An OS template asks for this with
++    "payloads": {
++        "m1n1": {"file": ..., "sha256": ...},
++        "kernel": ..., "dtb": ..., "initramfs": ...,
++        "bootargs": "...",
++    }
++where kernel and initramfs are gzip compressed.
++"""
++import hashlib, re, struct
++
++PARTS = {
++    "m1n1": 4 << 20,
++    "kernel": 64 << 20,
++    "dtb": 2 << 20,
++    "initramfs": 128 << 20,
++}
++MAX_FIRMWARE = 128 << 20
++MAX_BOOTARGS = 1024
++
++GZIP = b"\x1f\x8b"
++FDT_MAGIC = b"\xd0\x0d\xfe\xed"
++CPIO_NEWC = b"070701"
++CPIO_TRAILER = b"TRAILER!!!\0"
++INITRAMFS = b"m1n1_initramfs"
++
++def validate(spec):
++    if not isinstance(spec, dict) or set(spec) != set(PARTS) | {"bootargs"}:
++        raise Exception(f"payloads must list {', '.join(PARTS)} and bootargs")
++    args = spec["bootargs"]
++    if (not isinstance(args, str) or not 0 < len(args) <= MAX_BOOTARGS
++            or not all(32 <= ord(c) < 127 for c in args)):
++        raise Exception("bootargs must be one line of printable ASCII")
++    for name in PARTS:
++        part = spec[name]
++        if (not isinstance(part, dict) or set(part) != {"file", "sha256"}
++                or not isinstance(part["file"], str)
++                or not re.fullmatch(r"[0-9a-f]{64}", str(part["sha256"]))):
++            raise Exception(f"payloads.{name} must be a file and its SHA-256")
++
++def read(pkg, spec):
++    """Read the parts from the OS package and check them."""
++    validate(spec)
++    parts = {}
++    for name, limit in PARTS.items():
++        info = pkg.getinfo(spec[name]["file"])
++        if not 0 < info.file_size <= limit:
++            raise Exception(f"{name} payload is empty or larger than {limit} bytes")
++        data = pkg.read(info)
++        if hashlib.sha256(data).hexdigest() != spec[name]["sha256"]:
++            raise Exception(f"{name} payload does not match its SHA-256")
++        parts[name] = data
++
++    for name in ("kernel", "initramfs"):
++        if not parts[name].startswith(GZIP):
++            raise Exception(f"{name} payload is not gzip compressed")
++    dtb = parts["dtb"]
++    if dtb[:4] != FDT_MAGIC or len(dtb) < 40 or struct.unpack_from(">I", dtb, 4)[0] != len(dtb):
++        raise Exception("dtb payload is not a flattened devicetree")
++    return parts
++
++def build(parts, bootargs, firmware):
++    """Return next_object: stage 2, its boot arguments and payloads, with the
++    firmware archive appended to the initramfs."""
++    if (not firmware.startswith(CPIO_NEWC) or len(firmware) > MAX_FIRMWARE
++            or CPIO_TRAILER not in firmware[-512:]):
++        raise Exception("The firmware archive is not a complete newc cpio archive")
++
++    initramfs = parts["initramfs"] + bytes(-len(parts["initramfs"]) % 4) + firmware
++    # No terminator: m1n1 stage 1 appends its variables to the chainloaded
++    # image, then pads it to end the payloads.
++    return b"".join((
++        parts["m1n1"],
++        b"chosen.bootargs=" + bootargs.encode("ascii") + b"\n",
++        parts["kernel"],
++        parts["dtb"],
++        INITRAMFS + struct.pack("<I", len(initramfs)) + initramfs,
++    ))

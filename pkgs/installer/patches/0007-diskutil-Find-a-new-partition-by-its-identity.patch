@@ -1,0 +1,62 @@
+From 3203a8ad3bb19d34d81467936f37fa03b69f7989 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 27 Oct 2026 22:05:12 -0500
+Subject: [PATCH 7/8] diskutil: Find a new partition by its identity
+
+addPartition() took the partition after the one it added after to be the
+new one. macOS can add an Apple_Boot helper partition at the same time,
+and the installer would then format and write the next OS partition onto
+the helper.
+
+Compare the disk's partitions before and after, by UUID, leave out
+Apple_Boot helpers, and require exactly one new partition.
+
+The Gravity Linux installer (MIT) as shipped by Omarchy-M4-Native
+reports this on macOS 26 and matches the new partition by UUID and type.
+It has not been reproduced here.
+---
+ src/diskutil.py | 27 +++++++++++++++------------
+ 1 file changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/src/diskutil.py b/src/diskutil.py
+index d9e73c5..5461e9c 100644
+--- a/src/diskutil.py
++++ b/src/diskutil.py
+@@ -246,22 +246,25 @@ class DiskUtil:
+             and fs.lower() == "apfs"):
+             return self.partitionDisk(after, fs, label, size)
+ 
+-        self.action("addPartition", after, fs, label, size, verbose=True)
+-
+         disk = after.rsplit("s", 1)[0]
+-
+         self.get_list()
+-        parts = self.get_partitions(disk)
++        before = {p.uuid for p in self.get_partitions(disk) if not p.free}
+ 
+-        for i, part in enumerate(parts):
+-            logging.info(f"Checking #{i} {part.name}...")
+-            if part.name == after:
+-                logging.info(f"Found previous partition {part.name}...")
+-                new_part = self.get_partition_info(parts[i + 1].name, refresh_apfs=(fs == "apfs"))
+-                logging.info(f"New partition: {new_part!r}")
+-                return new_part
++        self.action("addPartition", after, fs, label, size, verbose=True)
+ 
+-        raise Exception("Could not find new partition")
++        self.get_list()
++        # The new partition need not follow the one it was added after: macOS
++        # may also add an Apple_Boot helper partition.
++        new = [p for p in self.get_partitions(disk)
++               if not p.free and p.uuid not in before and p.type != "Apple_Boot"]
++        for part in new:
++            logging.info(f"Added: {part.name} ({part.type}, {part.uuid})")
++        if len(new) != 1:
++            raise Exception(f"Could not identify the new partition ({len(new)} candidates)")
++
++        new_part = self.get_partition_info(new[0].name, refresh_apfs=(fs == "apfs"))
++        logging.info(f"New partition: {new_part!r}")
++        return new_part
+ 
+     def changeVolumeRole(self, volume, role):
+         self.action("apfs", "changeVolumeRole", volume, role, verbose=True)

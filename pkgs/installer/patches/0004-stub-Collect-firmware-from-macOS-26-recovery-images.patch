@@ -1,0 +1,70 @@
+From 053d9f95e6f58590530bf8d1ed14e2b03b34262f Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 27 Oct 2026 22:00:49 -0500
+Subject: [PATCH 4/8] stub: Collect firmware from macOS 26 recovery images
+
+macOS 26 recovery images moved two things the stub collects firmware from:
+
+- The Wi-Fi firmware is in the WLAN driver extension. The copy left in
+  usr/share/firmware/wifi has no firmware for the M4 machines' 4388 C2
+  modules, so read the extension's when it exists, without skipping
+  C-4388__s-C2.
+- There is no usr/sbin/appleh13camerad. ISPFWCollection already warns and
+  carries on without it, but the fallback archive names it explicitly and
+  tar then fails the install. Archive it only when it exists.
+
+The fallback archive still holds usr/share/firmware only, so it lacks the
+extension's Wi-Fi firmware on macOS 26.
+
+Both were checked against the macOS 26.5.1 (25F80) recovery image. The
+Gravity Linux installer (MIT) as shipped by Omarchy-M4-Native reads the
+extension too.
+---
+ src/stub.py | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/src/stub.py b/src/stub.py
+index f1420f8..5a87d1f 100644
+--- a/src/stub.py
++++ b/src/stub.py
+@@ -10,6 +10,9 @@ from asahi_firmware.als import AlsFWCollection, FACTORY_DIR
+ from recovery import RecoveryImage
+ from util import *
+ 
++# Where macOS 26 keeps the Wi-Fi firmware, in the mounted recovery image.
++WLAN_DEXT_FIRMWARE = "recovery/System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/Firmware"
++
+ class StubInstaller(PackageInstaller):
+     def __init__(self, sysinfo, dutil, osinfo):
+         super().__init__()
+@@ -483,8 +486,12 @@ class StubInstaller(PackageInstaller):
+         logging.info("Attaching recovery ramdisk")
+         subprocess.run(["hdiutil", "attach", "-quiet", "-readonly", "-mountpoint", "recovery", img],
+                        check=True)
+-        logging.info("Collecting WiFi firmware")
+-        col = WiFiFWCollection("recovery/usr/share/firmware/wifi/")
++        if os.path.isdir(WLAN_DEXT_FIRMWARE):
++            logging.info("Collecting WiFi firmware from the WLAN driver extension")
++            col = WiFiFWCollection(WLAN_DEXT_FIRMWARE, skip_dirs=())
++        else:
++            logging.info("Collecting WiFi firmware")
++            col = WiFiFWCollection("recovery/usr/share/firmware/wifi/")
+         pkg.add_files(sorted(col.files()))
+         logging.info("Collecting Bluetooth firmware")
+         col = BluetoothFWCollection("recovery/usr/share/firmware/bluetooth/")
+@@ -507,10 +514,14 @@ class StubInstaller(PackageInstaller):
+             os.makedirs(f"{tmpdir}/apple")
+             for name, fwf in als_files:
+                 open(f"{tmpdir}/{name}", "wb").write(fwf.data)
++            # macOS 26 recovery images have no camera daemon.
++            camerad = []
++            if os.path.exists("recovery/usr/sbin/appleh13camerad"):
++                camerad = ["-C", "../../usr/sbin", "appleh13camerad"]
+             subprocess.run(["tar", "czf", "all_firmware.tar.gz",
+                             "fud_firmware",
+                             "-C", "recovery/usr/share", "firmware",
+-                            "-C", "../../usr/sbin", "appleh13camerad",
++                            *camerad,
+                             "-C", os.path.dirname(FACTORY_DIR), os.path.basename(FACTORY_DIR),
+                             "-C", tmpdir, "apple",
+                             ], check=True)
