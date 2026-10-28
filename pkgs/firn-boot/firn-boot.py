@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """Write the J713 m1n1 boot.bin for a NixOS generation.
 
-boot.bin is the file the J713 installer (Omarchy-M4-Native's patched
-asahi-installer, src/m4boot.py) writes to <ESP>/omarchy/boot.bin. Its layout:
+boot.bin is the file the installer writes to <ESP>/m1n1/boot.bin for an OS
+booted by m1n1 stage 2 directly (its payloads.py). Its layout:
 
-    m1n1 stage 2 loader
+    m1n1 stage 2
     chosen.bootargs=<one printable line>\\n
     gzip kernel
     flattened devicetree
     m1n1_initramfs <u32 LE length> <gzip initrd> <zero pad to 4> <firmware cpio>
 
 The firmware cpio holds the Apple firmware the installer collected on this Mac,
-under /vendorfw. m1n1 stage 1 appends the root and EFI partition identities at
-boot, so they are not in the file.
+under /vendorfw. m1n1 stage 1 appends its variables to the image at boot, so
+they are not in the file.
 
-This keeps the installed loader and firmware and writes the generation's own
-kernel, devicetree, initrd and kernel parameters in the installer's layout.
-The devicetree and loader must be pinned below, and the parameters must keep
-the kernel's hardware switches.
+This keeps the installed firmware and writes everything else from the
+generation: m1n1 stage 2, kernel, devicetree, initrd and kernel parameters.
+The parameters must keep the kernel's hardware switches.
 
 Nothing is written without --apply. The first boot.bin this tool replaces (the
 installer's) is kept as boot.bin.original and never overwritten; every apply
@@ -31,25 +30,6 @@ import struct
 import sys
 import zlib
 
-DTBS = {
-    '08e8e719381f88a1e50d821c145dad5b2d97fd772609e13d7778e19795e9cad1':
-        'j713-cputemp: poweroff cells, bounded cpufreq, CPU temperature reporting',
-}
-# m1n1 stage 2 without the backlight display handoff, notch hidden.
-# 3a3f7a64 is the update 4 installer's boot/loader.bin.
-LOADERS = {
-    '3a3f7a64c65fc366d5ac9aece3e1bee64119be012aa1ec5b15d2743c6f91fce4':
-        'stage 2 from the alpha.1 installer (update 4), notch hidden',
-    '7bc78b9138ae449eeab08d0a713c96f25e0d7477b7a48f2804da2c17509a9609': 'stage 2, notch hidden',
-}
-REFUSED_LOADERS = {
-    'b86aee6840fe670b592271ec2816d42c5515cddc20a14e08bdc5bcbce547e6fd':
-        'backlight stage 2; it needs the backlight devicetree',
-    '692f656cd8f6dfb2530172da518f9e2e18e6c5032df3062cd603eb4539e4c405':
-        'backlight stage 2 with the notch shown; it needs the backlight devicetree',
-    'f2417a74d13838004847a6fbdf946b524005301b88b5a403b1e79cb36d0ec7ca':
-        'stage 2 with the notch shown; notch mode is off in this profile',
-}
 # Kernel parameters the J713 does not boot reliably without; a generation
 # that drops one is refused. WFIT in __delay() stops the M4 at EL2.
 REQUIRED_ARGS = (
@@ -63,7 +43,7 @@ GZIP = b'\x1f\x8b\x08'
 FDT_MAGIC = b'\xd0\x0d\xfe\xed'
 INITRAMFS = b'm1n1_initramfs'
 MAX_BOOTARGS = 1024
-# The installer's limits (src/m4boot.py LIMITS); m1n1 stage 2 is built for them.
+# The installer's limits (payloads.py).
 LIMITS = {'loader': 4 << 20, 'kernel': 64 << 20, 'dtb': 2 << 20, 'initrd': 128 << 20,
           'firmware': 128 << 20}
 FIRMWARE_DIR = 'vendorfw'
@@ -72,7 +52,8 @@ CPIO_MAGIC = b'070701'
 TRAILER = 'TRAILER!!!'
 MARGIN = 1 << 20
 STORE = '/nix/store/'
-BOOT_DIR = 'omarchy'
+BOOT_DIR = 'm1n1'
+DTB = 'dtbs/apple/t8132-j713.dtb'
 ORIGINAL = 'boot.bin.original'
 PREVIOUS = 'boot.bin.previous'
 
@@ -210,30 +191,16 @@ def bootargs_line(args, init):
     return line
 
 
-def describe(table, digest):
-    return table.get(digest, 'unknown')
+def compose(current, loader, kernel, dtb, initrd, args, init):
+    """Return (new boot.bin bytes, report lines): the generation's parts with
+    the firmware from the current boot.bin."""
+    _, firmware = split_initramfs(parse(current)['initramfs'])
+    names = check_firmware(firmware)
+    require(len(firmware) <= LIMITS['firmware'], 'The firmware archive is too large')
 
-
-def compose(current, kernel, dtb, initrd, args, init, allowed_loaders=(), unpinned=(),
-            loader=None):
-    """Return (new boot.bin bytes, report lines). Refuses an unpinned loader or
-    devicetree, unless unpinned names 'dtb' for the generation's own source
-    build, which still gets every format check. A loader passed in comes from
-    the generation's own source build and replaces the installed one."""
-    layout = parse(current)
-    if loader is not None:
-        layout['loader'] = loader
-    loader_sha = sha(layout['loader'])
-    require(loader_sha not in REFUSED_LOADERS,
-            f'Loader {loader_sha} is the {REFUSED_LOADERS.get(loader_sha)}. '
-            'Pass --loader-from with a boot.bin that has a non-backlight loader')
-    require(loader is not None or loader_sha in LOADERS or loader_sha in allowed_loaders,
-            f'Installed loader {loader_sha} is not one this tool knows. Review it, then pass '
-            '--allow-loader ' + loader_sha)
-    require(len(layout['loader']) <= LIMITS['loader'], 'Loader is too large')
+    require(0 < len(loader) <= LIMITS['loader'], 'm1n1 stage 2 is empty or too large')
     require(kernel[:3] == GZIP and gzip_end(kernel, 0) == len(kernel), 'Kernel is not one gzip member')
     require(len(kernel) <= LIMITS['kernel'], 'The kernel is larger than the installer allows')
-    require(sha(dtb) in DTBS or 'dtb' in unpinned, f'Devicetree {sha(dtb)} is not pinned')
     require(fdt_size(dtb, 0) == len(dtb), 'Devicetree is not one flattened devicetree')
     require(len(dtb) <= LIMITS['dtb'], 'The devicetree is larger than the installer allows')
     require(BOARD + b'\0' in dtb, 'Devicetree is not for apple,j713')
@@ -241,11 +208,8 @@ def compose(current, kernel, dtb, initrd, args, init, allowed_loaders=(), unpinn
             'The initrd must be one gzip member (boot.initrd.compressor = "gzip")')
     require(len(initrd) <= LIMITS['initrd'], 'The initrd is larger than the installer allows')
 
-    _, firmware = split_initramfs(layout['initramfs'])
-    names = check_firmware(firmware)
-    require(len(firmware) <= LIMITS['firmware'], 'The firmware archive is too large')
     initramfs = initrd + bytes(-len(initrd) % 4) + firmware
-    new = {'loader': layout['loader'], 'bootargs': bootargs_line(args, init), 'kernel': kernel,
+    new = {'loader': loader, 'bootargs': bootargs_line(args, init), 'kernel': kernel,
            'dtb': dtb, 'initramfs': initramfs}
     data = join(new)
     check = parse(data)
@@ -253,19 +217,18 @@ def compose(current, kernel, dtb, initrd, args, init, allowed_loaders=(), unpinn
     require(split_initramfs(check['initramfs']) == (initrd, firmware), 'Composed initramfs does not split back')
 
     report = [
-        f'loader     {loader_sha}  ' + ('from this generation' if loader is not None else describe(
-            {**LOADERS, **dict.fromkeys(allowed_loaders, 'allowed by flag')}, loader_sha)),
-        f'kernel     {sha(kernel)}  {len(kernel)} bytes, from this generation',
-        f'devicetree {sha(dtb)}  {DTBS.get(sha(dtb), "unpinned, from this generation")}',
-        f'firmware   {len(names)} entries, {len(firmware)} bytes, kept from the installed boot.bin',
+        f'loader     {sha(loader)}  {len(loader)} bytes',
+        f'kernel     {sha(kernel)}  {len(kernel)} bytes',
+        f'devicetree {sha(dtb)}  {len(dtb)} bytes',
         f'initrd     {sha(initrd)}  {len(initrd)} bytes',
+        f'firmware   {len(names)} entries, {len(firmware)} bytes, kept from the installed boot.bin',
         'bootargs   ' + new['bootargs'][len(BOOTARGS):-1].decode(),
     ]
     return data, report
 
 
 def write_file(path, data):
-    temporary = path.with_name(path.name + '.m4nix-tmp')
+    temporary = path.with_name(path.name + '.firn-tmp')
     with open(temporary, 'wb') as handle:
         handle.write(data)
         handle.flush()
@@ -292,14 +255,14 @@ def read_toplevel(toplevel):
     # A profile link (system-N-link) must not end up in init=; boot the store path.
     toplevel = Path(os.path.realpath(toplevel))
     require(str(toplevel).startswith(STORE), f'{toplevel} is not a NixOS generation in {STORE}')
+    require((toplevel / 'm1n1.bin').is_file(), f'{toplevel} has no m1n1.bin')
     return {
+        'loader': (toplevel / 'm1n1.bin').read_bytes(),
         'kernel': (toplevel / 'kernel').read_bytes(),
-        'dtb': (toplevel / 'dtbs' / 'apple' / 'm4-nix-j713.dtb').read_bytes(),
+        'dtb': (toplevel / DTB).read_bytes(),
         'initrd': (toplevel / 'initrd').read_bytes(),
         'args': (toplevel / 'kernel-params').read_text().split(),
         'init': str(toplevel / 'init'),
-        # Present when the generation builds m1n1 from source.
-        'loader': (toplevel / 'm1n1.bin').read_bytes() if (toplevel / 'm1n1.bin').exists() else None,
     }
 
 
@@ -309,15 +272,7 @@ def install(args):
     boot = Path(args.efi, BOOT_DIR, 'boot.bin')
     require(boot.is_file() and not boot.is_symlink(), f'{boot} is missing (is the ESP mounted at {args.efi}?)')
     current = boot.read_bytes()
-    generation = read_toplevel(args.toplevel)
-    base = current
-    if args.loader_from:
-        layout = parse(current)
-        layout['loader'] = parse(Path(args.loader_from).read_bytes())['loader']
-        base = join(layout)
-    data, report = compose(base, generation['kernel'], generation['dtb'], generation['initrd'],
-                           generation['args'], generation['init'], tuple(args.allow_loader),
-                           tuple(args.allow_unpinned), generation['loader'])
+    data, report = compose(current, **read_toplevel(args.toplevel))
     print('\n'.join(report))
     if data == current:
         print('boot.bin is already this generation')
@@ -342,12 +297,10 @@ def install(args):
 
 
 def inspect(args):
-    data = Path(args.file).read_bytes()
-    layout = parse(data)
-    loader = sha(layout['loader'])
-    print(f'loader     {loader}  {describe({**LOADERS, **REFUSED_LOADERS}, loader)}')
+    layout = parse(Path(args.file).read_bytes())
+    print(f'loader     {sha(layout["loader"])}  {len(layout["loader"])} bytes')
     print(f'kernel     {sha(layout["kernel"])}  {len(layout["kernel"])} bytes')
-    print(f'devicetree {sha(layout["dtb"])}  {describe(DTBS, sha(layout["dtb"]))}')
+    print(f'devicetree {sha(layout["dtb"])}  {len(layout["dtb"])} bytes')
     print('bootargs   ' + layout['bootargs'][len(BOOTARGS):-1].decode())
     try:
         initrd, firmware = split_initramfs(layout['initramfs'])
@@ -367,18 +320,13 @@ def main(argv=None):
     put.add_argument('toplevel', help='the generation (/nix/var/nix/profiles/system-N-link)')
     put.add_argument('--efi', default='/boot/efi', help='ESP mount point (default /boot/efi)')
     put.add_argument('--apply', action='store_true', help='write boot.bin (default: dry run)')
-    put.add_argument('--loader-from', help='take the m1n1 loader from this boot.bin instead')
-    put.add_argument('--allow-loader', action='append', default=[], metavar='SHA256',
-                     help='accept a reviewed loader this tool does not know')
-    put.add_argument('--allow-unpinned', action='append', default=[], choices=('dtb',),
-                     help="accept the generation's own source-built devicetree")
     put.add_argument('--sys-root', default='/', help=argparse.SUPPRESS)
     put.set_defaults(run=install)
     args = parser.parse_args(argv)
     try:
         args.run(args)
     except (Refused, OSError) as error:
-        print(f'm4-nix-boot: refused: {error}', file=sys.stderr)
+        print(f'firn-boot: refused: {error}', file=sys.stderr)
         return 1
     return 0
 

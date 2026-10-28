@@ -1,27 +1,24 @@
-# Installing from the J713 installer: the root filesystem starts as the image
-# in our OS package, written to a partition the installer sizes, and the EFI
-# system partition is the one the installer creates.
+# Installing from the installer: the root filesystem starts as the image in the
+# OS package, written to a partition the installer sizes, and the EFI system
+# partition is the one the installer creates.
 {
   config,
   lib,
   ...
 }:
 let
-  cfg = config.hardware.m4-j713;
+  cfg = config.hardware.firn;
 in
 {
-  options.hardware.m4-j713.image = {
+  options.hardware.firn.image = {
     rootUuid = lib.mkOption {
       type = lib.types.strMatching "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
       default = "5b0c6f2e-8d4a-4e1b-9c3f-7a2d1e6b4f80";
-      description = ''
-        Filesystem UUID of the root image. The installer checks the image
-        against it, and NixOS mounts the root by it.
-      '';
+      description = "Filesystem UUID of the root image; NixOS mounts the root by it.";
     };
     label = lib.mkOption {
       type = lib.types.str;
-      default = "m4-nixos";
+      default = "firn";
       description = "Filesystem label of the root image.";
     };
   };

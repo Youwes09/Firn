@@ -5,24 +5,24 @@
   python3,
 }:
 let
-  sources = callPackage ../sources.nix { };
+  # The installer's source, whose payloads.py writes the first boot.bin.
+  installer = callPackage ../installer/source.nix { };
 in
 stdenvNoCC.mkDerivation {
-  pname = "m4-nix-boot";
-  version = "0.2.0";
+  pname = "firn-boot";
+  version = "0.3.0";
   src = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
-      ./m4-nix-boot.py
-      ./test_m4_nix_boot.py
+      ./firn-boot.py
+      ./test_firn_boot.py
     ];
   };
 
   nativeBuildInputs = [ python3 ];
   buildInputs = [ python3 ];
 
-  # The installer's own boot.bin writer, for the contract tests.
-  M4BOOT_PY = sources.installerM4boot;
+  PAYLOADS_PY = "${installer}/src/payloads.py";
 
   doCheck = true;
   checkPhase = ''
@@ -34,14 +34,14 @@ stdenvNoCC.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    install -Dm755 m4-nix-boot.py $out/bin/m4-nix-boot
-    patchShebangs --host $out/bin/m4-nix-boot
+    install -Dm755 firn-boot.py $out/bin/firn-boot
+    patchShebangs --host $out/bin/firn-boot
     runHook postInstall
   '';
 
   meta = {
     description = "Write the J713 m1n1 boot.bin for a NixOS generation";
-    mainProgram = "m4-nix-boot";
+    mainProgram = "firn-boot";
     platforms = lib.platforms.linux;
   };
 }

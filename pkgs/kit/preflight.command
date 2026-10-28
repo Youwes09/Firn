@@ -1,8 +1,11 @@
 #!/bin/bash
-# M4-Nix preflight: read-only checks on the Mac before installing.
+# Firn preflight: read-only checks on the Mac before installing.
 # It changes nothing: no disk, boot policy or file is modified.
+#   bash preflight.command [GB]   GB for Firn, default 60
 set -uo pipefail
 kit=$(cd "$(dirname "$0")" && pwd -P)
+firn_gb=${1:-60}
+[[ "$firn_gb" =~ ^[0-9]+$ ]] || { echo 'Usage: bash preflight.command [GB for Firn, default 60]' >&2; exit 2; }
 fail=0 warn=0
 ok() { printf 'ok    %s\n' "$*"; }
 bad() { printf 'FAIL  %s\n' "$*"; fail=1; }
@@ -20,7 +23,7 @@ version_ge() {
   return 0
 }
 
-echo 'M4-Nix preflight (read-only)'
+echo 'Firn preflight (read-only)'
 if [[ $(uname -s) == Darwin && $(uname -m) == arm64 ]]; then ok 'native arm64 macOS'
 else bad 'not native arm64 macOS'; fi
 
@@ -31,19 +34,29 @@ else bad "model $model is not Mac16,12"; fi
 macos=$(/usr/bin/sw_vers -productVersion)
 if version_ge "$macos" 26.5.1; then ok "macOS $macos (26.5.1 or newer)"; else bad "macOS $macos is older than 26.5.1"; fi
 if ! version_ge 26.6.2 "$macos"; then
-  note "macOS $macos is newer than the versions the installer was tested from (26.5.1-26.6.2)"
+  note "macOS $macos is newer than the macOS 26.5.1 to 26.6.2 that J713 installs have run from"
 fi
 firmware=$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/System Firmware Version/{print $2}')
 ok "system firmware $firmware"
 
-free=$(/usr/sbin/diskutil info / | awk -F'[(]' '/Container Free Space|Free Space/{print $2; exit}' | awk '{print $1}')
-if [[ -n "$free" ]]; then
-  gib=$(( free / 1073741824 ))
-  if (( gib >= 60 )); then ok "${gib} GiB free in the macOS container"
-  elif (( gib >= 30 )); then note "${gib} GiB free; 60 GiB or more leaves room for NixOS to grow"
-  else bad "${gib} GiB free; at least 30 GiB is needed"; fi
+# The installer counts in decimal GB, asks for macOS's new size when it
+# shrinks the container, and keeps at least 38 GB free in macOS.
+G=1000000000
+info=$(/usr/sbin/diskutil info /)
+bytes() { awk -F'[(]' -v key="$1" '$0 ~ key {print $2; exit}' <<< "$info" | awk '{print $1}'; }
+total=$(bytes 'Container Total Space')
+free=$(bytes 'Container Free Space')
+if [[ -n "$total" && -n "$free" ]]; then
+  need=$(( (firn_gb + 38) * G ))
+  if (( free >= need )); then
+    ok "$(( free / G )) GB free of $(( total / G )) GB in the macOS container"
+    echo "      When the installer asks for the new size of macOS, enter $(( (total - firn_gb * G) / G ))GB."
+    echo "      That leaves ${firn_gb} GB for Firn."
+  else
+    bad "$(( free / G )) GB free; ${firn_gb} GB for Firn plus the 38 GB macOS keeps free needs $(( need / G )) GB (or try: bash preflight.command SMALLER-GB)"
+  fi
 else
-  note 'could not read free space'
+  note 'could not read the size of the macOS container'
 fi
 
 if /usr/bin/pmset -g batt | grep -q "AC Power"; then ok 'on AC power'; else bad 'not on AC power; connect the charger'; fi

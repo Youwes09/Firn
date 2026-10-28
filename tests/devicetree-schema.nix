@@ -7,7 +7,7 @@
 }:
 let
   inherit (pkgs) lib;
-  patches = ../../pkgs/linux/patches/topics;
+  patches = ../pkgs/linux/patches/topics;
   src = pkgs.applyPatches {
     name = "linux-j713-source";
     inherit (kernel) src;
@@ -46,7 +46,7 @@ let
     /soc/sep@3aa600000: failed to match any schema with compatible: ['apple,t8132-sep', 'apple,sep']
   '';
 in
-pkgs.runCommandCC "m4-nix-devicetree-schema"
+pkgs.runCommandCC "firn-devicetree-schema"
   {
     nativeBuildInputs = with pkgs; [
       bison

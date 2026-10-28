@@ -2,7 +2,7 @@
 # rather than leaving the Air running in a bag.
 { config, lib, ... }:
 {
-  config = lib.mkIf config.hardware.m4-j713.enable {
+  config = lib.mkIf config.hardware.firn.enable {
     systemd.sleep.settings.Sleep = {
       AllowSuspend = "no";
       AllowHibernation = "no";

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# m4-nix-report: read-only hardware report for the J713 runbook.
-#   m4-nix-report            one report (save it: m4-nix-report > report.txt)
-#   m4-nix-report temps [S]  print CPU and SoC temperatures every S seconds (default 2)
+# firn-report: read-only hardware report for the J713 runbook.
+#   firn-report            one report (save it: firn-report > report.txt)
+#   firn-report temps [S]  print CPU and SoC temperatures every S seconds (default 2)
 set -uo pipefail
 
 section() { printf '\n== %s ==\n' "$1"; }
@@ -79,10 +79,10 @@ done
 section 'boot.bin'
 efi=/boot/efi
 if mountpoint -q "$efi"; then
-  ls -l "$efi/omarchy/"
-  m4-nix-boot inspect "$efi/omarchy/boot.bin"
+  ls -l "$efi/m1n1/"
+  firn-boot inspect "$efi/m1n1/boot.bin"
 else
-  echo "$efi is not mounted (systemctl status m4-esp)"
+  echo "$efi is not mounted (systemctl status firn-esp)"
 fi
 
 section 'storage'

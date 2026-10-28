@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Make what the J713 installer would write for a generation, for the VM test.
+"""Make what the installer would write for a generation, for the VM test.
 
-Writes boot.bin with the installer's own m4boot.compose, using a stand-in
+Writes boot.bin with the installer's own payloads.build, using a stand-in
 firmware archive in the installer's /vendorfw layout, and the initramfs and
 boot arguments inside it for QEMU to boot directly.
 """
@@ -9,14 +9,12 @@ import argparse
 import importlib.util
 from pathlib import Path
 import sys
-import tarfile
-import tempfile
 
 FIRMWARE = [
     ('vendorfw', 0o40755, b''),
-    ('vendorfw/.vendorfw.manifest', 0o100644, b'm4-nix VM stand-in\n'),
+    ('vendorfw/.vendorfw.manifest', 0o100644, b'firn VM stand-in\n'),
     ('vendorfw/brcm', 0o40755, b''),
-    ('vendorfw/brcm/m4-nix-test.bin', 0o100644, b'm4-nix-test-firmware'),
+    ('vendorfw/brcm/firn-test.bin', 0o100644, b'firn-test-firmware'),
 ]
 
 
@@ -41,29 +39,26 @@ def cpio(entries):
 
 def main():
     parser = argparse.ArgumentParser()
-    for name in ('installer-bundle', 'nix-boot', 'loader', 'toplevel', 'out'):
+    for name in ('payloads', 'firn-boot', 'toplevel', 'out'):
         parser.add_argument('--' + name, required=True)
     args = parser.parse_args()
     out, toplevel = Path(args.out), Path(args.toplevel)
-    nix_boot = load('m4_nix_boot', args.nix_boot)
-    with tempfile.TemporaryDirectory() as scratch:
-        with tarfile.open(args.installer_bundle) as archive:
-            archive.extract('./m4boot.py', scratch, filter='data')
-        m4boot = load('m4boot', Path(scratch, 'm4boot.py'))
+    firn_boot = load('firn_boot', args.firn_boot)
+    payloads = load('payloads', args.payloads)
 
     params = (toplevel / 'kernel-params').read_text().split()
-    line = nix_boot.bootargs_line(params, str(toplevel / 'init'))
-    bootargs = line[len(nix_boot.BOOTARGS):-1].decode()
+    line = firn_boot.bootargs_line(params, str(toplevel / 'init'))
+    bootargs = line[len(firn_boot.BOOTARGS):-1].decode()
     parts = {
-        'loader': Path(args.loader).read_bytes(),
+        'm1n1': (toplevel / 'm1n1.bin').read_bytes(),
         'kernel': (toplevel / 'kernel').read_bytes(),
-        'dtb': (toplevel / 'dtbs' / 'apple' / 'm4-nix-j713.dtb').read_bytes(),
+        'dtb': (toplevel / firn_boot.DTB).read_bytes(),
         'initramfs': (toplevel / 'initrd').read_bytes(),
     }
     firmware = cpio(FIRMWARE)
-    nix_boot.check_firmware(firmware)
-    bootbin = m4boot.compose(parts, bootargs, firmware)
-    layout = nix_boot.parse(bootbin)
+    firn_boot.check_firmware(firmware)
+    bootbin = payloads.build(parts, bootargs, firmware)
+    layout = firn_boot.parse(bootbin)
     out.mkdir(parents=True, exist_ok=True)
     (out / 'boot.bin').write_bytes(bootbin)
     (out / 'initramfs.img').write_bytes(layout['initramfs'])

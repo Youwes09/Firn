@@ -5,8 +5,8 @@
   # Machine-local settings such as SSH keys, kept out of git.
   imports = lib.optional (builtins.pathExists ./access.nix) ./access.nix;
 
-  hardware.m4-j713.enable = true;
-  hardware.m4-j713.wifiRegion = "US";
+  hardware.firn.enable = true;
+  hardware.firn.wifiRegion = "US";
 
   # For `nixos-rebuild --flake` and `nix shell` on the Air.
   nix.settings.experimental-features = [

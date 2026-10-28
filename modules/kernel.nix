@@ -7,7 +7,7 @@
   ...
 }:
 let
-  cfg = config.hardware.m4-j713;
+  cfg = config.hardware.firn;
 
   # Cross-compiled on cfg.buildSystem; the Air never compiles a kernel.
   kernelPkgs = import pkgs.path {
@@ -24,13 +24,13 @@ in
     assertions = [
       {
         assertion = pkgs.stdenv.hostPlatform.system == "aarch64-linux";
-        message = "hardware.m4-j713 needs nixpkgs.hostPlatform = \"aarch64-linux\".";
+        message = "hardware.firn needs nixpkgs.hostPlatform = \"aarch64-linux\".";
       }
     ];
 
     boot.kernelPackages = pkgs.linuxPackagesFor kernel;
     boot.kernelParams = [
-      # m4-nix-boot refuses a generation without maxcpus, idle and nowfxt.
+      # firn-boot refuses a generation without maxcpus, idle and nowfxt.
       "maxcpus=10"
       "idle=nop"
       # WFIT in __delay() stops the M4 at EL2.
@@ -41,7 +41,7 @@ in
       "log_buf_len=1M"
       # The installer's ESP shares the disk with the root, so systemd's GPT
       # auto-generator would also mount it, as an automount on /boot, and
-      # hide the m4-esp mount at /boot/efi underneath it.
+      # hide the firn-esp mount at /boot/efi underneath it.
       "systemd.gpt_auto=0"
       "rd.systemd.gpt_auto=0"
       # nvme-apple's delayed flush acknowledges a flush at once and sends its

@@ -7,19 +7,20 @@
   python3,
   # The aarch64 NixOS configuration (nixpkgs.lib.nixosSystem result).
   nixos,
+  # pkgs/installer.
+  installer,
 }:
 let
-  sources = callPackage ../sources.nix { };
   cfg = nixos.config;
   toplevel = cfg.system.build.toplevel;
 
   rootImage = callPackage "${toString nixos.pkgs.path}/nixos/lib/make-ext4-fs.nix" {
     storePaths = [ toplevel ];
-    volumeLabel = cfg.hardware.m4-j713.image.label;
-    uuid = cfg.hardware.m4-j713.image.rootUuid;
+    volumeLabel = cfg.hardware.firn.image.label;
+    uuid = cfg.hardware.firn.image.rootUuid;
   };
 in
-runCommand "m4-nix-kit-${cfg.system.nixos.label}"
+runCommand "firn-kit-${cfg.system.nixos.label}"
   {
     nativeBuildInputs = [ python3 ];
     passthru = { inherit rootImage toplevel; };
@@ -32,17 +33,17 @@ runCommand "m4-nix-kit-${cfg.system.nixos.label}"
     truncate -s $(( (size + 1048575) / 1048576 * 1048576 )) root.ext4
 
     python3 -I ${./make-kit.py} \
-      --installer-kit ${sources.installerKit} \
+      --installer ${installer} \
+      --installer-src ${installer.src} \
+      --firn-boot ${../firn-boot/firn-boot.py} \
       --root-image root.ext4 \
-      --loader ${sources.loader} \
+      --loader ${toplevel}/m1n1.bin \
       --kernel ${toplevel}/kernel \
-      --dtb ${toplevel}/dtbs/apple/m4-nix-j713.dtb \
+      --dtb ${toplevel}/dtbs/apple/t8132-j713.dtb \
       --initrd ${toplevel}/initrd \
       --kernel-params ${toplevel}/kernel-params \
       --init ${toplevel}/init \
-      --rootfs-uuid ${cfg.hardware.m4-j713.image.rootUuid} \
-      --os-name NixOS \
-      --nix-boot ${../m4-nix-boot/m4-nix-boot.py} \
+      --os-name Firn \
       --install-command ${./Install.command} \
       --preflight ${./preflight.command} \
       --start-here ${./START-HERE.md} \
