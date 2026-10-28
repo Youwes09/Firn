@@ -182,21 +182,17 @@ series (SMC, NVMe, Wi-Fi, Bluetooth, keyboard and trackpad came up), and
 m1n1 stage 2 from `c9ef56f7` with the trust cache reservation and
 Omarchy-M4-Native's GPU handoff patch, behind their installer and stage 1.
 
-Not yet booted on hardware:
+Booted on a second J713 (Mac16,12, 2026-10-28), everything from this
+repository: the installer built from asahi-installer with
+`pkgs/installer/patches`, m1n1 stage 1 from `c9ef56f7` with the issue #82
+patch, and m1n1 stage 2 without the GPU handoff patch, which reports the
+T8132 GPU as unsupported and leaves its memory regions disabled. An update
+through firn-boot then booted as well.
 
-- the installer built from asahi-installer with `pkgs/installer/patches`,
-  which writes `<ESP>/m1n1/boot.bin` and passes the EFI partition as
-  `asahi,efi-system-partition`;
-- m1n1 stage 1 built from `c9ef56f7` with the issue #82 patch;
-- m1n1 stage 2 without the GPU handoff patch: upstream m1n1 reports the
-  T8132 GPU as unsupported and leaves its devicetree node alone, and the
-  GPU's memory regions stay disabled.
-
-Open: which `/memreserve/` entry is the trust cache. The patch stops the
-boot if the reservation fails, and it did not, but confirming the address
-needs the ADT, which m1n1 passes as a `phram` region. The kernel has no
-MTD support and `STRICT_DEVMEM` blocks `/dev/mem`, so neither the ADT nor
-m1n1's log can be read on the Air as configured.
+The trust cache reservation is the right one: the kernel's `phram` module
+reads the ADT that m1n1 passes, and its `/chosen/memory-map` `TrustCache`
+entry (`0x10004174000`, `0x60000`) is the `/memreserve/` entry of that
+boot.
 
 ## 7. Not yet at Asahi standard
 
