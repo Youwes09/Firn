@@ -31,6 +31,15 @@ in
       autoResize = true;
     };
 
+    # The image has only 16 MiB free, which activation in the initrd can use up
+    # before the root is grown after switching root. The initrd's fstab already
+    # asks for it to grow (x-systemd.growfs); this adds what that needs, so it
+    # grows as soon as it is mounted.
+    boot.initrd.systemd = {
+      additionalUpstreamUnits = [ "systemd-growfs@.service" ];
+      storePaths = [ "${config.boot.initrd.systemd.package}/lib/systemd/systemd-growfs" ];
+    };
+
     # The image holds only /nix/store; register it and make the system profile
     # on first boot, as nixpkgs' SD-card images do.
     boot.postBootCommands = ''
