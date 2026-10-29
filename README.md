@@ -77,7 +77,9 @@ changes from [Omarchy-M4-Native](https://github.com/Kb2uka/Omarchy-M4-Native)
 are credited to KB2UKA, in the kernel series and in m1n1's patches.
 The installer patches credit the Gravity Linux installer, as shipped by
 Omarchy-M4-Native, where they follow it. The installer kit ships the
-licence notices of everything in the installer.
+licence notices of everything in the installer. The logo
+([artwork/firn-logo.png](artwork/firn-logo.png)) is derived from Gravity
+Linux's.
 
 ## Licence
 

@@ -6,7 +6,7 @@
   fetchurl,
   libarchive,
   cpio,
-  librsvg,
+  imagemagick,
   libicns,
   cacert,
   m1n1Stage1,
@@ -36,7 +36,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   nativeBuildInputs = [
     libarchive
     cpio
-    librsvg
+    imagemagick
     libicns
   ];
 
@@ -50,7 +50,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     install -m444 ${m1n1Stage1}/lib/m1n1/m1n1.bin package/boot/m1n1.bin
 
     for size in 16 32 128 256 512; do
-      rsvg-convert -w $size -h $size ${./logo.svg} -o logo-$size.png
+      magick ${../../artwork/firn-logo.png} -resize ''${size}x$size logo-$size.png
     done
     png2icns package/logo.icns logo-*.png
 

@@ -9,7 +9,7 @@ assert lib.elem stage [
   1
   2
 ];
-(m1n1.override { customLogo = null; }).overrideAttrs (
+(m1n1.override { customLogo = ../../artwork/firn-logo.png; }).overrideAttrs (
   finalAttrs: old: {
     version = "1.6.1-unstable-2026-07-19";
 
