@@ -30,8 +30,12 @@ There is no G15 (M3) support and no firmware ABI newer than macOS 13.5.
   documents. The reference's firmware data maps onto Asahi's structures:
   its root block is `InitData` field for field, and its main block is
   `RuntimePointers` with the same 17 channels, each now 0x20 bytes.
-- A 43-bit GPU address space and a different page-table and initialisation
-  flow, per the reference.
+- A 42-bit GPU address space, with the firmware's kernel range at
+  `0xffff_fc00_0000_0000`, per the reference's code (its comments say 43).
+  The page-table entry format is Asahi's unchanged. The reference also
+  cleans page tables from the CPU cache before the GPU reads them. Both are
+  unconfirmed until the firmware runs: on the J713, iBoot reserves the UAT
+  regions but leaves them empty, and m1n1 does not set up the GPU.
 
 ## The reference implementation
 
@@ -71,9 +75,10 @@ and are tested on the J713 where they can be.
    macro, and `hw/t8132.rs` with the configuration read from the ADT and the
    reference. The driver probes, recognises the GPU and stops before
    starting firmware.
-2. **Memory.** The G16 page-table format and 43-bit address space as
-   versioned paths in `pgtable.rs` and `mmu.rs`, replacing
-   `m4_pgtable.rs`.
+2. **Memory.** The input address width as a page-table parameter, so
+   `pgtable.rs` serves the 39-bit G13/G14 layout and G16's wider one.
+   The G16 layout in `mmu.rs` and page-table cache cleaning come with
+   milestone 3, where the firmware can confirm them.
 3. **Firmware start.** The macOS 26 `initdata` layout in `fw/initdata.rs`
    and `initdata.rs`; the firmware boots and answers.
 4. **Channels and events.** `fw/channels.rs`, `fw/event.rs`,
