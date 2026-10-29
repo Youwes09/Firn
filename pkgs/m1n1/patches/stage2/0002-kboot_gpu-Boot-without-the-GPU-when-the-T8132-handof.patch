@@ -1,0 +1,35 @@
+From abc1255bfb8d189b98c57b0e98425c2f79163e0a Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 28 Oct 2026 23:35:56 -0500
+Subject: [PATCH 2/2] kboot_gpu: Boot without the GPU when the T8132 handoff
+ fails
+
+The T8132 handoff accepts only the J773g's performance tables: eleven
+voltage steps, where the J713 has ten. A mismatch failed the whole boot
+and left m1n1 in the proxy.
+
+The handoff enables the GPU node last, so on failure it is still
+disabled. Log the failure and boot without the GPU instead.
+---
+ src/kboot_gpu.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/kboot_gpu.c b/src/kboot_gpu.c
+index f394e52..990202c 100644
+--- a/src/kboot_gpu.c
++++ b/src/kboot_gpu.c
+@@ -632,8 +632,12 @@ static int dt_set_gpu_t8132(void *dt)
+ 
+ int dt_set_gpu(void *dt)
+ {
+-    if (chip_id == T8132)
+-        return dt_set_gpu_t8132(dt);
++    if (chip_id == T8132) {
++        // The handoff enables the GPU node last, so on failure it stays disabled.
++        if (dt_set_gpu_t8132(dt))
++            printf("FDT: GPU: T8132 handoff failed; leaving the GPU disabled\n");
++        return 0;
++    }
+ 
+     bool has_cs_afr = false;
+     int (*calc_power)(u32 count, u32 table_count, const struct perf_state *core,
