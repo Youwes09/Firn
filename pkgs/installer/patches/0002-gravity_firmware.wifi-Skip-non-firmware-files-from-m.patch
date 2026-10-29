@@ -1,0 +1,75 @@
+From 1a0434b9b92210ba198a405c4e5443fa0b800999 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 28 Oct 2026 22:22:20 -0500
+Subject: [PATCH 2/3] gravity_firmware.wifi: Skip non-firmware files from macOS
+ 26
+
+macOS 26 keeps the Wi-Fi firmware in the WLAN driver extension, beside a
+list of firmware hashes (TrustedSHAInformation.txt) and, for 4388 C0
+modules, files with a new F property. Collecting every module, as boards
+without a single-module profile do, stopped with a ValueError on the
+hash list and would assert on the F files.
+
+Skip files whose names are not firmware names, and log and skip files
+with properties that have no Linux name.
+---
+ gravity_firmware/wifi.py  | 15 +++++++++++----
+ tests/test_m4_firmware.py | 11 +++++++++++
+ 2 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/gravity_firmware/wifi.py b/gravity_firmware/wifi.py
+index cd566e1..4a52ab7 100644
+--- a/gravity_firmware/wifi.py
++++ b/gravity_firmware/wifi.py
+@@ -82,10 +82,14 @@ class WiFiFWCollection(object):
+                 if not name.endswith(".txt"):
+                     name = "P-" + name
+                 idpath, ext = os.path.join(subpath, name).rsplit(".", 1)
++                fields = [i for i in idpath.replace("/", "_").split("_") if i]
++                # macOS 26 keeps other files beside the firmware, such as
++                # TrustedSHAInformation.txt.
++                if not all("-" in i for i in fields):
++                    log.info(f"Skipping {relpath}: not a firmware name")
++                    continue
+                 props = {}
+-                for i in idpath.replace("/", "_").split("_"):
+-                    if not i:
+-                        continue
++                for i in fields:
+                     k, v = i.split("-", 1)
+                     if k == "P" and "-" in v:
+                         plat, ant = v.split("-", 1)
+@@ -97,7 +101,10 @@ class WiFiFWCollection(object):
+                 for dim in self.DIMS:
+                     if dim in props:
+                         ident.append(props.pop(dim))
+-                assert not props
++                # Linux names for properties such as macOS 26's F are unknown.
++                if props:
++                    log.info(f"Skipping {relpath}: unknown properties {sorted(props)}")
++                    continue
+ 
+                 node = self.root
+                 for k in ident:
+diff --git a/tests/test_m4_firmware.py b/tests/test_m4_firmware.py
+index cc0c351..38955f5 100644
+--- a/tests/test_m4_firmware.py
++++ b/tests/test_m4_firmware.py
+@@ -140,6 +140,17 @@ class M4FirmwareTest(unittest.TestCase):
+         files = dict(WiFiFWCollection(str(self.wifi)).files())
+         self.assertTrue(M4_WIFI_OUTPUTS.isdisjoint(files))
+ 
++    def test_wifi_skips_macos26_extras(self):
++        extras = ["C-4388__s-C2/TrustedSHAInformation.txt",
++                  "C-4388__s-C0/P-garden-X3_M-WLMT_V-u__m-7.1_F-bb.txt"]
++        for name in extras:
++            path = self.wifi / name
++            path.parent.mkdir(parents=True, exist_ok=True)
++            path.write_bytes(b"boardrev=0x14\n")
++        files = dict(WiFiFWCollection(str(self.wifi)).files())
++        self.assertTrue(any("sakhalin" in name for name in files))
++        self.assertFalse(any(f.name in extras for f in files.values()))
++
+     def test_m4_wifi_profile_fails_on_incomplete_input(self):
+         (self.wifi / "C-4388__s-C2/sakhalin.sig").unlink()
+         with self.assertRaisesRegex(FileNotFoundError, "sakhalin.sig"):

@@ -1,7 +1,7 @@
-From d400df99a6b03cb0d917f4835ce8beb404d333b8 Mon Sep 17 00:00:00 2001
+From 1a635b01f20fe39c8a95f1f01579e314147b3065 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Wed, 28 Oct 2026 21:51:14 -0500
-Subject: [PATCH 2/2] Add the 13-inch M4 MacBook Air (J713)
+Subject: [PATCH 3/3] Add the 13-inch M4 MacBook Air (J713)
 
 Accept the J713 on the same macOS 26.6.2 restore image as the J773g.
 
