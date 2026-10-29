@@ -33,6 +33,7 @@ assert lib.elem stage [
       "ARCH=${m1n1.stdenv.cc.targetPrefix}"
       "RELEASE=1"
       "CHAINLOADING=${if stage == 1 then "1" else "0"}"
+      "LOGO=custom"
       # No DCP support for the M4 yet.
       "NO_DISPLAY=1"
     ];
