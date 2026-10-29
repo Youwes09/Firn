@@ -1,5 +1,4 @@
-# Modules the J713 system needs: loaded on the Air (lsmod) plus hardware it may plug in.
-# Each must be built, as a module or into the kernel. Checked by checks.kernel-modules.
+# Loaded on the Air, plus hardware it may plug in. Checked by checks.kernel-modules.
 8021q
 apple_soc_cpufreq
 apple_wdt

@@ -20,7 +20,6 @@ writeShellApplication {
     systemd
     (callPackage ../firn-boot { })
   ];
-  # The script sets its own options and reads optional files that may be absent.
   bashOptions = [ ];
   text = lib.readFile ./firn-report.sh;
 }

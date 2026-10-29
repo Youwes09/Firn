@@ -1,4 +1,3 @@
-# Upstream asahi-installer with patches/ applied.
 {
   lib,
   applyPatches,

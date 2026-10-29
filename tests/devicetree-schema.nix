@@ -1,6 +1,4 @@
-# Validate the J713 devicetree, and the bindings the series changes, against
-# the kernel's dt-schema (make dtbs_check / dt_binding_check). Fails on any
-# warning not listed below.
+# dtbs_check and dt_binding_check; fails on any warning not listed below.
 {
   pkgs,
   kernel,
@@ -28,8 +26,7 @@ let
     "apple,sio.yaml"
     "apple,spmi-nvmem.yaml"
   ];
-  # Asahi's downstream drivers that have no binding on any Apple SoC yet, and
-  # a warning in apple,pcie.yaml that predates this series.
+  # Asahi downstream drivers without bindings, and a pre-existing apple,pcie.yaml warning.
   expected = pkgs.writeText "expected-warnings" ''
     Documentation/devicetree/bindings/pci/apple,pcie.yaml: ^pci@: Missing additionalProperties/unevaluatedProperties constraint
     /soc/aop@390c00000/als: failed to match any schema with compatible: ['apple,t8132-aop-als', 'apple,aop-als']

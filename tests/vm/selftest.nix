@@ -1,6 +1,4 @@
-# Test-only additions for the T2 VM boot. They add a service and nothing to the
-# initrd, kernel or boot path, so the VM boots the shipped configuration's
-# initrd and kernel parameters.
+# Adds only a service, so the VM boots the shipped initrd and parameters.
 {
   config,
   lib,

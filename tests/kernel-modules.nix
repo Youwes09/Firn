@@ -1,6 +1,4 @@
-# Every module in pkgs/linux/required-modules.txt must be built by the source
-# kernel, as a loadable module or into the kernel. A reduced configuration can
-# drop one silently when a dependency goes (the firewall's rpfilter did).
+# A reduced configuration drops modules silently when a dependency goes.
 { pkgs, kernel }:
 pkgs.runCommand "firn-kernel-modules" { } ''
   dir=${kernel.modules}/lib/modules/${kernel.modDirVersion}

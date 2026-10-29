@@ -1,4 +1,3 @@
-# Firn: NixOS on the 13-inch M4 MacBook Air (Mac16,12 / J713).
 { lib, ... }:
 {
   imports = [

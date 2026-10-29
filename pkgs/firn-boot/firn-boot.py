@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Write the J713 m1n1 boot.bin for a NixOS generation.
+"""Write <ESP>/m1n1/boot.bin for a NixOS generation, keeping its firmware.
 
-boot.bin is the file the installer writes to <ESP>/m1n1/boot.bin for an OS
-booted by m1n1 stage 2 directly (its payloads.py). Its layout:
+Layout, as the installer's payloads.py writes it:
 
     m1n1 stage 2
     chosen.bootargs=<one printable line>\\n
@@ -10,17 +9,7 @@ booted by m1n1 stage 2 directly (its payloads.py). Its layout:
     flattened devicetree
     m1n1_initramfs <u32 LE length> <gzip initrd> <zero pad to 4> <firmware cpio>
 
-The firmware cpio holds the Apple firmware the installer collected on this Mac,
-under /vendorfw. m1n1 stage 1 appends its variables to the image at boot, so
-they are not in the file.
-
-This keeps the installed firmware and writes everything else from the
-generation: m1n1 stage 2, kernel, devicetree, initrd and kernel parameters.
-The parameters must keep the kernel's hardware switches.
-
-Nothing is written without --apply. The first boot.bin this tool replaces (the
-installer's) is kept as boot.bin.original and never overwritten; every later
-apply keeps the replaced file as boot.bin.previous.
+m1n1 stage 1 appends its variables at boot, so they are not in the file.
 """
 import argparse
 import hashlib
@@ -30,8 +19,7 @@ import struct
 import sys
 import zlib
 
-# Kernel parameters the J713 does not boot reliably without; a generation
-# that drops one is refused. WFIT in __delay() stops the M4 at EL2.
+# WFIT in __delay() stops the M4 at EL2.
 REQUIRED_ARGS = (
     'maxcpus=10',
     'idle=nop',
@@ -43,7 +31,6 @@ GZIP = b'\x1f\x8b\x08'
 FDT_MAGIC = b'\xd0\x0d\xfe\xed'
 INITRAMFS = b'm1n1_initramfs'
 MAX_BOOTARGS = 1024
-# The installer's limits (payloads.py).
 LIMITS = {'loader': 4 << 20, 'kernel': 64 << 20, 'dtb': 2 << 20, 'initrd': 128 << 20,
           'firmware': 128 << 20}
 FIRMWARE_DIR = 'vendorfw'
@@ -264,7 +251,7 @@ def check_board(sys_root):
 
 
 def read_toplevel(toplevel):
-    # A profile link (system-N-link) must not end up in init=; boot the store path.
+    # init= must name the store path, not the profile link.
     toplevel = Path(os.path.realpath(toplevel))
     require(str(toplevel).startswith(STORE), f'{toplevel} is not a NixOS generation in {STORE}')
     require((toplevel / 'm1n1.bin').is_file(), f'{toplevel} has no m1n1.bin')
@@ -297,11 +284,8 @@ def install(args):
     previous = boot.with_name(PREVIOUS)
     for path in (boot, original, previous):
         temporary(path).unlink(missing_ok=True)
-    # FAT has no links, so every kept file is a full copy. On the first apply
-    # the replaced file is the installer's, kept as boot.bin.original, so
-    # boot.bin.previous is written from the second apply on, after the old one
-    # is removed; boot.bin.original stays the fallback meanwhile. The new
-    # boot.bin is written beside the current one before it replaces it.
+    # FAT has no links: each kept file is a full copy, and boot.bin.original
+    # stays the fallback while boot.bin.previous is replaced.
     first = not original.exists()
     freed = 0 if first or not previous.exists() else previous.stat().st_size
     need = len(current) + len(data) + MARGIN

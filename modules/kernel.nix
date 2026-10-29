@@ -1,5 +1,3 @@
-# The kernel, built from Asahi's tree with pkgs/linux/patches/topics, and its
-# parameters.
 {
   config,
   lib,
@@ -9,7 +7,6 @@
 let
   cfg = config.hardware.firn;
 
-  # Cross-compiled on cfg.buildSystem; the Air never compiles a kernel.
   kernelPkgs = import pkgs.path {
     localSystem = cfg.buildSystem;
     crossSystem = pkgs.stdenv.hostPlatform.system;
@@ -39,21 +36,16 @@ in
       "console=tty0"
       "fbcon=nodefer"
       "log_buf_len=1M"
-      # The installer's ESP shares the disk with the root, so systemd's GPT
-      # auto-generator would also mount it, as an automount on /boot, and
-      # hide the firn-esp mount at /boot/efi underneath it.
+      # Otherwise an automount on /boot hides the firn-esp mount.
       "systemd.gpt_auto=0"
       "rd.systemd.gpt_auto=0"
-      # nvme-apple's delayed flush acknowledges a flush at once and sends its
-      # own later; Omarchy-M4-Native issue #167 reports that this crashes the
-      # storage coprocessor on some units. It does not prevent the crash in
-      # docs/ISSUES.md.
+      # Delayed flushes crash the storage coprocessor on some units
+      # (Omarchy-M4-Native #167).
       "nvme_apple.flush_interval=0"
     ];
     boot.consoleLogLevel = 4;
     system.boot.loader.kernelFile = "Image.gz";
 
-    # Everything the root needs is built in except the Apple NVMe driver.
     boot.initrd.includeDefaultModules = false;
     boot.initrd.availableKernelModules = [ "nvme-apple" ];
   };

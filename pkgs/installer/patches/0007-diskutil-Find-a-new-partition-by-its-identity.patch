@@ -1,4 +1,4 @@
-From 3203a8ad3bb19d34d81467936f37fa03b69f7989 Mon Sep 17 00:00:00 2001
+From c1a41a13e120c0b1cb164b999b171576f7285d3d Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Tue, 27 Oct 2026 22:05:12 -0500
 Subject: [PATCH 7/8] diskutil: Find a new partition by its identity
@@ -15,14 +15,14 @@ The Gravity Linux installer (MIT) as shipped by Omarchy-M4-Native
 reports this on macOS 26 and matches the new partition by UUID and type.
 It has not been reproduced here.
 ---
- src/diskutil.py | 27 +++++++++++++++------------
- 1 file changed, 15 insertions(+), 12 deletions(-)
+ src/diskutil.py | 26 ++++++++++++++------------
+ 1 file changed, 14 insertions(+), 12 deletions(-)
 
 diff --git a/src/diskutil.py b/src/diskutil.py
-index d9e73c5..5461e9c 100644
+index d9e73c5..f41181d 100644
 --- a/src/diskutil.py
 +++ b/src/diskutil.py
-@@ -246,22 +246,25 @@ class DiskUtil:
+@@ -246,22 +246,24 @@ class DiskUtil:
              and fs.lower() == "apfs"):
              return self.partitionDisk(after, fs, label, size)
  
@@ -45,8 +45,7 @@ index d9e73c5..5461e9c 100644
  
 -        raise Exception("Could not find new partition")
 +        self.get_list()
-+        # The new partition need not follow the one it was added after: macOS
-+        # may also add an Apple_Boot helper partition.
++        # macOS may also add an Apple_Boot partition.
 +        new = [p for p in self.get_partitions(disk)
 +               if not p.free and p.uuid not in before and p.type != "Apple_Boot"]
 +        for part in new:

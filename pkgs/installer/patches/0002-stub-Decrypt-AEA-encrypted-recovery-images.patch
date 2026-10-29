@@ -1,4 +1,4 @@
-From d6bcebc80d0702366cba245623ce5ffbf2c3b6b3 Mon Sep 17 00:00:00 2001
+From c19b14865b6d713a538a1a8e90f5cd0727ce35c7 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Tue, 27 Oct 2026 21:55:36 -0500
 Subject: [PATCH 2/8] stub: Decrypt AEA-encrypted recovery images
@@ -147,7 +147,7 @@ index 0000000..9f03203
 +    def close(self):
 +        self.tmpdir.cleanup()
 diff --git a/src/stub.py b/src/stub.py
-index f0b85fe..f1420f8 100644
+index 0e7342f..35c898c 100644
 --- a/src/stub.py
 +++ b/src/stub.py
 @@ -7,6 +7,7 @@ from asahi_firmware.multitouch import MultitouchFWCollection
@@ -195,7 +195,7 @@ index f0b85fe..f1420f8 100644
          logging.info("Parsing metadata...")
  
          manifest = plistlib.load(self.open("BuildManifest.plist"))
-@@ -265,6 +278,7 @@ class StubInstaller(PackageInstaller):
+@@ -264,6 +277,7 @@ class StubInstaller(PackageInstaller):
          logging.info(f"OS info: {self.osi}")
  
          p_progress("Beginning stub OS install...")
@@ -203,7 +203,7 @@ index f0b85fe..f1420f8 100644
          identity = self.load_identity()
          sysver = plistlib.load(self.open("SystemVersion.plist"))
  
-@@ -371,12 +385,20 @@ class StubInstaller(PackageInstaller):
+@@ -370,12 +384,20 @@ class StubInstaller(PackageInstaller):
          os.makedirs(basesystem_path, exist_ok=True)
  
          logging.info("Extracting arm64eBaseSystem.dmg")

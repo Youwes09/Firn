@@ -1,5 +1,4 @@
-# Suspend and hibernate do not work on the J713 yet. A closed lid powers off
-# rather than leaving the Air running in a bag.
+# Sleep does not work yet, so a closed lid powers off.
 { config, lib, ... }:
 {
   config = lib.mkIf config.hardware.firn.enable {

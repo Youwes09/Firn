@@ -1,8 +1,3 @@
-# m1n1 for the J713, both stages from one upstream commit.
-#
-# Stage 1 is the boot object the installer registers in the stub macOS; it
-# loads stage 2 from the EFI partition. Stage 2 boots Linux from the payloads
-# appended to it in boot.bin.
 {
   lib,
   m1n1,
@@ -38,7 +33,7 @@ assert lib.elem stage [
       "ARCH=${m1n1.stdenv.cc.targetPrefix}"
       "RELEASE=1"
       "CHAINLOADING=${if stage == 1 then "1" else "0"}"
-      # m1n1 cannot drive the M4's display (DCP) yet.
+      # No DCP support for the M4 yet.
       "NO_DISPLAY=1"
     ];
 

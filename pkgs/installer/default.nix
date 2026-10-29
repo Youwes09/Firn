@@ -1,7 +1,4 @@
-# The macOS-side installer: upstream asahi-installer with patches/ for the M4
-# and macOS 26, packaged the way its build.sh does. It runs on the Mac under
-# python.org's Python framework, with Homebrew's libffi for ctypes; those two
-# and the CA bundle are the only parts not built here.
+# Python, libffi and the CA bundle are the only parts not built from source.
 {
   lib,
   stdenvNoCC,
@@ -12,7 +9,6 @@
   librsvg,
   libicns,
   cacert,
-  # m1n1 stage 1 (pkgs/m1n1 with stage = 1), cross-compiled for aarch64.
   m1n1Stage1,
 }:
 let
@@ -20,8 +16,7 @@ let
     url = "https://www.python.org/ftp/python/3.13.9/python-3.13.9-macos11.pkg";
     hash = "sha256-2v6/YrhzfzQfa37KLW0RU6UKaxv7+kuKrw5ircc+UBc=";
   };
-  # Homebrew's libffi 3.5.2 bottle for arm64 macOS 26; its registry digest is
-  # its SHA-256. The registry takes this anonymous token for public bottles.
+  # The registry's anonymous token for public bottles.
   libffi = fetchurl {
     name = "libffi-3.5.2.arm64_tahoe.bottle.tar.gz";
     url = "https://ghcr.io/v2/homebrew/core/libffi/blobs/sha256:564ce412bbf20deb184e488fe9b1cbf94b5c770965e48567c829a5f580141a95";
@@ -49,13 +44,11 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preBuild
 
     mkdir -p package/bin package/boot
-    # src/asahi_firmware is a link to the top-level directory.
     cp -r src/* package/
     rm package/asahi_firmware
     cp -r asahi_firmware package/
     install -m444 ${m1n1Stage1}/lib/m1n1/m1n1.bin package/boot/m1n1.bin
 
-    # The stub OS's icon.
     for size in 16 32 128 256 512; do
       rsvg-convert -w $size -h $size ${./logo.svg} -o logo-$size.png
     done
@@ -67,7 +60,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     tar -xzf ${libffi}
     mv libffi/3.5.2/lib/libffi*.dylib $framework/Versions/Current/lib/
 
-    # As build.sh: no headers, Tk, tests or bundled pip.
+    # As upstream's build.sh.
     rm -rf $framework/Versions/Current/{include,share}
     (cd $framework/Versions/Current/lib && rm -rf -- tdb* tk* Tk* libtk* *tcl*)
     (cd $framework/Versions/Current/lib/python3.13 && rm -rf test ensurepip idlelib)
@@ -76,7 +69,6 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     echo firn-${finalAttrs.version} > package/version.tag
 
-    # License notices for everything in the package.
     mkdir notices
     install -m444 LICENSE notices/asahi-installer.txt
     install -m444 ${m1n1Stage1.src}/LICENSE notices/m1n1.txt

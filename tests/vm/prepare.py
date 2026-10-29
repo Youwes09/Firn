@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Make what the installer would write for a generation, for the VM test.
-
-Writes boot.bin with the installer's own payloads.build, using a stand-in
-firmware archive in the installer's /vendorfw layout, and the initramfs and
-boot arguments inside it for QEMU to boot directly.
-"""
+"""Write the installer's boot.bin for a generation, and its parts for QEMU."""
 import argparse
 import importlib.util
 from pathlib import Path

@@ -1,7 +1,4 @@
-# T2: boot the shipped kernel and initrd in QEMU's generic arm64 machine, from
-# what the installer would write, and run the self-test inside. This checks the
-# software path (first boot, firmware hand-off, EFI mount, firn-boot), not
-# Apple hardware: QEMU's devicetree describes a virtual machine, not the Air.
+# Boots what the installer would write in QEMU; tests software, not hardware.
 { pkgs, nixos }:
 let
   test = nixos.extendModules { modules = [ ./selftest.nix ]; };
@@ -13,7 +10,6 @@ let
     volumeLabel = cfg.hardware.firn.image.label;
     uuid = cfg.hardware.firn.image.rootUuid;
   };
-  # The EFI partition's GPT UUID, which m1n1 stage 1 passes in the devicetree.
   efiUuid = "3d6b3c0e-5f1a-4a8e-9b7d-2c4e6f8a0b1c";
   machine = "-M virt -cpu max -smp 2 -m 3072";
 in
@@ -38,12 +34,10 @@ pkgs.runCommand "firn-vm-boot"
       --toplevel ${toplevel} \
       --out parts
 
-    # Root: the image on a larger disk, as the installer's expanded partition.
     cp ${rootImage} root.img
     chmod u+w root.img
     truncate -s +1G root.img
 
-    # EFI system partition holding the installer's boot.bin.
     truncate -s 72M esp.img
     sfdisk --quiet esp.img <<EOF
     label: gpt
@@ -53,14 +47,12 @@ pkgs.runCommand "firn-vm-boot"
     export MTOOLS_SKIP_CHECK=1
     mmd -i fat.img ::/m1n1
     mcopy -i fat.img parts/boot.bin ::/m1n1/boot.bin
-    # Stand-ins for what the installer also leaves there, which Firn moves.
     mmd -i fat.img ::/asahi ::/vendorfw
     echo firn-test-installer-data > installer.log
     mcopy -i fat.img installer.log ::/asahi/installer.log
     mcopy -i fat.img installer.log ::/vendorfw/manifest.txt
     dd if=fat.img of=esp.img bs=512 seek=2048 conv=notrunc status=none
 
-    # QEMU's own devicetree plus the property m1n1 stage 1 sets.
     qemu-system-aarch64 ${machine} -machine dumpdtb=virt.dtb -nographic >/dev/null
     fdtput -t s virt.dtb /chosen asahi,efi-system-partition ${efiUuid}
 

@@ -1,4 +1,4 @@
-From 0c77ba031442b06bf67a07bed5a152a08c32d760 Mon Sep 17 00:00:00 2001
+From cab0af73448d53c910234b88ac8b045979cf9d44 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Tue, 27 Oct 2026 22:04:20 -0500
 Subject: [PATCH 6/8] osinstall: Build next_object from m1n1 payloads
@@ -30,9 +30,9 @@ The approach and the part checks follow the Gravity Linux installer (MIT)
 as shipped by Omarchy-M4-Native, which writes a fixed path; this writes
 the template's next_object.
 ---
- src/osinstall.py | 35 +++++++++++++++++++-
- src/payloads.py  | 86 ++++++++++++++++++++++++++++++++++++++++++++++++
- 2 files changed, 120 insertions(+), 1 deletion(-)
+ src/osinstall.py | 35 ++++++++++++++++++++++-
+ src/payloads.py  | 74 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 108 insertions(+), 1 deletion(-)
  create mode 100644 src/payloads.py
 
 diff --git a/src/osinstall.py b/src/osinstall.py
@@ -111,26 +111,15 @@ index c721fcb..eaa1f00 100644
          logging.info(f"Building boot object")
 diff --git a/src/payloads.py b/src/payloads.py
 new file mode 100644
-index 0000000..4d25fe8
+index 0000000..aabf9ad
 --- /dev/null
 +++ b/src/payloads.py
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,74 @@
 +# SPDX-License-Identifier: MIT
-+"""Build next_object from m1n1 stage 2 and its payloads.
++"""Build next_object from m1n1 stage 2, its payloads and the collected firmware.
 +
-+Machines with no bootloader after m1n1 yet boot Linux from m1n1 stage 2
-+directly: next_object is stage 2 followed by its boot arguments, the kernel,
-+the devicetree and the initramfs. The firmware the installer collects has to
-+be in that initramfs, so the installer joins the parts from the OS package
-+with the firmware archive, instead of the package shipping next_object.
-+
-+An OS template asks for this with
-+    "payloads": {
-+        "m1n1": {"file": ..., "sha256": ...},
-+        "kernel": ..., "dtb": ..., "initramfs": ...,
-+        "bootargs": "...",
-+    }
-+where kernel and initramfs are gzip compressed.
++Template: "payloads": {"m1n1"|"kernel"|"dtb"|"initramfs": {"file", "sha256"},
++"bootargs": str}, with the kernel and initramfs gzip compressed.
 +"""
 +import hashlib, re, struct
 +
@@ -192,8 +181,7 @@ index 0000000..4d25fe8
 +        raise Exception("The firmware archive is not a complete newc cpio archive")
 +
 +    initramfs = parts["initramfs"] + bytes(-len(parts["initramfs"]) % 4) + firmware
-+    # No terminator: m1n1 stage 1 appends its variables to the chainloaded
-+    # image, then pads it to end the payloads.
++    # No terminator: m1n1 stage 1 appends its variables.
 +    return b"".join((
 +        parts["m1n1"],
 +        b"chosen.bootargs=" + bootargs.encode("ascii") + b"\n",

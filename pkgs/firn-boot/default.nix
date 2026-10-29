@@ -5,7 +5,6 @@
   python3,
 }:
 let
-  # The installer's source, whose payloads.py writes the first boot.bin.
   installer = callPackage ../installer/source.nix { };
 in
 stdenvNoCC.mkDerivation {

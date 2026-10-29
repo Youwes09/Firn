@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# firn-report: read-only hardware report for the J713 runbook.
-#   firn-report            one report (save it: firn-report > report.txt)
+#   firn-report            one report
 #   firn-report temps [S]  print CPU and SoC temperatures every S seconds (default 2)
 set -uo pipefail
 

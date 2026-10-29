@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the Firn installer kit and check it with the installer's own code.
-
-The kit is the installer package, our installer_data.json and the OS package.
-Before anything final is written, the OS package is loaded the way the
-installer loads it (OSInstaller.load_package, which reads and checks the boot
-payloads), the boot.bin the installer would write is built with its
-payloads.build, and firn-boot must read that back and rewrite it unchanged.
-"""
+"""Assemble the installer kit and check it with the installer's own code."""
 import argparse
 import hashlib
 import importlib.util
@@ -18,8 +11,7 @@ import sys
 import zipfile
 
 PACKAGE = 'firn-j713.zip'
-# The macOS version the installer builds the stub from. Its GPU firmware is
-# the one the kernel and m1n1 are developed against.
+# Its GPU firmware is the one the kernel is developed against.
 STUB_FIRMWARE = '26.5.1'
 
 
@@ -101,7 +93,7 @@ def main():
 
     (out / 'os').mkdir()
     package = out / 'os' / PACKAGE
-    # Store paths are dated 1970; ZIP starts at 1980, so dates are clamped.
+    # ZIP dates start at 1980.
     with zipfile.ZipFile(package, 'x', compression=zipfile.ZIP_DEFLATED, compresslevel=1,
                          allowZip64=True, strict_timestamps=False) as archive:
         archive.write(args.root_image, 'root.ext4')
@@ -110,14 +102,12 @@ def main():
     with zipfile.ZipFile(package) as archive:
         require(archive.testzip() is None, 'ZIP CRC failure')
 
-    # The installer loads the package from REPO_BASE/os/, as from the kit.
     os.environ['REPO_BASE'] = str(out)
     installer = osinstall.OSInstaller(None, {'os_list': [entry]}, entry)
     installer.load_package()
     require(installer.payloads is not None, 'the installer did not read the boot payloads')
 
-    # The boot.bin the installer will write, with a stand-in firmware archive,
-    # must be one firn-boot reads and would rewrite to the same bytes.
+    # firn-boot must rewrite the installer's boot.bin unchanged.
     firmware = stand_in_firmware()
     firn_boot.check_firmware(firmware)
     bootbin = payloads.build(installer.payloads, bootargs, firmware)

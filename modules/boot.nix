@@ -1,5 +1,3 @@
-# Booting through m1n1: every generation is written into <ESP>/m1n1/boot.bin
-# by firn-boot, with its own m1n1 stage 2, kernel, devicetree and initrd.
 {
   config,
   lib,
@@ -9,7 +7,6 @@
 let
   cfg = config.hardware.firn;
   firn-boot = pkgs.callPackage ../pkgs/firn-boot { };
-  # Cross-compiled on cfg.buildSystem, like the kernel.
   m1n1 =
     (import pkgs.path {
       localSystem = cfg.buildSystem;
@@ -17,11 +14,7 @@ let
     }).callPackage
       ../pkgs/m1n1
       { };
-  # The installer also leaves its data (asahi/) and the firmware it collected
-  # (vendorfw/) on the 500 MB partition. Firn reads neither: its firmware is
-  # in boot.bin. firn-boot needs the room for boot.bin.original and
-  # boot.bin.previous, so they move to the root filesystem, copied before
-  # they are removed.
+  # firn-boot needs the room on the 500 MB partition; Firn reads neither.
   esp-tidy = pkgs.writeShellScript "firn-esp-tidy" ''
     set -eu
     PATH=${lib.makeBinPath [ pkgs.coreutils ]}
@@ -45,19 +38,17 @@ let
 in
 {
   config = lib.mkIf cfg.enable {
-    # firn-boot reads <toplevel>/dtbs/apple/t8132-j713.dtb.
     hardware.deviceTree = {
       enable = true;
       filter = "t8132-j713.dtb";
     };
 
-    # firn-boot writes <toplevel>/m1n1.bin into boot.bin.
     system.systemBuilderCommands = ''
       ln -s ${m1n1}/lib/m1n1/m1n1.bin $out/m1n1.bin
     '';
 
     boot.initrd.systemd.enable = true;
-    # The installer and firn-boot both require one gzip initrd.
+    # The installer and firn-boot require a gzip initrd.
     boot.initrd.compressor = "gzip";
 
     environment.systemPackages = [
@@ -65,8 +56,7 @@ in
       (pkgs.callPackage ../pkgs/firn-report { })
     ];
 
-    # The installer creates the EFI system partition and m1n1 stage 1 passes its
-    # partition UUID in the devicetree, so it is found at boot, not in fstab.
+    # m1n1 stage 1 names the installer's EFI partition in the devicetree.
     systemd.services.firn-esp = {
       description = "Mount the EFI system partition named by m1n1";
       wantedBy = [ "multi-user.target" ];
@@ -114,7 +104,7 @@ in
         if ! ${pkgs.util-linux}/bin/mountpoint -q ${lib.escapeShellArg cfg.efiMountPoint}; then
           ${config.systemd.package}/bin/systemctl start firn-esp.service
         fi
-        # Run directly: a generation installed with "boot" is not running yet.
+        # Not a unit: a generation installed with "boot" is not running yet.
         ${esp-tidy}
         exec ${lib.getExe firn-boot} install "$1" --efi ${lib.escapeShellArg cfg.efiMountPoint} --apply
       '';

@@ -1,4 +1,4 @@
-From 053d9f95e6f58590530bf8d1ed14e2b03b34262f Mon Sep 17 00:00:00 2001
+From b5f32fd16758b19c3a2b8c86518db4fe72f8ee30 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Tue, 27 Oct 2026 22:00:49 -0500
 Subject: [PATCH 4/8] stub: Collect firmware from macOS 26 recovery images
@@ -24,7 +24,7 @@ extension too.
  1 file changed, 14 insertions(+), 3 deletions(-)
 
 diff --git a/src/stub.py b/src/stub.py
-index f1420f8..5a87d1f 100644
+index 35c898c..6bda825 100644
 --- a/src/stub.py
 +++ b/src/stub.py
 @@ -10,6 +10,9 @@ from asahi_firmware.als import AlsFWCollection, FACTORY_DIR
@@ -37,7 +37,7 @@ index f1420f8..5a87d1f 100644
  class StubInstaller(PackageInstaller):
      def __init__(self, sysinfo, dutil, osinfo):
          super().__init__()
-@@ -483,8 +486,12 @@ class StubInstaller(PackageInstaller):
+@@ -482,8 +485,12 @@ class StubInstaller(PackageInstaller):
          logging.info("Attaching recovery ramdisk")
          subprocess.run(["hdiutil", "attach", "-quiet", "-readonly", "-mountpoint", "recovery", img],
                         check=True)
@@ -52,7 +52,7 @@ index f1420f8..5a87d1f 100644
          pkg.add_files(sorted(col.files()))
          logging.info("Collecting Bluetooth firmware")
          col = BluetoothFWCollection("recovery/usr/share/firmware/bluetooth/")
-@@ -507,10 +514,14 @@ class StubInstaller(PackageInstaller):
+@@ -506,10 +513,14 @@ class StubInstaller(PackageInstaller):
              os.makedirs(f"{tmpdir}/apple")
              for name, fwf in als_files:
                  open(f"{tmpdir}/{name}", "wb").write(fwf.data)

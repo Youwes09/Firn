@@ -1,6 +1,3 @@
-# Installing from the installer: the root filesystem starts as the image in the
-# OS package, written to a partition the installer sizes, and the EFI system
-# partition is the one the installer creates.
 {
   config,
   lib,
@@ -27,21 +24,16 @@ in
     fileSystems."/" = lib.mkDefault {
       device = "/dev/disk/by-uuid/${cfg.image.rootUuid}";
       fsType = "ext4";
-      # The installer makes the partition larger than the image.
       autoResize = true;
     };
 
-    # The image has only 16 MiB free, which activation in the initrd can use up
-    # before the root is grown after switching root. The initrd's fstab already
-    # asks for it to grow (x-systemd.growfs); this adds what that needs, so it
-    # grows as soon as it is mounted.
+    # Grow before initrd activation fills the image's 16 MiB of free space.
     boot.initrd.systemd = {
       additionalUpstreamUnits = [ "systemd-growfs@.service" ];
       storePaths = [ "${config.boot.initrd.systemd.package}/lib/systemd/systemd-growfs" ];
     };
 
-    # The image holds only /nix/store; register it and make the system profile
-    # on first boot, as nixpkgs' SD-card images do.
+    # As nixpkgs' SD-card images.
     boot.postBootCommands = ''
       if [ -f /nix-path-registration ]; then
         set -euo pipefail

@@ -1,13 +1,8 @@
-# The installer kit for a NixOS configuration. Built with the build machine's
-# own tools (it only copies and archives data), so on an x86_64 host only the
-# aarch64 system itself needs emulation.
 {
   callPackage,
   runCommand,
   python3,
-  # The aarch64 NixOS configuration (nixpkgs.lib.nixosSystem result).
   nixos,
-  # pkgs/installer.
   installer,
 }:
 let
@@ -26,7 +21,7 @@ runCommand "firn-kit-${cfg.system.nixos.label}"
     passthru = { inherit rootImage toplevel; };
   }
   ''
-    # The installer needs a whole number of MiB; the filesystem may be smaller.
+    # The installer needs whole MiB.
     cp ${rootImage} root.ext4
     chmod u+w root.ext4
     size=$(stat -c %s root.ext4)

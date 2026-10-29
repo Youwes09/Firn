@@ -1,4 +1,4 @@
-From 0954a3080d7b3fdacec04e02ee83d19ce96ba248 Mon Sep 17 00:00:00 2001
+From d0118bba16e1bc24a40d3427ecd39d723c0eadf8 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Tue, 27 Oct 2026 21:53:59 -0500
 Subject: [PATCH 1/8] stub: Allow restore images without RestoreBundlePath
@@ -14,19 +14,18 @@ with a message naming the version.
 The missing key and the fallback directory were found by the Gravity Linux
 installer (MIT) as shipped by Omarchy-M4-Native.
 ---
- src/stub.py | 23 ++++++++++++++++++-----
- 1 file changed, 18 insertions(+), 5 deletions(-)
+ src/stub.py | 22 +++++++++++++++++-----
+ 1 file changed, 17 insertions(+), 5 deletions(-)
 
 diff --git a/src/stub.py b/src/stub.py
-index 93cacff..f0b85fe 100644
+index 93cacff..0e7342f 100644
 --- a/src/stub.py
 +++ b/src/stub.py
-@@ -245,6 +245,20 @@ class StubInstaller(PackageInstaller):
+@@ -245,6 +245,19 @@ class StubInstaller(PackageInstaller):
          manifest["BuildIdentities"] = [identity]
          return identity
  
-+    # Restore images whose bootcaches.plist has no RestoreBundlePath, with the
-+    # Preboot directory macOS uses for them instead.
++    # Preboot directories for restore images without RestoreBundlePath.
 +    RESTORE_BUNDLE_PATHS = {
 +        "26.5.1": "restore",
 +    }
@@ -42,7 +41,7 @@ index 93cacff..f0b85fe 100644
      def install_files(self, cur_os):
          logging.info("StubInstaller.install_files()")
          logging.info(f"VGID: {self.osi.vgid}")
-@@ -299,9 +313,9 @@ class StubInstaller(PackageInstaller):
+@@ -299,9 +312,9 @@ class StubInstaller(PackageInstaller):
  
          os.makedirs(self.pb_vgid, exist_ok=True)
  
@@ -54,7 +53,7 @@ index 93cacff..f0b85fe 100644
          os.makedirs(restore_bundle, exist_ok=True)
          restore_manifest = os.path.join(restore_bundle, "BuildManifest.plist")
          with open(restore_manifest, "wb") as fd:
-@@ -342,7 +356,7 @@ class StubInstaller(PackageInstaller):
+@@ -342,7 +355,7 @@ class StubInstaller(PackageInstaller):
  
          # This is a workaround for some screwiness in the macOS <12.0 bootability
          # code, which ends up putting the apticket in the wrong volume...
@@ -63,7 +62,7 @@ index 93cacff..f0b85fe 100644
          if os.path.lexists(sys_restore_bundle):
              os.unlink(sys_restore_bundle)
          os.symlink(restore_bundle, sys_restore_bundle)
-@@ -408,8 +422,7 @@ class StubInstaller(PackageInstaller):
+@@ -408,8 +421,7 @@ class StubInstaller(PackageInstaller):
              shutil.rmtree("fud_firmware")
  
          os.makedirs("fud_firmware", exist_ok=True)

@@ -1,8 +1,4 @@
-"""Offline tests for firn-boot against synthetic boot.bin files.
-
-When PAYLOADS_PY names the installer's src/payloads.py, the contract tests
-also build boot.bin with the installer's own code and read it back.
-"""
+"""PAYLOADS_PY enables the contract tests against the installer's payloads.py."""
 import gzip
 import importlib.util
 import io
@@ -202,7 +198,6 @@ class Install(unittest.TestCase):
         (self.toplevel / boot.DTB).write_bytes(NEW_DTB)
         (self.toplevel / 'initrd').write_bytes(NEW_INITRD)
         (self.toplevel / 'kernel-params').write_text(' '.join(NIXOS_ARGS))
-        # The generation is reached through a profile link, as NixOS passes it.
         self.saved_store = boot.STORE
         boot.STORE = str(root.resolve()) + '/'
         self.link = root / 'system-1-link'
@@ -237,7 +232,6 @@ class Install(unittest.TestCase):
         layout = boot.parse(self.boot.read_bytes())
         self.assertEqual(layout['loader'], NEW_LOADER)
         self.assertIn('init=' + str(self.toplevel.resolve() / 'init'), layout['bootargs'].decode())
-        # The replaced file is the installer's, already kept once.
         self.assertFalse((self.dir / 'boot.bin.previous').exists())
         (self.toplevel / 'kernel-params').write_text(' '.join(NIXOS_ARGS + ['quiet']))
         first = self.boot.read_bytes()

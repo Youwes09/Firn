@@ -1,5 +1,3 @@
-# T1: what the built system must and must not contain, checked from its
-# evaluated configuration. Fails with every violated rule listed.
 { pkgs, nixos }:
 let
   inherit (pkgs) lib;
@@ -10,8 +8,7 @@ let
   sleep = cfg.systemd.sleep.settings.Sleep;
 
   rules = {
-    "kernel is this repository's source build" =
-      kernel.modDirVersion == "7.1.9-firn";
+    "kernel is this repository's source build" = kernel.modDirVersion == "7.1.9-firn";
     "the kernel builds no GPU or speaker codec driver" =
       lib.all
         (

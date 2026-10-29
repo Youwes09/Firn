@@ -1,6 +1,5 @@
 #!/bin/bash
-# Firn preflight: read-only checks on the Mac before installing.
-# It changes nothing: no disk, boot policy or file is modified.
+# Read-only checks before installing.
 #   bash preflight.command [GB]   GB for Firn, default 60
 set -uo pipefail
 kit=$(cd "$(dirname "$0")" && pwd -P)
@@ -11,7 +10,6 @@ ok() { printf 'ok    %s\n' "$*"; }
 bad() { printf 'FAIL  %s\n' "$*"; fail=1; }
 note() { printf 'WARN  %s\n' "$*"; warn=1; }
 
-# a >= b for dotted versions
 version_ge() {
   local i a b
   IFS=. read -ra a <<< "$1"
@@ -39,8 +37,7 @@ fi
 firmware=$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/System Firmware Version/{print $2}')
 ok "system firmware $firmware"
 
-# The installer counts in decimal GB, asks for macOS's new size when it
-# shrinks the container, and keeps at least 38 GB free in macOS.
+# The installer counts decimal GB and keeps 38 GB free in macOS.
 G=1000000000
 info=$(/usr/sbin/diskutil info /)
 bytes() { awk -F'[(]' -v key="$1" '$0 ~ key {print $2; exit}' <<< "$info" | awk '{print $1}'; }

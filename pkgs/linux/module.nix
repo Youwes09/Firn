@@ -1,13 +1,9 @@
-# Build one in-tree driver directory against a finished kernel, so changing
-# that driver rebuilds only its modules. They install under updates/, which
-# modprobe prefers over the kernel's own copies.
+# Rebuilds one driver directory against a finished kernel; installs to updates/.
 {
   lib,
   kernel,
   pname,
-  # The driver directory, relative to the kernel source.
   dir,
-  # The module names to install from it.
   modules,
   patches ? [ ],
 }:
@@ -16,8 +12,7 @@ kernel.stdenv.mkDerivation {
   inherit (kernel) src version;
 
   nativeBuildInputs = kernel.moduleBuildDependencies;
-  # The kernel's headers reach the module only as __FILE__ strings; mapped as
-  # an in-tree build maps them, the module does not keep the build tree alive.
+  # Keeps __FILE__ strings from referencing the build tree.
   disallowedReferences = [ kernel.dev ];
 
   buildPhase = ''

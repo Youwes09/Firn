@@ -13,7 +13,6 @@
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
       minimal = self.nixosConfigurations.minimal;
 
-      # aarch64-linux package set built on (and, if foreign, cross-compiled from) system.
       aarch64From =
         system:
         import nixpkgs {
@@ -35,14 +34,12 @@
       packages = forAll (
         pkgs:
         let
-          # Built natively on aarch64, cross-compiled elsewhere.
           aarch64 = aarch64From pkgs.stdenv.hostPlatform.system;
           packages = self.packages.${pkgs.stdenv.hostPlatform.system};
         in
         {
           firn-boot = pkgs.callPackage ./pkgs/firn-boot { };
           installer = pkgs.callPackage ./pkgs/installer { m1n1Stage1 = packages.m1n1-stage1; };
-          # The installer kit; data assembly runs on this system's own tools.
           kit = pkgs.callPackage ./pkgs/kit {
             nixos = minimal;
             inherit (packages) installer;
@@ -73,7 +70,7 @@
             inherit pkgs;
             kernel = packages.linux;
           };
-          # Needs an aarch64 builder (binfmt on x86_64) for the system itself.
+          # Needs an aarch64 builder.
           vm-boot = import ./tests/vm {
             inherit pkgs;
             nixos = minimal;
