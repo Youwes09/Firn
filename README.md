@@ -74,7 +74,7 @@ git tree leaves untracked files out, so build the system with
 
 Patches keep their authors. Upstream kernel patches are as posted, and
 changes from [Omarchy-M4-Native](https://github.com/Kb2uka/Omarchy-M4-Native)
-are credited to KB2UKA, in the kernel series and in m1n1's stage 1 patch.
+are credited to KB2UKA, in the kernel series and in m1n1's patches.
 The installer patches credit the Gravity Linux installer, as shipped by
 Omarchy-M4-Native, where they follow it. The installer kit ships the
 licence notices of everything in the installer.

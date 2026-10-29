@@ -1,0 +1,333 @@
+From 69a175f516e363bfa375c53d1e6b1890113cbb6c Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Thu, 8 Oct 2026 18:05:25 -0500
+Subject: [PATCH] kboot_gpu: Hand the t8132 GPU over to the OS
+
+Pass the GPU's memory regions, private VM region and firmware version
+from the ADT to the devicetree, with the core mask, performance states
+and per-state power limits, and enable the GPU node.
+
+From Omarchy-M4-Native's m1n1 (https://github.com/Kb2uka/Omarchy-M4-Native),
+by KB2UKA, with its GPL-2.0-or-later licence.
+---
+ src/kboot_gpu.c | 203 +++++++++++++++++++++++++++++++++++++++++++++++-
+ src/m4_power.h  |  83 ++++++++++++++++++++
+ 2 files changed, 285 insertions(+), 1 deletion(-)
+ create mode 100644 src/m4_power.h
+
+diff --git a/src/kboot_gpu.c b/src/kboot_gpu.c
+index 8161534c..50b0a6dd 100644
+--- a/src/kboot_gpu.c
++++ b/src/kboot_gpu.c
+@@ -1,4 +1,4 @@
+-/* SPDX-License-Identifier: MIT */
++/* SPDX-License-Identifier: GPL-2.0-or-later */
+ 
+ #include "kboot.h"
+ #include "adt.h"
+@@ -6,6 +6,7 @@
+ #include "firmware.h"
+ #include "malloc.h"
+ #include "math.h"
++#include "m4_power.h"
+ #include "pmgr.h"
+ #include "soc.h"
+ #include "utils.h"
+@@ -490,8 +491,208 @@ static int fdt_set_aux_opp(void *dt, int gpu, const char *prop, const struct aux
+     return 0;
+ }
+ 
++static int dt_set_gpu_t8132_adt(void *dt, int gpu, int sgx)
++{
++    ADT_FOREACH_PROPERTY(adt, sgx, prop)
++    {
++        char name[64];
++        size_t len = strnlen(prop->name, sizeof(prop->name));
++        if (len == sizeof(prop->name))
++            bail("ADT: GPU: unterminated property name\n");
++        snprintf(name, sizeof(name), "apple,sgx-%s", prop->name);
++        if (fdt_setprop(dt, gpu, name, prop->value, prop->size & 0x7fffffff))
++            bail("FDT: GPU: failed to preserve %s\n", prop->name);
++    }
++
++    int arm_io = adt_path_offset(adt, "/arm-io");
++    u32 revision;
++    if (arm_io < 0 || ADT_GETPROP(adt, arm_io, "chip-revision", &revision) < 0)
++        bail("ADT: GPU: missing chip revision\n");
++    if (fdt_setprop_u32(dt, gpu, "apple,chip-revision", revision) ||
++        fdt_setprop_string(dt, gpu, "apple,firmware-build", os_firmware.iboot))
++        return -1;
++    return 0;
++}
++
++/* Match the existing core-count path: enable the GPU domain before MMIO.
++ * Keep it active for the subsequent kernel handoff. */
++static int get_t8132_core_mask(u32 *mask, const fdt32_t *index_a,
++                              const fdt32_t *index_b, u32 groups)
++{
++    int path[8];
++    u64 base, size;
++    if (adt_path_offset_trace(adt, "/arm-io/sgx", path) < 0 ||
++        adt_get_reg(adt, path, "reg", 0, &base, &size) < 0 ||
++        base != 0x300000000ULL || size < 0xe01504 || groups > MAX_PSTATES)
++        bail("ADT: GPU: invalid T8132 register window\n");
++    if (pmgr_adt_power_enable("/arm-io/sgx") < 0)
++        bail("PMGR: GPU: could not enable T8132 register access\n");
++    *mask = read32(base + 0xe01500);
++    u32 high = 0, low = 0;
++    for (u32 i = 0; i < groups; i++) {
++        if (!(i & 1)) {
++            high = read32(base + 0xe01400 + 4 * (i / 2));
++            low = read32(base + 0xe01480 + 4 * (i / 2));
++        }
++        u32 shift = (i & 1) * 16;
++        if (((high >> shift) & 0xf) != fdt32_ld(&index_a[i]) ||
++            ((low >> shift) & 0xf) != fdt32_ld(&index_b[i]))
++            bail("ADT: GPU: T8132 hardware performance map mismatch at %u\n", i);
++    }
++    return 0;
++}
++
++static int dt_set_gpu_t8132_perf(void *dt, int gpu, int sgx)
++{
++    u32 count, tables, core_len, sram_len;
++    if (ADT_GETPROP(adt, sgx, "perf-state-count", &count) < 0 ||
++        ADT_GETPROP(adt, sgx, "perf-state-table-count", &tables) < 0 ||
++        tables != 1 || count == 0 || count > MAX_PSTATES)
++        bail("ADT: GPU: unsupported M4 performance table geometry\n");
++    const struct perf_state *core = adt_getprop(adt, sgx, "perf-states", &core_len);
++    const struct perf_state *sram = adt_getprop(adt, sgx, "perf-states-sram", &sram_len);
++    if (!core || !sram || core_len != count * sizeof(*core) || sram_len != core_len)
++        bail("ADT: GPU: incomplete M4 performance tables\n");
++
++    fdt32_t freq_a[MAX_PSTATES], freq_b[MAX_PSTATES];
++    fdt32_t index_a[MAX_PSTATES], index_b[MAX_PSTATES];
++    fdt32_t core_voltage[MAX_PSTATES], memory_voltage[MAX_PSTATES];
++    u32 groups = 0;
++    for (u32 first = 0; first < count;) {
++        u32 last = first, low = first, high = first;
++        while (last + 1 < count && core[last + 1].volt == core[first].volt)
++            last++;
++        for (u32 row = first; row <= last; row++) {
++            if (core[row].freq != sram[row].freq ||
++                sram[row].volt != sram[first].volt || core[row].freq % 1000000)
++                bail("ADT: GPU: inconsistent M4 performance row %u\n", row);
++            if (core[row].freq < core[low].freq)
++                low = row;
++            if (core[row].freq > core[high].freq)
++                high = row;
++        }
++        if (first && core[first].volt <= core[first - 1].volt)
++            bail("ADT: GPU: unordered M4 voltage steps\n");
++        freq_a[groups] = cpu_to_fdt32(core[high].freq / 1000000);
++        freq_b[groups] = cpu_to_fdt32(core[low].freq / 1000000);
++        index_a[groups] = cpu_to_fdt32(high);
++        index_b[groups] = cpu_to_fdt32(low);
++        core_voltage[groups] = cpu_to_fdt32(core[first].volt);
++        memory_voltage[groups] = cpu_to_fdt32(sram[first].volt);
++        groups++;
++        first = last + 1;
++    }
++    if (groups != 10 && groups != 11)
++        bail("ADT: GPU: unsupported M4 voltage steps: %u\n", groups);
++
++    u32 core_mask;
++    if (get_t8132_core_mask(&core_mask, index_a, index_b, groups))
++        return -1;
++    u32 enabled_cores = __builtin_popcount(core_mask);
++    if ((core_mask & ~0x3ffu) || (enabled_cores != 8 && enabled_cores != 10))
++        bail("FDT: GPU: unsupported M4 core mask\n");
++    u32 base = 1, higher_ma = 0, property_size;
++    const u32 *property = adt_getprop(adt, sgx, "gpu-perf-base-pstate", &property_size);
++    if (property) {
++        if (property_size != sizeof(*property))
++            bail("ADT: GPU: invalid base performance state\n");
++        base = *property;
++    }
++    property = adt_getprop(adt, sgx, "gpu-supports-higher-mA", &property_size);
++    if (property) {
++        if (property_size != sizeof(*property))
++            bail("ADT: GPU: invalid current-limit selector\n");
++        higher_ma = *property != 0;
++    }
++    u32 leakage = ((read32(0x3882c81dc) >> 11) & 0x3ffe) + 2;
++    u32 power[MAX_PSTATES], frequencies[MAX_PSTATES];
++    u32 relative_power[MAX_PSTATES], relative_frequency[MAX_PSTATES];
++    fdt32_t rel_a[MAX_PSTATES], rel_b[MAX_PSTATES];
++    for (u32 i = 0; i < groups; i++) {
++        frequencies[i] = fdt32_ld(&freq_a[i]) * 1000000;
++        if (m4_power_mw(frequencies[i], fdt32_ld(&core_voltage[i]), leakage,
++                        enabled_cores, higher_ma, &power[i]))
++            bail("ADT: GPU: invalid M4 power inputs\n");
++    }
++    if (m4_relative_tables(power, frequencies, groups, base,
++                           relative_power, relative_frequency))
++        bail("ADT: GPU: invalid M4 transfer tables\n");
++    for (u32 i = 0; i < groups; i++) {
++        rel_a[i] = cpu_to_fdt32(relative_power[i]);
++        rel_b[i] = cpu_to_fdt32(relative_frequency[i]);
++    }
++    size_t size = groups * sizeof(fdt32_t);
++    if (fdt_setprop(dt, gpu, "apple,m4-freq-a", freq_a, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-freq-b", freq_b, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-index-a", index_a, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-index-b", index_b, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-core-voltage", core_voltage, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-memory-voltage", memory_voltage, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-relative-a", rel_a, size) ||
++        fdt_setprop(dt, gpu, "apple,m4-relative-b", rel_b, size) ||
++        fdt_setprop_u32(dt, gpu, "apple,m4-max-power-mw", power[groups - 1]) ||
++        fdt_setprop_u32(dt, gpu, "apple,m4-core-mask", core_mask))
++        return -1;
++    return 0;
++}
++
++/* G16 owns a different initialization graph from G13/G14. Pass the boot
++ * firmware's memory contract through without running the older calibration
++ * serializer. Linux constructs the G16 graph in its own allocations. */
++static int dt_set_gpu_t8132(void *dt)
++{
++    int gpu = fdt_path_offset(dt, "gpu");
++    if (gpu < 0)
++        return 0;
++
++    int sgx = adt_path_offset(adt, "/arm-io/sgx");
++    if (sgx < 0)
++        bail("ADT: GPU: missing sgx node\n");
++
++    static const struct {
++        const char *adt_name;
++        const char *dt_path;
++    } regions[] = {
++        {"gpu-region", "/reserved-memory/uat-ttbs"},
++        {"gfx-shared-region", "/reserved-memory/uat-pagetables"},
++        {"gfx-shared-l2-region", "/reserved-memory/uat-l2"},
++        {"gfx-handoff", "/reserved-memory/uat-handoff"},
++        {"gfx-data", "/reserved-memory/gpu-firmware"},
++    };
++    for (size_t i = 0; i < ARRAY_SIZE(regions); i++) {
++        if (dt_set_region(dt, sgx, regions[i].adt_name, regions[i].dt_path))
++            return -1;
++    }
++
++    /* Adding properties can move the node. Resolve it after all reservations. */
++    gpu = fdt_path_offset(dt, "gpu");
++    u64 private_base, private_size;
++    if (ADT_GETPROP(adt, sgx, "rtkit-private-vm-region-base", &private_base) < 0 ||
++        ADT_GETPROP(adt, sgx, "rtkit-private-vm-region-size", &private_size) < 0 ||
++        !private_size)
++        bail("ADT: GPU: missing private VM region\n");
++
++    fdt64_t private_vm[2] = {cpu_to_fdt64(private_base), cpu_to_fdt64(private_size)};
++    if (fdt_setprop(dt, gpu, "apple,rtkit-private-vm-region", private_vm, sizeof(private_vm)))
++        return -1;
++    if (firmware_set_fdt(dt, gpu, "apple,firmware-version", &os_firmware) ||
++        firmware_set_fdt(dt, gpu, "apple,firmware-compat", &os_firmware) ||
++        firmware_set_fdt(dt, gpu, "apple,firmware-abi", &os_firmware))
++        return -1;
++    if (dt_set_gpu_t8132_adt(dt, gpu, sgx) || dt_set_gpu_t8132_perf(dt, gpu, sgx))
++        return -1;
++    if (fdt_setprop_string(dt, gpu, "status", "okay"))
++        return -1;
++
++    printf("FDT: GPU: T8132 firmware memory handoff ready\n");
++    return 0;
++}
++
+ int dt_set_gpu(void *dt)
+ {
++    if (chip_id == T8132)
++        return dt_set_gpu_t8132(dt);
++
+     bool has_cs_afr = false;
+     int (*calc_power)(u32 count, u32 table_count, const struct perf_state *core,
+                       const struct perf_state *sram, const struct aux_perf_states *cs, u32 *max_pwr,
+diff --git a/src/m4_power.h b/src/m4_power.h
+new file mode 100644
+index 00000000..7d1f9d11
+--- /dev/null
++++ b/src/m4_power.h
+@@ -0,0 +1,83 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/* Copyright (c) 2026 KB2UKA */
++#ifndef M4_POWER_H
++#define M4_POWER_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <math.h>
++
++/* Preserve the single-precision operation order in the validated arithmetic. */
++#if defined(__GNUC__) && !defined(__clang__)
++__attribute__((optimize("fp-contract=off")))
++#endif
++static int m4_power_mw(uint32_t frequency_hz, uint32_t millivolts,
++                       uint32_t leakage, uint32_t cores, bool higher_ma,
++                       uint32_t *result)
++{
++#if defined(__clang__)
++#pragma clang fp contract(off)
++#endif
++    static const float threshold[] = {
++        0x1.692758p-2f, 0x1.e42f46p-2f, 0x1.439186p-1f,
++        0x1.8ee520p-1f, 0x1.e2ecc8p-1f,
++    };
++    static const float coefficient[][3] = {
++        {0x1.740668p-7f, 0x1.92a358p-9f, 0x1.3e79dcp+1f},
++        {0x1.b41fcap-7f, 0x1.43d586p-9f, 0x1.6fdb76p+1f},
++        {0x1.ce7d32p-7f, 0x1.18c3cep-9f, 0x1.8ca160p+1f},
++        {0x1.cef096p-7f, 0x1.05cbc0p-9f, 0x1.9de248p+1f},
++        {0x1.d206e0p-7f, 0x1.ef8448p-10f, 0x1.a74aeap+1f},
++        {0x1.ca61c6p-7f, 0x1.d8c832p-10f, 0x1.b2c8a4p+1f},
++    };
++    if (!result || (cores != 8 && cores != 10) || leakage < 2 || leakage > 16384 ||
++        millivolts == 0 || millivolts > 2000)
++        return -1;
++    if (!frequency_hz) {
++        *result = 0;
++        return 0;
++    }
++    float ratio = (float)leakage / 0x1.82f8f6p+11f;
++    unsigned band = 0;
++    while (band < 5 && ratio >= threshold[band])
++        band++;
++    float voltage = (float)millivolts / 1000.0f;
++    float rounded_mv = (float)(uint32_t)(voltage * 1000.0f);
++    float exponent = rounded_mv * coefficient[band][1];
++    exponent = exponent + coefficient[band][2];
++    float leakage_current = (float)leakage * coefficient[band][0];
++    leakage_current = leakage_current * powf(0x1.5bf0a8p+1f, exponent);
++    float dynamic_current = powf(voltage, 1.2f) * 18.2f;
++    dynamic_current = dynamic_current * (float)(frequency_hz / 1000000);
++    dynamic_current = ((float)cores / 10.0f) * dynamic_current;
++    float current = leakage_current + dynamic_current;
++    float maximum = higher_ma ? 37000.0f : 24800.0f;
++    if (current > maximum)
++        current = maximum;
++    *result = (uint32_t)(voltage * current);
++    return 0;
++}
++
++static int m4_relative_tables(const uint32_t *power, const uint32_t *frequency,
++                              unsigned count, unsigned base,
++                              uint32_t *relative_power, uint32_t *relative_frequency)
++{
++    if (!power || !frequency || !relative_power || !relative_frequency ||
++        (count != 10 && count != 11) || base == 0 || base >= count ||
++        power[0] || frequency[0] || !power[count - 1] ||
++        (base < count - 1 && frequency[count - 1] <= frequency[base]))
++        return -1;
++    for (unsigned i = 1; i < count; i++) {
++        if (power[i] < power[i - 1] || frequency[i] <= frequency[i - 1])
++            return -1;
++    }
++    for (unsigned i = 0; i < count; i++) {
++        relative_power[i] = (uint64_t)power[i] * 100 / power[count - 1];
++        relative_frequency[i] = i < base ? 0 : base == count - 1 ? 100 :
++            (uint64_t)(frequency[i] - frequency[base]) * 100 /
++                (frequency[count - 1] - frequency[base]);
++    }
++    return 0;
++}
++
++#endif
