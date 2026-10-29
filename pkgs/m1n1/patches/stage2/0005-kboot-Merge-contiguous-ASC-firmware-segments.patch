@@ -1,0 +1,51 @@
+From 673d86af550dabe18d2a83ddc951691e09b16392 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 11:33:43 -0500
+Subject: [PATCH] kboot: Merge contiguous ASC firmware segments
+
+Rounding each segment up to 16k made the MTP's __TEXT overlap its
+__DATA, which Linux reports as overlapping reserved memory. Reserve
+segments contiguous in both physical and IOVA space as one region.
+---
+ src/kboot.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/src/kboot.c b/src/kboot.c
+index 2a3e5a4..deb1b63 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -1796,18 +1796,27 @@ static int dt_reserve_asc_firmware(const char *adt_path, const char *adt_path_al
+ 
+     for (unsigned i = 0; i < num_maps; i++) {
+         u64 iova = (remap ? seg->remap : seg->iova) | base;
++        u64 phys = seg->phys;
++        size_t seg_size = seg->size;
++
++        /* Merge segments contiguous in both spaces, so rounding cannot overlap them */
++        while (i + 1 < num_maps && seg[1].phys == phys + seg_size &&
++               ((remap ? seg[1].remap : seg[1].iova) | base) == iova + seg_size) {
++            seg++;
++            i++;
++            seg_size += seg->size;
++        }
+ 
+         char node_name[64];
+-        snprintf(node_name, sizeof(node_name), "asc-firmware@%lx", seg->phys);
++        snprintf(node_name, sizeof(node_name), "asc-firmware@%lx", phys);
+ 
+-        size_t seg_size = seg->size;
+-        if (seg->size & (SZ_16K - 1)) {
++        if (seg_size & (SZ_16K - 1)) {
+             printf("ADT: segment %s uses non 16k aligned size: 0x%06zx\n", node_name, seg_size);
+             seg_size = ALIGN_UP(seg_size, SZ_16K);
+         }
+ 
+         int mem_node =
+-            dt_get_or_add_reserved_mem(node_name, "apple,asc-mem", true, seg->phys, seg_size);
++            dt_get_or_add_reserved_mem(node_name, "apple,asc-mem", true, phys, seg_size);
+         if (mem_node < 0)
+             return ret;
+         uint32_t mem_phandle = fdt_get_phandle(dt, mem_node);
+-- 
+2.54.0
+
