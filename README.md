@@ -79,5 +79,11 @@ The installer patches credit the Gravity Linux installer, as shipped by
 Omarchy-M4-Native, where they follow it. The installer kit ships the
 licence notices of everything in the installer.
 
+## Licence
+
+Firn's own code is under the [MIT licence](LICENSE). Patches keep the
+licence of the project they apply to or the one their author chose: the
+kernel's are GPL-2.0, and m1n1's t8132 GPU handoff is GPL-2.0-or-later.
+
 Firn is not affiliated with or endorsed by Asahi Linux, Omarchy-M4-Native,
 Gravity Linux or Apple.
