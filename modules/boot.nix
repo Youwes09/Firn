@@ -22,7 +22,7 @@ let
     dest=/var/lib/firn/installer
     mkdir -p "$dest"
     chmod 700 "$dest"
-    for name in asahi vendorfw; do
+    for name in gravity vendorfw; do
       [ -e "$esp/$name" ] || continue
       target=$dest/$name
       [ -e "$target" ] && target=$dest/$name-$(date +%Y%m%d%H%M%S)
@@ -72,13 +72,13 @@ in
       };
       script = ''
         mountpoint -q ${lib.escapeShellArg cfg.efiMountPoint} && exit 0
-        uuid=$(tr -d '\0' < '/proc/device-tree/chosen/asahi,efi-system-partition')
+        uuid=$(tr -d '\0' < '/proc/device-tree/chosen/gravity,efi-system-partition')
         case "$uuid" in
           ????????-????-????-????-????????????) ;;
           *) echo "m1n1 named no valid EFI partition: '$uuid'" >&2; exit 1 ;;
         esac
         device=/dev/disk/by-partuuid/''${uuid,,}
-        udevadm wait --timeout=30 "$device"
+        udevadm wait --timeout=120 "$device"
         mkdir -p ${lib.escapeShellArg cfg.efiMountPoint}
         mount -t vfat -o umask=0077,nodev,nosuid,noexec "$device" ${lib.escapeShellArg cfg.efiMountPoint}
       '';

@@ -47,14 +47,14 @@ pkgs.runCommand "firn-vm-boot"
     export MTOOLS_SKIP_CHECK=1
     mmd -i fat.img ::/m1n1
     mcopy -i fat.img parts/boot.bin ::/m1n1/boot.bin
-    mmd -i fat.img ::/asahi ::/vendorfw
+    mmd -i fat.img ::/gravity ::/vendorfw
     echo firn-test-installer-data > installer.log
-    mcopy -i fat.img installer.log ::/asahi/installer.log
+    mcopy -i fat.img installer.log ::/gravity/installer.log
     mcopy -i fat.img installer.log ::/vendorfw/manifest.txt
     dd if=fat.img of=esp.img bs=512 seek=2048 conv=notrunc status=none
 
     qemu-system-aarch64 ${machine} -machine dumpdtb=virt.dtb -nographic >/dev/null
-    fdtput -t s virt.dtb /chosen asahi,efi-system-partition ${efiUuid}
+    fdtput -t s virt.dtb /chosen gravity,efi-system-partition ${efiUuid}
 
     timeout 3000 qemu-system-aarch64 ${machine} -nographic -no-reboot \
       -dtb virt.dtb \

@@ -42,7 +42,7 @@ in
           echo "FIRN-SELFTEST ok: $1"
         else
           echo "FIRN-SELFTEST FAIL: $1"
-          sed 's/^/    /' /tmp/selftest.out
+          sed 's/^/FIRN-SELFTEST     /' /tmp/selftest.out
           fail=1
         fi
       }
@@ -56,10 +56,10 @@ in
         fs=$(dumpe2fs -h "$dev" 2>/dev/null | awk -F: "/^Block count/{c=\$2} /^Block size/{s=\$2} END{print c*s}")
         [ "$fs" -gt $(( size * 99 / 100 )) ]'
       check "installer firmware reached /lib/firmware" '[ "$(cat /lib/firmware/brcm/firn-test.bin)" = firn-test-firmware ] && [ -f /run/vendorfw/.vendorfw.manifest ]'
-      check "EFI partition named by m1n1 is mounted" 'findmnt -n "$efi" && [ -f "$efi/m1n1/boot.bin" ]'
+      check "EFI partition named by m1n1 is mounted" 'findmnt -n "$efi" && [ -f "$efi/m1n1/boot.bin" ] || { journalctl -b -u firn-esp --no-pager; false; }'
       check "installer files moved off the EFI partition" '
-        [ ! -e "$efi/asahi" ] && [ ! -e "$efi/vendorfw" ]
-        [ "$(cat /var/lib/firn/installer/asahi/installer.log)" = firn-test-installer-data ]
+        [ ! -e "$efi/gravity" ] && [ ! -e "$efi/vendorfw" ]
+        [ "$(cat /var/lib/firn/installer/gravity/installer.log)" = firn-test-installer-data ]
         [ -s /var/lib/firn/installer/vendorfw/manifest.txt ]'
       check "firn-boot reads the installer boot.bin as this generation" 'firn-boot install /run/current-system --efi "$efi" | tee /dev/stderr | grep -q "already this generation"'
       check "firn-boot refuses to write on a board that is not J713" '
