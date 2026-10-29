@@ -1,0 +1,987 @@
+Gravity Linux bits/190-isp, as merged in 8f9f907e09d0.
+
+diff --git a/drivers/media/platform/apple/isp/isp-cam.c b/drivers/media/platform/apple/isp/isp-cam.c
+index f84f0603260d4..87fc20a163440 100644
+--- a/drivers/media/platform/apple/isp/isp-cam.c
++++ b/drivers/media/platform/apple/isp/isp-cam.c
+@@ -3,6 +3,8 @@
+ 
+ #include <linux/firmware.h>
+ 
++#include <linux/of.h>
++
+ #include "isp-cam.h"
+ #include "isp-cmd.h"
+ #include "isp-fw.h"
+@@ -43,6 +45,7 @@ static const struct isp_setfile isp_setfiles[] = {
+ 	[ISP_IMX514_2820_03] = {0x514, 0x28200305, "apple/isp_2820_03XX.dat", 0xa198},
+ 	[ISP_IMX514_2820_04] = {0x514, 0x28200405, "apple/isp_2820_04XX.dat", 0xa198},
+ 	[ISP_IMX558_1921_01] = {0x558, 0x19210106, "apple/isp_1921_01XX.dat", 0xad40},
++	[ISP_IMX558_1925_03] = {0x558, 0x19250306, "apple/isp_1925_03XX.dat", 0xcba8},
+ 	[ISP_IMX558_1922_02] = {0x558, 0x19220201, "apple/isp_1922_02XX.dat", 0xad40},
+ 	[ISP_IMX603_7920_01] = {0x603, 0x79200109, "apple/isp_7920_01XX.dat", 0xad2c},
+ 	[ISP_IMX603_7920_02] = {0x603, 0x79200205, "apple/isp_7920_02XX.dat", 0xad2c},
+@@ -67,6 +70,7 @@ static const struct isp_setfile isp_setfiles[] = {
+ 	[ISP_IMX913_7523_01] = {0x913, 0x75230107, "apple/isp_7523_01XX.dat", 0x247f8},
+ 	[ISP_VD56G0_6221_01] = {0xd56, 0x62210102, "apple/isp_6221_01XX.dat", 0x1b80},
+ 	[ISP_VD56G0_6222_01] = {0xd56, 0x62220102, "apple/isp_6222_01XX.dat", 0x1b80},
++	[ISP_SENSOR_0958] = {0x958, 0x22240106, "apple/isp_2224_01XX.dat", 0x6ff4},
+ };
+ // clang-format on
+ 
+@@ -114,7 +118,7 @@ static int isp_ch_get_sensor_id(struct apple_isp *isp, u32 ch)
+ 		id = ISP_IMX514_2820_01;
+ 		break;
+ 	case 0x558:
+-		id = ISP_IMX558_1921_01;
++		id = isp->hw->gen == ISP_GEN_T8140 ? ISP_IMX558_1925_03 : ISP_IMX558_1921_01;
+ 		break;
+ 	case 0x603:
+ 		id = ISP_IMX603_7920_01;
+@@ -149,6 +153,13 @@ static int isp_ch_get_sensor_id(struct apple_isp *isp, u32 ch)
+ 	case 0x913:
+ 		id = ISP_IMX913_7523_01;
+ 		break;
++	case 0x958:
++		if (isp->hw->gen != ISP_GEN_T6041) {
++			err = -EINVAL;
++			break;
++		}
++		id = ISP_SENSOR_0958;
++		break;
+ 	case 0xd56:
+ 		id = ISP_VD56G0_6221_01;
+ 		break;
+@@ -219,7 +230,8 @@ static int isp_ch_cache_sensor_info(struct apple_isp *isp, u32 ch)
+ 	err = isp_ch_get_sensor_id(isp, ch);
+ 	if (err ||
+ 	    (fmt->id != ISP_IMX248_1820_01 && fmt->id != ISP_IMX558_1921_01 &&
+-	     fmt->id != ISP_IMX364_8720_01)) {
++	     fmt->id != ISP_IMX558_1925_03 &&
++	     fmt->id != ISP_IMX364_8720_01 && fmt->id != ISP_SENSOR_0958)) {
+ 		dev_err(isp->dev,
+ 			"ch %d: unsupported sensor. Please file a bug report with hardware info & dmesg trace.\n",
+ 			ch);
+@@ -309,6 +321,9 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
+ 	u32 magic;
+ 	int err;
+ 
++	if (!setfile->path)
++		return -ENOENT;
++
+ 	err = request_firmware(&fw, setfile->path, isp->dev);
+ 	if (err) {
+ 		dev_err(isp->dev, "failed to request setfile '%s': %d\n",
+@@ -333,8 +348,13 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
+ 	memcpy(isp->data_surf->virt, (void *)fw->data, setfile->size);
+ 	release_firmware(fw);
+ 
+-	return isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
+-					setfile->size);
++	err = isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
++				       setfile->size);
++	if (!err)
++		dev_info(isp->dev, "loaded calibration setfile '%s' (%zu bytes)\n",
++			 setfile->path, setfile->size);
++
++	return err;
+ }
+ 
+ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
+@@ -355,6 +375,17 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
+ 			return err;
+ 	}
+ 
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		u32 fuses[2];
++		err = of_property_read_u32_array(isp->dev->of_node,
++						 "apple,aciphy-fuses", fuses, 2);
++		if (err)
++			return err;
++		err = isp_cmd_neo_sensor_config(isp, ch, fuses[0], fuses[1]);
++		if (err)
++			return err;
++	}
++
+ 	if (isp->hw->lpdp) {
+ 		err = isp_cmd_ch_lpdp_hs_receiver_tuning_set(isp, ch, 1, 15);
+ 		if (err)
+diff --git a/drivers/media/platform/apple/isp/isp-cmd.c b/drivers/media/platform/apple/isp/isp-cmd.c
+index ee491d2cb42c5..d9080021e9629 100644
+--- a/drivers/media/platform/apple/isp/isp-cmd.c
++++ b/drivers/media/platform/apple/isp/isp-cmd.c
+@@ -26,6 +26,8 @@ static int cisp_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize,
+ 	req->arg0 = isp->cmd_iova;
+ 	req->arg1 = insize;
+ 	req->arg2 = outsize;
++	if (isp->hw->gen == ISP_GEN_T6041 && !outsize)
++		req->arg2 = insize;
+ 
+ 	memcpy(isp->cmd_virt, args, insize);
+ 	err = ipc_chan_send(isp, chan, timeout);
+@@ -53,6 +55,47 @@ static int cisp_send_read(struct apple_isp *isp, void *args, u32 insize,
+ 	return 0;
+ }
+ 
++/* The modern response appends fields; the common prefix is unchanged. */
++static int cisp_send_neo_read(struct apple_isp *isp, void *args,
++			    u32 prefix_size, u32 response_size)
++{
++	u8 response[0x190] = {};
++	int err;
++
++	if (prefix_size > response_size || response_size > sizeof(response))
++		return -EINVAL;
++	memcpy(response, args, prefix_size);
++	err = cisp_send_read(isp, response, response_size, response_size);
++	if (!err)
++		memcpy(args, response, prefix_size);
++	return err;
++}
++
++/* Native Neo setup preceding capture configuration. Firmware logs identify
++ * 0x0632 as CISP_CMD_CH_STATUS_LED_THR_GET; PHY tuning uses per-unit ADT fuses.
++ */
++int isp_cmd_neo_sensor_config(struct apple_isp *isp, u32 chan, u32 fuse0, u32 fuse1)
++{
++	struct {
++		u64 opcode;
++		u32 chan;
++		u32 value;
++	} __packed setup = { CISP_OPCODE(0x0632), chan, 0 };
++	struct {
++		u64 opcode;
++		u32 chan;
++		u32 count;
++		u32 fuse0;
++		u32 fuse1;
++	} __packed tuning = {
++		CISP_OPCODE(CISP_CMD_CH_LPDP_HS_RECEIVER_TUNING_SET), chan, 2, fuse0, fuse1
++	};
++	int err = CISP_SEND_INOUT(isp, setup);
++	if (err)
++		return err;
++	return CISP_SEND_INOUT(isp, tuning);
++}
++
+ int isp_cmd_start(struct apple_isp *isp, u32 mode)
+ {
+ 	struct cmd_start args = {
+@@ -172,6 +215,62 @@ int isp_cmd_pmp_ctrl_set(struct apple_isp *isp, u64 clock_scratch,
+ 	return CISP_SEND_IN(isp, args);
+ }
+ 
++int isp_cmd_neo_dsid_config(struct apple_isp *isp)
++{
++	struct {
++		u64 opcode;
++		u32 count;
++		u32 range;
++		u64 base;
++	} __packed args = {
++		.opcode = CISP_OPCODE(0x3206),
++		.count = 1,
++		.range = isp->hw->dsid_clr_range0,
++		.base = isp->hw->dsid_clr_base0,
++	};
++	return CISP_SEND_IN(isp, args);
++}
++
++int isp_cmd_t6041_start(struct apple_isp *isp)
++{
++	/* Native 26.6.2 publishes eight DSID ranges through opcode 0x3206. */
++	struct {
++		u64 opcode;
++		u32 count;
++		u32 range;
++		u64 bases[8];
++	} __packed dsid = {
++		.opcode = CISP_OPCODE(0x3206), .count = 8, .range = 0x2fc,
++		.bases = { 0x2201d4000, 0x2221d4000, 0x2241d4000, 0x2261d4000,
++			   0x2281d4000, 0x22a1d4000, 0x22c1d4000, 0x22e1d4000 },
++	};
++	struct {
++		u64 opcode;
++		s32 value;
++	} __packed rpc = { .opcode = CISP_OPCODE(0x13), .value = -3 };
++	int ret;
++
++	static_assert(sizeof(dsid) == 0x50);
++	static_assert(sizeof(rpc) == 0xc);
++	ret = isp_cmd_print_enable(isp, 1);
++	if (ret)
++		return ret;
++	ret = isp_cmd_trace_enable(isp, 0x18);
++	if (ret)
++		return ret;
++	ret = CISP_SEND_INOUT(isp, dsid);
++	if (ret)
++		return ret;
++	ret = isp_cmd_pmp_ctrl_set(isp, isp->hw->clock_scratch, 0, 0, 8,
++				 isp->hw->bandwidth_scratch, 0, 0, 8);
++	if (ret)
++		return ret;
++	ret = CISP_SEND_IN(isp, rpc);
++	if (ret)
++		return ret;
++	return isp_cmd_start(isp, 0);
++}
++
+ int isp_cmd_fid_enter(struct apple_isp *isp)
+ {
+ 	struct cmd_fid_enter args = {
+@@ -218,17 +317,52 @@ int isp_cmd_flicker_sensor_set(struct apple_isp *isp, u32 mode)
+ int isp_cmd_ch_info_get(struct apple_isp *isp, u32 chan,
+ 			struct cmd_ch_info *args)
+ {
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		struct {
++			struct cmd_ch_info prefix;
++			u8 tail[0x190 - sizeof(struct cmd_ch_info)];
++		} __packed native = { .prefix = {
++			.opcode = CISP_OPCODE(CISP_CMD_CH_INFO_GET), .chan = chan,
++		} };
++		int ret;
++
++		static_assert(sizeof(native) == 0x190);
++		ret = cisp_send_read(isp, &native, sizeof(native), sizeof(native));
++		if (!ret)
++			memcpy(args, &native.prefix, sizeof(*args));
++		return ret;
++	}
+ 	args->opcode = CISP_OPCODE(CISP_CMD_CH_INFO_GET);
+ 	args->chan = chan;
++	if (isp->hw->gen == ISP_GEN_T8140)
++		return cisp_send_neo_read(isp, args, sizeof(*args), 0x190);
+ 	return CISP_SEND_OUT(isp, args);
+ }
+ 
+ int isp_cmd_ch_camera_config_get(struct apple_isp *isp, u32 chan, u32 preset,
+ 				 struct cmd_ch_camera_config *args)
+ {
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		struct {
++			struct cmd_ch_camera_config prefix;
++			u8 tail[0x120 - sizeof(struct cmd_ch_camera_config)];
++		} __packed native = { .prefix = {
++			.opcode = CISP_OPCODE(CISP_CMD_CH_CAMERA_CONFIG_GET),
++			.chan = chan, .preset = preset,
++		} };
++		int ret;
++
++		static_assert(sizeof(native) == 0x120);
++		ret = cisp_send_read(isp, &native, sizeof(native), sizeof(native));
++		if (!ret)
++			memcpy(args, &native.prefix, sizeof(*args));
++		return ret;
++	}
+ 	args->opcode = CISP_OPCODE(CISP_CMD_CH_CAMERA_CONFIG_GET);
+ 	args->preset = preset;
+ 	args->chan = chan;
++	if (isp->hw->gen == ISP_GEN_T8140)
++		return cisp_send_neo_read(isp, args, sizeof(*args), 0x120);
+ 	return CISP_SEND_OUT(isp, args);
+ }
+ 
+@@ -372,8 +506,8 @@ int isp_cmd_ch_sif_pixel_format_set(struct apple_isp *isp, u32 chan)
+ 	struct cmd_ch_sif_pixel_format_set args = {
+ 		.opcode = CISP_OPCODE(CISP_CMD_CH_SIF_PIXEL_FORMAT_SET),
+ 		.chan = chan,
+-		.format = 3,
+-		.type = 1,
++		.format = isp->hw->gen == ISP_GEN_T8140 ? 1 : 3,
++		.type = isp->hw->gen == ISP_GEN_T8140 ? 0 : 1,
+ 		.compress = 0,
+ 		.unk_10 = 0,
+ 	};
+diff --git a/drivers/media/platform/apple/isp/isp-cmd.h b/drivers/media/platform/apple/isp/isp-cmd.h
+index 5a3c8cd9177e4..9a85877d31be5 100644
+--- a/drivers/media/platform/apple/isp/isp-cmd.h
++++ b/drivers/media/platform/apple/isp/isp-cmd.h
+@@ -238,6 +238,7 @@ struct cmd_flicker_sensor_set {
+ } __packed;
+ static_assert(sizeof(struct cmd_flicker_sensor_set) == 0xc);
+ 
++int isp_cmd_neo_sensor_config(struct apple_isp *isp, u32 chan, u32 fuse0, u32 fuse1);
+ int isp_cmd_start(struct apple_isp *isp, u32 mode);
+ int isp_cmd_stop(struct apple_isp *isp, u32 mode);
+ int isp_cmd_power_down(struct apple_isp *isp);
+@@ -257,6 +258,7 @@ int isp_cmd_pmp_ctrl_set(struct apple_isp *isp, u64 clock_scratch,
+ 			 u64 clock_base, u8 clock_bit, u8 clock_size,
+ 			 u64 bandwidth_scratch, u64 bandwidth_base,
+ 			 u8 bandwidth_bit, u8 bandwidth_size);
++int isp_cmd_neo_dsid_config(struct apple_isp *isp);
+ int isp_cmd_fid_enter(struct apple_isp *isp);
+ int isp_cmd_fid_exit(struct apple_isp *isp);
+ int isp_cmd_flicker_sensor_set(struct apple_isp *isp, u32 mode);
+@@ -688,4 +690,6 @@ int isp_cmd_ch_semantic_video_enable(struct apple_isp *isp, u32 chan,
+ 				     u32 enable);
+ int isp_cmd_ch_semantic_awb_enable(struct apple_isp *isp, u32 chan, u32 enable);
+ 
++int isp_cmd_t6041_start(struct apple_isp *isp);
++
+ #endif /* __ISP_CMD_H__ */
+diff --git a/drivers/media/platform/apple/isp/isp-drv.c b/drivers/media/platform/apple/isp/isp-drv.c
+index 8cd1dcc91676b..5cca89aa2a862 100644
+--- a/drivers/media/platform/apple/isp/isp-drv.c
++++ b/drivers/media/platform/apple/isp/isp-drv.c
+@@ -9,9 +9,11 @@
+ #include <linux/module.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
++#include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
++#include <linux/soc/apple/pmp-report.h>
+ #include <linux/workqueue.h>
+ 
+ #include "isp-cam.h"
+@@ -119,6 +121,12 @@ static int apple_isp_init_iommu(struct apple_isp *isp)
+ 	}
+ 
+ 	isp->fw.heap_top = heap_base + heap_size;
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		err = of_property_read_u64(dev->of_node, "apple,firmware-phys",
++					   &isp->fw.image_phys);
++		if (err)
++			return dev_err_probe(dev, err, "Missing ISP firmware physical address\n");
++	}
+ 
+ 	err = of_property_read_u64(dev->of_node, "apple,dart-vm-size",
+ 				   &vm_size);
+@@ -227,6 +235,10 @@ static const char * isp_fw2str(enum isp_firmware_version version)
+ 		return "13.5";
+ 	case ISP_FIRMWARE_V_14_7:
+ 		return "14.7";
++	case ISP_FIRMWARE_V_26_6:
++		return "26.6";
++	case ISP_FIRMWARE_V_26_6_2:
++		return "26.6.2";
+ 	default:
+ 		return "unknown";
+ 	}
+@@ -253,6 +265,10 @@ static enum isp_firmware_version isp_read_fw_version(struct device *dev,
+ 			return ISP_FIRMWARE_V_13_5;
+ 		else if (ver[0] == 14 && ver[1] == 7 && ver[2] == 0)
+ 			return ISP_FIRMWARE_V_14_7;
++		else if (ver[0] == 26 && ver[1] == 6 && ver[2] == 2)
++			return ISP_FIRMWARE_V_26_6_2;
++		else if (ver[0] == 26 && ver[1] == 6)
++			return ISP_FIRMWARE_V_26_6;
+ 
+ 		dev_warn(dev, "unknown %s: %d.%d.%d\n", name, ver[0], ver[1], ver[2]);
+ 		break;
+@@ -304,11 +320,28 @@ static int apple_isp_probe(struct platform_device *pdev)
+ 	isp->hw = of_device_get_match_data(dev);
+ 	platform_set_drvdata(pdev, isp);
+ 	dev_set_drvdata(dev, isp);
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		struct device_node *report_node __free(device_node) =
++			of_parse_phandle(dev->of_node, "apple,pmp-report", 0);
++		struct platform_device *report;
++
++		if (!report_node)
++			return -EINVAL;
++		report = of_find_device_by_node(report_node);
++		if (!report)
++			return -EPROBE_DEFER;
++		err = apple_pmp_report_wait_ready(&report->dev, 15000000);
++		put_device(&report->dev);
++		if (err)
++			return dev_err_probe(dev, err, "PMP not ready for ISP startup\n");
++	}
+ 
+ 	/* Differences between firmware versions are rather minor so try to work
+ 	 * with unknown firmware.
+ 	 */
+ 	isp->fw_compat = isp_check_firmware_version(dev);
++	if (isp->hw->gen == ISP_GEN_T8140 && isp->fw_compat == ISP_FIRMWARE_V_UNKNOWN)
++		isp->fw_compat = ISP_FIRMWARE_V_26_6;
+ 
+ 	err = of_property_read_u32(dev->of_node, "apple,platform-id",
+ 				   &isp->platform_id);
+@@ -341,6 +374,22 @@ static int apple_isp_probe(struct platform_device *pdev)
+ 		goto detach_genpd;
+ 	}
+ 
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		isp->boot_control = devm_platform_ioremap_resource_byname(pdev, "boot-control");
++		if (IS_ERR(isp->boot_control)) {
++			err = PTR_ERR(isp->boot_control);
++			goto detach_genpd;
++		}
++	}
++
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		isp->watchdog = devm_platform_ioremap_resource_byname(pdev, "watchdog");
++		if (IS_ERR(isp->watchdog)) {
++			err = PTR_ERR(isp->watchdog);
++			goto detach_genpd;
++		}
++	}
++
+ 	isp->mbox = devm_platform_ioremap_resource_byname(pdev, "mbox");
+ 	if (IS_ERR(isp->mbox)) {
+ 		err = PTR_ERR(isp->mbox);
+@@ -359,6 +408,7 @@ static int apple_isp_probe(struct platform_device *pdev)
+ 		goto detach_genpd;
+ 	}
+ 
++
+ 	isp->irq = platform_get_irq(pdev, 0);
+ 	if (isp->irq < 0) {
+ 		err = isp->irq;
+@@ -603,7 +653,42 @@ static const struct apple_isp_hw apple_isp_hw_t6031 = {
+ 	.meta_size = ISP_META_SIZE_T6031,
+ };
+ 
++/* Register layout and meta size observed on the Neo's 26.6.x firmware. */
++static const struct apple_isp_hw apple_isp_hw_t8140 = {
++	.gen = ISP_GEN_T8140,
++	.dsid_count = 1,
++	.dsid_clr_base0 = 0x220114000,
++	.dsid_clr_range0 = 0x2fc,
++	.clock_scratch = 0x3003d0ca0,
++	.clock_base = 0,
++	.clock_bit = 0,
++	.clock_size = 8,
++	/* The bandwidth-request unit is not initialized by this Linux port. */
++	.bandwidth_scratch = 0,
++	.bandwidth_base = 0,
++	.bandwidth_bit = 0,
++	.bandwidth_size = 0,
++	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
++	.meta_size = 0xa040,
++	.scl1 = false,
++	.lpdp = false,
++};
++
++static const struct apple_isp_hw apple_isp_hw_t6041 = {
++	.gen = ISP_GEN_T6041,
++	/* Addresses and field widths observed in native PMP_CTRL_SET. */
++	.clock_scratch = 0x5003d0fa8,
++	.clock_size = 8,
++	.bandwidth_scratch = 0x504824000,
++	.bandwidth_size = 8,
++	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
++	.scl1 = true,
++	.meta_size = ISP_META_SIZE_T6031,
++};
++
+ static const struct of_device_id apple_isp_of_match[] = {
++	{ .compatible = "apple,t8140-isp", .data = &apple_isp_hw_t8140 },
++	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6041 },
+ 	{ .compatible = "apple,t8103-isp", .data = &apple_isp_hw_t8103 },
+ 	{ .compatible = "apple,t8112-isp", .data = &apple_isp_hw_t8112 },
+ 	{ .compatible = "apple,t8122-isp", .data = &apple_isp_hw_t8122 },
+diff --git a/drivers/media/platform/apple/isp/isp-drv.h b/drivers/media/platform/apple/isp/isp-drv.h
+index 227e5af4cde7a..aaff6ceb76fd0 100644
+--- a/drivers/media/platform/apple/isp/isp-drv.h
++++ b/drivers/media/platform/apple/isp/isp-drv.h
+@@ -32,6 +32,8 @@ enum isp_generation {
+ 	ISP_GEN_T8103,
+ 	ISP_GEN_T8112,
+ 	ISP_GEN_T6031,
++	ISP_GEN_T8140,
++	ISP_GEN_T6041,
+ };
+ 
+ enum isp_firmware_version {
+@@ -40,6 +42,8 @@ enum isp_firmware_version {
+ 	ISP_FIRMWARE_V_12_4,
+ 	ISP_FIRMWARE_V_13_5,
+ 	ISP_FIRMWARE_V_14_7,
++	ISP_FIRMWARE_V_26_6,
++	ISP_FIRMWARE_V_26_6_2,
+ };
+ 
+ struct isp_surf {
+@@ -152,6 +156,7 @@ enum isp_sensor_id {
+ 	ISP_IMX514_2820_03,
+ 	ISP_IMX514_2820_04,
+ 	ISP_IMX558_1921_01,
++	ISP_IMX558_1925_03,
+ 	ISP_IMX558_1922_02,
+ 	ISP_IMX603_7920_01,
+ 	ISP_IMX603_7920_02,
+@@ -176,6 +181,7 @@ enum isp_sensor_id {
+ 	ISP_IMX913_7523_01,
+ 	ISP_VD56G0_6221_01,
+ 	ISP_VD56G0_6222_01,
++	ISP_SENSOR_0958,
+ };
+ 
+ struct isp_format {
+@@ -217,6 +223,8 @@ struct apple_isp {
+ 	int irq;
+ 
+ 	void __iomem *coproc;
++	void __iomem *boot_control;
++	void __iomem *watchdog;
+ 	void __iomem *mbox;
+ 	void __iomem *gpio;
+ 	void __iomem *mbox2;
+@@ -228,10 +236,12 @@ struct apple_isp {
+ 
+ 	struct isp_firmware {
+ 		u64 heap_top;
++		u64 image_phys;
+ 	} fw;
+ 
+ 	struct isp_surf *ipc_surf;
+ 	struct isp_surf *extra_surf;
++	struct isp_surf *boot_log_surf;
+ 	struct isp_surf *data_surf;
+ 	struct isp_surf *log_surf;
+ 	struct isp_surf *bt_surf;
+diff --git a/drivers/media/platform/apple/isp/isp-fw.c b/drivers/media/platform/apple/isp/isp-fw.c
+index 87433669526b1..ecc16b93e6586 100644
+--- a/drivers/media/platform/apple/isp/isp-fw.c
++++ b/drivers/media/platform/apple/isp/isp-fw.c
+@@ -5,6 +5,8 @@
+ 
+ #include <asm/io.h>
+ #include <linux/delay.h>
++#include <linux/iopoll.h>
++#include <linux/iommu.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/types.h>
+ 
+@@ -25,11 +27,16 @@
+ 
+ static inline u32 isp_coproc_read32(struct apple_isp *isp, u32 reg)
+ {
++	if (isp->hw->gen == ISP_GEN_T8140 && reg == ISP_COPROC_STATUS)
++		reg = 0x1600048;
+ 	return readl(isp->coproc + reg);
+ }
+ 
+ static inline void isp_coproc_write32(struct apple_isp *isp, u32 reg, u32 val)
+ {
++	if ((isp->hw->gen == ISP_GEN_T8140 || isp->hw->gen == ISP_GEN_T6041) &&
++	    reg == ISP_COPROC_CONTROL)
++		reg = 0x1600044;
+ 	writel(val, isp->coproc + reg);
+ }
+ 
+@@ -40,6 +47,8 @@ static inline u32 isp_gpio_read32(struct apple_isp *isp, u32 reg)
+ 
+ static inline void isp_gpio_write32(struct apple_isp *isp, u32 reg, u32 val)
+ {
++	if (isp->hw->gen == ISP_GEN_T8140 && reg == ISP_GPIO_CLOCK_EN)
++		reg = ISP_GPIO_6;
+ 	writel(val, isp->gpio + reg);
+ }
+ 
+@@ -51,11 +60,11 @@ static int apple_isp_power_up_domains(struct apple_isp *isp)
+ 		return 0;
+ 
+ 	for (int i = 1; i < isp->pd_count; i++) {
+-		ret = pm_runtime_get_sync(isp->pd_dev[i]);
++		ret = pm_runtime_resume_and_get(isp->pd_dev[i]);
+ 		if (ret < 0) {
+ 			dev_err(isp->dev,
+ 				"Failed to power up power domain %d: %d\n", i, ret);
+-			while (--i != 1)
++			while (--i >= 1)
+ 				pm_runtime_put_sync(isp->pd_dev[i]);
+ 			return ret;
+ 		}
+@@ -77,7 +86,7 @@ static void apple_isp_power_down_domains(struct apple_isp *isp)
+ 		ret = pm_runtime_put_sync(isp->pd_dev[i]);
+ 		if (ret < 0)
+ 			dev_err(isp->dev,
+-				"Failed to power up power domain %d: %d\n", i, ret);
++				"Failed to power down power domain %d: %d\n", i, ret);
+ 	}
+ 
+ 	isp->pds_active = false;
+@@ -137,6 +146,36 @@ struct isp_firmware_bootargs {
+ } __packed;
+ static_assert(sizeof(struct isp_firmware_bootargs) == 0x180);
+ 
++/* T6041 / macOS 26.6.2. Unknown fields retain their observed names/offsets;
++ * this is a data layout, not a reinterpretation of the older boot arguments.
++ */
++struct isp_firmware_bootargs_t6041 {
++	u64 opaque_firmware_addr;
++	u64 ipc_iova;
++	u64 shared_base;
++	u64 shared_size;
++	u64 extra_iova;
++	u64 extra_size;
++	u64 platform_id;
++	u64 log_iova;
++	u64 log_size;
++	u64 log_entry_size;
++	u64 opaque_50;
++	u8 reserved_58[0x10];
++	u64 opaque_68;
++	u8 reserved_70[0x18];
++	u64 opaque_88;
++	u8 reserved_90[0x40];
++	u64 opaque_d0;
++	u8 reserved_d8[0x48];
++	u64 opaque_120;
++	u8 reserved_128[0x58];
++} __packed;
++static_assert(sizeof(struct isp_firmware_bootargs_t6041) == 0x180);
++static_assert(offsetof(struct isp_firmware_bootargs_t6041, log_iova) == 0x38);
++static_assert(offsetof(struct isp_firmware_bootargs_t6041, opaque_88) == 0x88);
++static_assert(offsetof(struct isp_firmware_bootargs_t6041, opaque_120) == 0x120);
++
+ struct isp_chan_desc {
+ 	char name[64];
+ 	u32 type;
+@@ -164,8 +203,19 @@ static irqreturn_t apple_isp_isr(int irq, void *dev)
+ {
+ 	struct apple_isp *isp = dev;
+ 
+-	isp_mbox2_write32(isp, ISP_MBOX2_IRQ_ACK,
+-			 isp_mbox_read32(isp, ISP_MBOX_IRQ_INTERRUPT));
++	u32 status = isp_mbox_read32(isp, ISP_MBOX_IRQ_INTERRUPT);
++
++	if (isp->watchdog) {
++		/* Native EIC refresh sequence. Without it, firmware's CIL breaker
++		 * masks every frame despite successful sensor link training.
++		 * Refresh follows firmware activity; stopping IRQs lets it expire.
++		 */
++		writel(0, isp->watchdog + 0xc);
++		writel(0x244140, isp->watchdog + 0x8);
++		writel(1, isp->watchdog);
++	}
++
++	isp_mbox2_write32(isp, ISP_MBOX2_IRQ_ACK, status);
+ 
+ 	return IRQ_WAKE_THREAD;
+ }
+@@ -199,7 +249,9 @@ static int isp_enable_irq(struct apple_isp *isp)
+ 	int err;
+ 
+ 	err = request_threaded_irq(isp->irq, apple_isp_isr,
+-				   apple_isp_isr_thread, 0, "apple-isp", isp);
++				   apple_isp_isr_thread,
++				   isp->hw->gen == ISP_GEN_T8140 ? IRQF_ONESHOT : 0,
++				   "apple-isp", isp);
+ 	if (err < 0) {
+ 		isp_err(isp, "failed to request IRQ#%u (%d)\n", isp->irq, err);
+ 		return err;
+@@ -208,6 +260,10 @@ static int isp_enable_irq(struct apple_isp *isp)
+ 	isp_dbg(isp, "about to enable interrupts...\n");
+ 
+ 	isp_mbox_write32(isp, isp->hw->mbox_irq_enable, 0xf);
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		isp_mbox_write32(isp, 0x18, 0);
++		isp_mbox_write32(isp, 0x38, 0);
++	}
+ 
+ 	return 0;
+ }
+@@ -218,6 +274,15 @@ static int isp_reset_coproc(struct apple_isp *isp)
+ 	u32 status;
+ 	u32 val;
+ 
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		/* The Neo is reset through its power domains; legacy fabric and
++		 * debug-register reset offsets do not describe this coprocessor.
++		 */
++		isp_coproc_write32(isp, ISP_COPROC_CONTROL, 0);
++		udelay(10);
++		return 0;
++	}
++
+ 	isp_coproc_write32(isp, ISP_COPROC_EDPRCR, 0x2);
+ 
+ 	isp_coproc_write32(isp, ISP_COPROC_FABRIC_0, 0xff00ff);
+@@ -263,7 +328,15 @@ static int isp_reset_coproc(struct apple_isp *isp)
+ 
+ static void isp_firmware_shutdown_stage1(struct apple_isp *isp)
+ {
+-	isp_coproc_write32(isp, ISP_COPROC_CONTROL, 0x0);
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		/* Native firmware halts both cores through this configuration register
++		 * before requesting their PMGR power-down sequence.
++		 */
++		writel(0x02000000, isp->coproc + 0x1600040);
++		udelay(10);
++	} else {
++		isp_coproc_write32(isp, ISP_COPROC_CONTROL, 0x0);
++	}
+ 
+ 	apple_isp_power_down_domains(isp);
+ }
+@@ -278,7 +351,8 @@ static int isp_firmware_boot_stage1(struct apple_isp *isp)
+ 		return err;
+ 
+ 
+-	isp_gpio_write32(isp, ISP_GPIO_CLOCK_EN, 0x1);
++	if (isp->hw->gen != ISP_GEN_T6041)
++		isp_gpio_write32(isp, ISP_GPIO_CLOCK_EN, 0x1);
+ 
+ #if 0
+ 	/* This doesn't work well with system sleep */
+@@ -290,22 +364,45 @@ static int isp_firmware_boot_stage1(struct apple_isp *isp)
+ 	}
+ #endif
+ 
+-	err = isp_reset_coproc(isp);
++	/* Start T6041 from the retained iBoot state, as on fresh native boots.
++	 * Replaying the older reset prefix here prevents the first reply.
++	 */
++	err = isp->hw->gen == ISP_GEN_T6041 ? 0 : isp_reset_coproc(isp);
+ 	if (err < 0)
+ 		return err;
+ 
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		writel(0x02000000, isp->coproc + 0x1600040);
++		writel(1, isp->boot_control + 0x80);
++	}
++
+ 	isp_gpio_write32(isp, ISP_GPIO_0, 0x0);
+ 	isp_gpio_write32(isp, ISP_GPIO_1, 0x0);
+ 	isp_gpio_write32(isp, ISP_GPIO_2, 0x0);
+ 	isp_gpio_write32(isp, ISP_GPIO_3, 0x0);
+ 	isp_gpio_write32(isp, ISP_GPIO_4, 0x0);
+ 	isp_gpio_write32(isp, ISP_GPIO_5, 0x0);
+-	isp_gpio_write32(isp, ISP_GPIO_6, 0x0);
++	if (isp->hw->gen != ISP_GEN_T6041)
++		isp_gpio_write32(isp, ISP_GPIO_6, 0x0);
+ 	isp_gpio_write32(isp, ISP_GPIO_7, 0x0);
++	if (isp->hw->gen == ISP_GEN_T8140)
++		isp_gpio_write32(isp, ISP_GPIO_CLOCK_EN, 1);
++	if (isp->hw->gen == ISP_GEN_T6041)
++		isp_gpio_write32(isp, ISP_GPIO_6, 1);
+ 
+-	isp_mbox_write32(isp, isp->hw->mbox_irq_enable, 0x0);
++	if (isp->hw->gen != ISP_GEN_T6041)
++		isp_mbox_write32(isp, isp->hw->mbox_irq_enable, 0x0);
++
++	if (isp->hw->gen != ISP_GEN_T6041)
++		isp_coproc_write32(isp, ISP_COPROC_CONTROL, 0x0);
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		u64 vector = readq(isp->coproc + ISP_COPROC_RVBAR);
++		u64 expected = (isp->fw.heap_top & ~0xffffffffULL) | 1;
++		phys_addr_t code = iommu_iova_to_phys(isp->domain, expected & ~1ULL);
+ 
+-	isp_coproc_write32(isp, ISP_COPROC_CONTROL, 0x0);
++		dev_info(isp->dev, "boot vector %#llx expected %#llx code %pa\n",
++			 vector, expected, &code);
++	}
+ 	isp_coproc_write32(isp, ISP_COPROC_CONTROL, 0x10);
+ 
+ 	/* Wait for ISP_GPIO_7 to 0x0 -> 0x8042006 */
+@@ -322,6 +419,14 @@ static int isp_firmware_boot_stage1(struct apple_isp *isp)
+ 	if (retries >= ISP_FIRMWARE_MAX_TRIES) {
+ 		isp_err(isp,
+ 			"never received first magic number from firmware\n");
++		if (isp->hw->gen == ISP_GEN_T6041) {
++			for (int i = 0; i < 8; i++)
++				dev_info(isp->dev, "boot GPIO%d=%#x\n", i,
++					 isp_gpio_read32(isp, i * 4));
++			dev_info(isp->dev, "ASC control=%#x status=%#x\n",
++				 isp_coproc_read32(isp, 0x1600044),
++				 isp_coproc_read32(isp, 0x1600048));
++		}
+ 		return -ENODEV;
+ 	}
+ 
+@@ -348,23 +453,39 @@ int apple_isp_alloc_firmware_surface(struct apple_isp *isp)
+ 	dev_info(isp->dev, "Data surface iova: 0x%llx\n",
+ 		 (long long)isp->data_surf->iova);
+ 
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		isp->boot_log_surf = isp_alloc_surface_vmap(isp, 0x48000);
++		if (!isp->boot_log_surf) {
++			isp_free_surface(isp, isp->data_surf);
++			isp_free_surface(isp, isp->ipc_surf);
++			return -ENOMEM;
++		}
++	}
+ 	return 0;
+ }
+ 
+ void apple_isp_free_firmware_surface(struct apple_isp *isp)
+ {
++	if (isp->boot_log_surf)
++		isp_free_surface(isp, isp->boot_log_surf);
+ 	isp_free_surface(isp, isp->data_surf);
+ 	isp_free_surface(isp, isp->ipc_surf);
+ }
+ 
+ static void isp_firmware_shutdown_stage2(struct apple_isp *isp)
+ {
++	if (isp->boot_log_surf) {
++		isp_free_surface(isp, isp->boot_log_surf);
++		isp->boot_log_surf = NULL;
++	}
+ 	isp_free_surface(isp, isp->extra_surf);
+ }
+ 
+ static int isp_firmware_boot_stage2(struct apple_isp *isp)
+ {
+ 	struct isp_firmware_bootargs args;
++	u8 neo_args[0x280] = {};
++	size_t args_size = isp->hw->gen == ISP_GEN_T8140 ? sizeof(neo_args) : sizeof(args);
+ 	dma_addr_t args_iova;
+ 	void *args_virt;
+ 	int err, retries;
+@@ -391,8 +512,8 @@ static int isp_firmware_boot_stage2(struct apple_isp *isp)
+ 
+ 	args_iova = isp->ipc_surf->iova + args_offset + 0x40;
+ 	args_virt = isp->ipc_surf->virt + args_offset + 0x40;
+-	isp->cmd_iova = args_iova + sizeof(args) + 0x40;
+-	isp->cmd_virt = args_virt + sizeof(args) + 0x40;
++	isp->cmd_iova = args_iova + args_size + 0x40;
++	isp->cmd_virt = args_virt + args_size + 0x40;
+ 
+ 	memset(&args, 0, sizeof(args));
+ 	args.ipc_iova = isp->ipc_surf->iova;
+@@ -406,7 +527,51 @@ static int isp_firmware_boot_stage2(struct apple_isp *isp)
+ 	args.unk7 = 0x1; // 0?
+ 	args.unk_iova1 = args_iova + sizeof(args) - 0xc;
+ 	args.unk9 = 0x3;
+-	memcpy(args_virt, &args, sizeof(args));
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		u32 enable = 1;
++		args.pad_0[0] = lower_32_bits(isp->fw.image_phys);
++		args.pad_0[1] = upper_32_bits(isp->fw.image_phys);
++		args.logbuf_addr = isp->boot_log_surf->iova;
++		args.logbuf_size = 0x48000;
++		args.logbuf_entsize = 0x90;
++		args.ipc_size = args_offset + 1;
++		args.unk7 = 0;
++		args.unk_iova1 = 0;
++		args.unk9 = 0;
++		memcpy(neo_args, &args, sizeof(args));
++		memcpy(neo_args + 0x120, &enable, sizeof(enable));
++		memcpy(args_virt, neo_args, sizeof(neo_args));
++	} else {
++		memcpy(args_virt, &args, sizeof(args));
++	}
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		struct isp_firmware_bootargs_t6041 native = {
++			.opaque_firmware_addr = iommu_iova_to_phys(isp->domain,
++				isp->fw.heap_top & ~0xffffffffULL),
++			.ipc_iova = isp->ipc_surf->iova,
++			.shared_base = args.shared_base,
++			.shared_size = args.shared_size,
++			.extra_iova = args.extra_iova,
++			.extra_size = args.extra_size,
++			.platform_id = isp->platform_id,
++			.log_size = 0x48000,
++			.log_entry_size = 0x90,
++			.opaque_50 = args_offset | 1,
++			.opaque_68 = 0x40,
++			/* Fresh native boots leave this optional field zero. */
++			.opaque_88 = 0,
++			.opaque_d0 = 0x10,
++			.opaque_120 = 1,
++		};
++
++		isp->boot_log_surf = isp_alloc_surface_vmap(isp, native.log_size);
++		if (!isp->boot_log_surf) {
++			err = -ENOMEM;
++			goto free_extra;
++		}
++		native.log_iova = isp->boot_log_surf->iova;
++		memcpy(args_virt, &native, sizeof(native));
++	}
+ 
+ 	isp_gpio_write32(isp, ISP_GPIO_0, args_iova);
+ 	/* TODO: handle this via Kconfig depends? hardware is only present on
+@@ -439,7 +604,7 @@ static int isp_firmware_boot_stage2(struct apple_isp *isp)
+ 	return 0;
+ 
+ free_extra:
+-	isp_free_surface(isp, isp->extra_surf);
++	isp_firmware_shutdown_stage2(isp);
+ 	return err;
+ }
+ 
+@@ -649,15 +814,30 @@ static int isp_start_command_processor(struct apple_isp *isp)
+ {
+ 	int err;
+ 
++	if (isp->hw->gen == ISP_GEN_T6041)
++		return isp_cmd_t6041_start(isp);
++
+ 	err = isp_cmd_print_enable(isp, 1);
+ 	if (err)
+ 		return err;
+ 
+-	err = isp_cmd_set_isp_pmu_base(isp, isp->hw->pmu_base);
+-	if (err)
+-		return err;
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		err = isp_cmd_trace_enable(isp, 0x18);
++		if (err)
++			return err;
++	}
+ 
+-	if (isp->hw->dsid_count == 1) {
++	if (isp->hw->gen != ISP_GEN_T8140) {
++		err = isp_cmd_set_isp_pmu_base(isp, isp->hw->pmu_base);
++		if (err)
++			return err;
++	}
++
++	if (isp->hw->gen == ISP_GEN_T8140) {
++		err = isp_cmd_neo_dsid_config(isp);
++		if (err)
++			return err;
++	} else if (isp->hw->dsid_count == 1) {
+ 		err = isp_cmd_set_dsid_clr_req_base(
+ 			isp, isp->hw->dsid_clr_base0, isp->hw->dsid_clr_range0);
+ 		if (err)
+diff --git a/drivers/media/platform/apple/isp/isp-regs.h b/drivers/media/platform/apple/isp/isp-regs.h
+index 2cf902028a6a4..1babb7c3e5dd0 100644
+--- a/drivers/media/platform/apple/isp/isp-regs.h
++++ b/drivers/media/platform/apple/isp/isp-regs.h
+@@ -51,6 +51,13 @@ static inline void isp_mbox_write32(struct apple_isp *isp, u32 reg, u32 val)
+ 
+ static inline void isp_mbox2_write32(struct apple_isp *isp, u32 reg, u32 val)
+ {
++	/* T6041 uses notify +0xc and IRQ acknowledge +0x18. */
++	if (isp->hw->gen == ISP_GEN_T6041) {
++		if (reg == ISP_MBOX2_IRQ_DOORBELL)
++			reg = 0x0c;
++		else if (reg == ISP_MBOX2_IRQ_ACK)
++			reg = 0x18;
++	}
+ 	writel(val, isp->mbox2 + reg);
+ }
+ 
+diff --git a/drivers/media/platform/apple/isp/isp-v4l2.c b/drivers/media/platform/apple/isp/isp-v4l2.c
+index e06b4f1d55c1a..7987ad0c23c03 100644
+--- a/drivers/media/platform/apple/isp/isp-v4l2.c
++++ b/drivers/media/platform/apple/isp/isp-v4l2.c
+@@ -141,6 +141,7 @@ static int isp_submit_buffers(struct apple_isp *isp)
+ 		/* printk("Submit: 0x%llx .. 0x%llx (meta)\n", meta->iova,
+ 		       meta->iova + meta->size); */
+ 
++		memset(bufd, 0, sizeof(*bufd));
+ 		bufd->num_planes = 1;
+ 		bufd->pool_type = 0;
+ 		bufd->iovas[0] = meta->iova;
+@@ -347,6 +348,12 @@ static int apple_isp_start_streaming(struct apple_isp *isp)
+ 		goto release_buffers;
+ 	}
+ 
++	/* Firmware boot creates empty pools. Buffers still marked submitted by
++	 * a previous stream must be queued again, including after a failed start.
++	 */
++	for (int i = 0; i < ARRAY_SIZE(isp->meta_surfs); i++)
++		isp->meta_surfs[i]->submitted = false;
++
+ 	err = isp_submit_buffers(isp);
+ 	if (err) {
+ 		dev_err(isp->dev, "failed to send initial batch: %d\n", err);
+@@ -862,7 +869,6 @@ int apple_isp_setup_video(struct apple_isp *isp)
+ 	vdev->device_caps = V4L2_BUF_TYPE_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
+ 	if (isp->multiplanar)
+ 		vdev->device_caps |= V4L2_CAP_VIDEO_CAPTURE_MPLANE;
+-	vdev->entity.flags = MEDIA_ENT_FL_DEFAULT;
+ 	vdev->v4l2_dev = &isp->v4l2_dev;
+ 	vdev->vfl_type = VFL_TYPE_VIDEO;
+ 	vdev->vfl_dir = VFL_DIR_RX;

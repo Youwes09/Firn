@@ -1,0 +1,71 @@
+Gravity Linux replacement/010-soc, as merged in 6d42588d6195.
+
+diff --git a/drivers/soc/apple/rtkit.c b/drivers/soc/apple/rtkit.c
+index 699ad652e1974..140ff9dbf3cda 100644
+--- a/drivers/soc/apple/rtkit.c
++++ b/drivers/soc/apple/rtkit.c
+@@ -451,6 +451,17 @@ static void apple_rtkit_system7_rx(struct apple_rtkit *rtk, u64 msg)
+ 		apple_rtkit_common_rx_get_buffer(rtk, &rtk->system7_buffer,
+ 						 APPLE_RTKIT_EP_UNKNOWN7, msg);
+ 		break;
++	/*
++	 * Endpoint 7 follows the IOReport protocol: a buffer request, then
++	 * reports that are answered by echoing them back.  PMP sends these
++	 * once it is running.
++	 */
++	case 0x8:
++	case 0xc:
++		dev_dbg(rtk->dev, "RTKit: system endpoint 7 message %llx, acked\n", msg);
++		apple_rtkit_send_message(rtk, APPLE_RTKIT_EP_UNKNOWN7, msg,
++					 NULL, false);
++		break;
+ 	default:
+ 		dev_warn(rtk->dev, "RTKit: Unknown system endpoint 7 message: %llx\n",
+ 			 msg);
+diff --git a/include/linux/soc/apple/rtkit.h b/include/linux/soc/apple/rtkit.h
+index 0bcbf69a156f9..09b7ea0368783 100644
+--- a/include/linux/soc/apple/rtkit.h
++++ b/include/linux/soc/apple/rtkit.h
+@@ -122,6 +122,10 @@ struct apple_rtkit *apple_rtkit_init(struct device *dev, void *cookie,
+  */
+ void apple_rtkit_free(struct apple_rtkit *rtk);
+ 
++/* Configure before starting the coprocessor. G16 requests its preallocated
++ * crash buffer before the endpoint-map ACK and requires an explicit reply. */
++void apple_rtkit_set_early_crashlog(struct apple_rtkit *rtk);
++
+ /*
+  * Reinitialize internal structures. Must only be called with the co-processor
+  * is held in reset.
+@@ -139,6 +143,31 @@ int apple_rtkit_reuse_syslog_buffer(struct apple_rtkit *rtk, dma_addr_t iova,
+ int apple_rtkit_reuse_crashlog_buffer(struct apple_rtkit *rtk,
+ 				      dma_addr_t iova, size_t size);
+ 
++/*
++ * Select whether apple_rtkit_boot() should request AP power ownership. Some
++ * bootloader handoffs retain that ownership for the next RTKit client.
++ */
++void apple_rtkit_set_boot_ap_power(struct apple_rtkit *rtk, bool enable);
++
++/*
++ * Adopt a bootloader RTKit session which remains in the ON state. The caller
++ * supplies the endpoint map because a running session does not replay it.
++ */
++int apple_rtkit_adopt_running(struct apple_rtkit *rtk, const u8 *endpoints,
++			      size_t n_endpoints);
++
++/*
++ * Restore a syslog buffer retained across a restartable bootloader handoff.
++ * The buffer must still be mapped in the coprocessor's IOMMU domain.
++ */
++int apple_rtkit_reuse_syslog_buffer(struct apple_rtkit *rtk, dma_addr_t iova,
++				    size_t size, size_t n_entries,
++				    size_t msg_size);
++
++/* Restore the crashlog buffer belonging to an adopted RTKit session. */
++int apple_rtkit_reuse_crashlog_buffer(struct apple_rtkit *rtk,
++				      dma_addr_t iova, size_t size);
++
+ /*
+  * Handle RTKit's boot process. Should be called after the CPU of the
+  * co-processor has been started.

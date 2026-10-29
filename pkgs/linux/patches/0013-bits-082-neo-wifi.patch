@@ -1,0 +1,4517 @@
+Gravity Linux bits/082-neo-wifi, as merged in 3721b9b85fe1.
+
+diff --git a/Documentation/networking/device_drivers/wifi/mt7932-abi.txt b/Documentation/networking/device_drivers/wifi/mt7932-abi.txt
+new file mode 100644
+index 0000000000000..e1df4b000e97b
+--- /dev/null
++++ b/Documentation/networking/device_drivers/wifi/mt7932-abi.txt
+@@ -0,0 +1,140 @@
++SPDX-License-Identifier: GPL-2.0-only
++MT7932 register and firmware ABI audit, 2026-10-21
++
++Purpose
++Replace arithmetic on decoded offsets with named registers, typed wire layouts
++and checked lengths. Preserve the current wire bytes and conservative power
++settings. This document distinguishes a field's location from knowledge of its
++semantics: an unknown_* field or observed policy is deliberately unresolved.
++Names alone do not establish its meaning.
++
++New mt7932_regs.h uses BAR0 offsets except the explicitly separated PCI config
++section. mt7932_mcu.h groups firmware namespaces, packed layouts, and static
++assertions. A flat legacy command ID is NOT interchangeable with a CONNAC UNI
++command that happens to have the same number.
++
++Evidence
++- Existing private native captures, captured firmware messages and successful
++  hardware tests underpin MT7932-specific layouts. No Apple executable
++  disassembly was used for this audit.
++- Shared DMA bootstrap matches previously qualified m1n1 wifi_mt7932.c startup.
++- linux/neo-wifi/native-disconnect-2026-10-21 freezes the action-correlated EA42
++  request. standard-reconnect-2026-10-21 freezes actual Linux completions.
++- Existing mt76_connac_mcu.h supplies command descriptor/event fields, generic
++  scan prefix, NIC power/download IDs and firmware download response flag.
++- Public MediaTek gen4m headers corroborate legacy RLM, BSS activation, basic
++  configuration prefix and command naming. They are comparisons, not proof
++  that every ABI version or numerical enum is the same. Pinned source:
++  https://github.com/MotorolaMobilityLLC/vendor-mediatek-kernel_modules-connectivity-wlan-core-gen4m/tree/9ce201484a7426eeddfcf240b7b12ae385cd79e2/include
++  Files: wsys_cmd_handler_fw.h, nic_cmd_event.h.
++- IE and channel-width names come from Linux ieee80211.h. Standard IE 255 is
++  the extension container; extension IDs 35 and 58 mean HE capabilities and
++  short SSID list respectively, not ordinary IE 35/58.
++
++Register map
++Decoded remap/boot/publication registers are named in mt7932_regs.h.
++MT7932 DMA/prefetch setup in mt792x_dma.c still contains raw offsets and
++observed policies needing a separate audit.
++  BAR0 offset        Function established / remaining uncertainty
++  0xfe24c+4*n        PCIe remap register n. Target high 16 bits used for the
++                     WF/CONN windows. Low control fields remain undecoded.
++  remap1             Target 0x70000000, BAR window 0x70000, size 64 KiB.
++  remap2             Target 0x18050000, BAR window 0x90000, size 64 KiB;
++                     0x7c050000 is the corresponding software alias.
++  remap0             Native boot value 0x18451807; restored to 0x1845184f
++                     after secure command. Individual control bits unknown.
++  0x40060 bit0       Secure boot-command readiness, polled before submission.
++  0x40260 bit0       Secure command completion write after submission.
++  0x93c28 bit0       Shared host DMA publication control0 native init value.
++  0x93a38 bit1       Shared host DMA publication control1 native init value.
++  0x93a3c            First allocated coherent host DMA buffer address.
++  0x93a30            Second allocated coherent host DMA buffer address.
++  0x93a54            Third allocated coherent host DMA buffer address.
++                     Detailed buffer ownership, descriptor format, and meaning
++                     of control bits are not fully decoded. Preserve ordering.
++  0xb1000 bits7:0    Hardware revision byte, combined with chip ID0x7932.
++  PCI cfg0x48c       Bits19:16 firmware boot state; observed ready value2.
++                     This is NOT a BAR0 register.
++Existing general mt76 fixed-map tuples remain descriptive mapping data; naming
++all literal addresses individually would add indirection without explanation.
++
++Firmware boot
++Generic mt76 download command IDs are reused where exactly equal. The MT7932
++patch semaphore ABI differs: request byte2; response1=busy,2=already loaded,
++3=acquired. Generic mt76 PATCH_* response enum is zero-based and MUST NOT be
++used here. This audit retains the working MT7932 values explicitly.
++
++Firmware message layouts
++- Basic config24: legacy native-802.11 byte, assert/debug controls, checksum
++  words and segmentation prefix; MT7932 unknown byte3=3 and extension at12.
++  One initializer now supplies both startup and Ethernet-offload mode. The
++  twelve extension bytes and byte3 are not assigned speculative meanings.
++- Probe privacy60: subcommand at0, inclusive last-bitmap-byte at4, policy
++  bytes5/6, bitmap begins7 and covers32 ordinary IE bytes +8 extension bytes.
++  Last bitmap index39 is derived from its size. Policy command uses observed
++  subcommand1 and bytes5/6=20; meanings/units of those20s are unproven.
++- BSS activation12: BSS0, active1, network type2, OMAC3, MAC4..9, BMC WCID10.
++  Native last byte11=1 remains unknown (older gen4m labels it reserved).
++- AIS MAC8: BSS0, pad1, address2..7; filled from the current interface.
++- RLM22: BSS0, band1, primary channel2, secondary-channel offset3; protection
++  and HT-operation fields4..12; short-preamble13, short-slot14, VHT width15,
++  center channels16/17, VHT basic MCS18..19, TX/RX stream counts20/21.
++  Secondary offset and VHT width use the corresponding IEEE80211 constants.
++- Native scan1236: generic mt76 scan prefix through ext_channels, TWO inserted
++  bytes before ext_ssids at0x380, BSSID0x458, random MAC0x45e, unresolved tail.
++  Initial conversion using an eight-byte gap failed static assertions and was
++  corrected before any device test. Size/offset assertions pin the real ABI.
++  Shared fields now use generic named members, not body[0x9f] etc. Current
++  passive-only behavior is preserved; active probing is not claimed tested.
++- Transmit power: shared44-byte header plus122-byte per-channel record;
++  channel byte followed by121 rate limits. Wire version3/format0x0a remain
++  explicit. Detailed121-entry modulation mapping is unresolved. Existing
++  behavior conservatively applies the minimum requested rate limit throughout
++  the record and caps it at20 half-dBm (10dBm). No cap increase in this audit.
++- MCU event header uses mt76_connac2_mcu_rxd fields/sizeof, replacing literal
++  header36/eid28. MLME envelope12 has unknown zero word, type, payload length.
++  Types40/41/44/4d are associated/authorized/disconnected/connecting respectively.
++  Typed minimum lengths24/22/20 preserve bounded parsing; unknown portions of
++  those events remain explicitly unknown. Peer WCID defensive limit48 is
++  named as a limit, NOT claimed to be the decoded hardware table capacity.
++- Connect856 retains its existing typed layout and asserted offsets. SAE and
++  CCMP masks, password format10, required PMF2 and native profile0x00020407 are
++  named in the MT7932 namespace. The profile bits, auth policy bits, operation8,
++  deadline120 (units unproven), compatibility20 and candidate policy arrays
++  remain observed native policies, not fully decoded security semantics.
++- Disconnect24: policy word8, zero word, tag1+peer length, BSS+current peer MAC+
++  pad, trailer word30. Peer length derives from the packed peer group. Policy8
++  and trailer30 are NOT called reason codes or timeouts without evidence.
++- Precal file20 header: magic8, MAC6, countLE16, total-sizeLE32. Calibration
++  records20-byte header includes class/operation/id/length and three-word key.
++  D7 request has a leading unknown word plus the same12-byte key; compare all
++  key bytes exactly. Class1 group blocks1080, class2 channel blocks604, class3
++  channel-info blocks16. RF payloads remain opaque and board-specific.
++  Selector low16 group, upper16 preload qualification and frequency low24
++  masks are named. Group28/6GHz is still an explicit tested coverage bound,
++  not a general band/frequency mapping. No other channel's DPD is substituted.
++
++Outstanding audit
++- Host-SME legacy BSS116/STA200/key64 helper bodies still contain raw offsets.
++  Standard frontend does not use this association path, but it needs separate
++  layout verification or removal when consolidating the driver.
++- Regulatory domain and boot response translation now use typed headers and
++  named packet types. The native domain policy word at4, policy byte6 and FCC
++  policy byte11 remain unresolved; generic input bandwidth names are not
++  imposed on the differing native variant. Channel flags explicitly translate
++  NO_IR/RADAR to firmware passive/DFS bits. Initial calibration replay stream
++  is now typed as a20-byte file header plus8-byte command-policy record
++  headers and4-byte fragment headers. Profile query/reply offsets are explicit
++  and size checked. RF fragment bytes remain opaque and board-specific.
++- Three queue-management startup records and DBDC startup record have largely
++  unresolved payload fields. Preserve and identify each using bounded native
++  comparisons before changing them; turning them into macros is not decoding.
++- Diagnostic runtime command0x93 is no longer called per-channel configuration:
++  that claim was unproven, and another public ABI uses the ID differently.
++- Scan batching/cancel, station statistics, actual disconnect/reconnect, firmware
++  recovery and PCI reprobe are implemented and qualified, including on7.3.
++  Broader calibration/security and AP coverage, active probing, association IE
++  handling, runtime/system PM and precise early auth failure reasons remain
++  incomplete. Broader AP testing is deferred by user; unsupported capabilities
++  remain unadvertised. The companion bootloader worktree records integration
++  evidence in linux/neo-linux73/STATUS.txt.
+diff --git a/drivers/net/wireless/mediatek/mt76/mac80211.c b/drivers/net/wireless/mediatek/mt76/mac80211.c
+index abbe65cbcd89e..bbda260ab42aa 100644
+--- a/drivers/net/wireless/mediatek/mt76/mac80211.c
++++ b/drivers/net/wireless/mediatek/mt76/mac80211.c
+@@ -745,7 +745,7 @@ mt76_alloc_device(struct device *pdev, unsigned int size,
+ }
+ EXPORT_SYMBOL_GPL(mt76_alloc_device);
+ 
+-int mt76_register_device(struct mt76_dev *dev, bool vht,
++int mt76_prepare_device(struct mt76_dev *dev, bool vht,
+ 			 struct ieee80211_rate *rates, int n_rates)
+ {
+ 	struct ieee80211_hw *hw = dev->hw;
+@@ -786,6 +786,20 @@ int mt76_register_device(struct mt76_dev *dev, bool vht,
+ 		if (ret)
+ 			return ret;
+ 	}
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt76_prepare_device);
++
++int mt76_register_device(struct mt76_dev *dev, bool vht,
++			 struct ieee80211_rate *rates, int n_rates)
++{
++	struct ieee80211_hw *hw = dev->hw;
++	struct mt76_phy *phy = &dev->phy;
++	int ret;
++
++	ret = mt76_prepare_device(dev, vht, rates, n_rates);
++	if (ret)
++		return ret;
+ 
+ 	if (IS_ENABLED(CONFIG_MT76_LEDS)) {
+ 		ret = mt76_led_init(phy);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76.h b/drivers/net/wireless/mediatek/mt76/mt76.h
+index 2ade848fe3bbb..752737491f1ed 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76.h
+@@ -1316,6 +1316,8 @@ __mt76_wcid_ptr(struct mt76_dev *dev, u16 idx)
+ struct mt76_dev *mt76_alloc_device(struct device *pdev, unsigned int size,
+ 				   const struct ieee80211_ops *ops,
+ 				   const struct mt76_driver_ops *drv_ops);
++int mt76_prepare_device(struct mt76_dev *dev, bool vht,
++			struct ieee80211_rate *rates, int n_rates);
+ int mt76_register_device(struct mt76_dev *dev, bool vht,
+ 			 struct ieee80211_rate *rates, int n_rates);
+ void mt76_unregister_device(struct mt76_dev *dev);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac.h b/drivers/net/wireless/mediatek/mt76/mt76_connac.h
+index b1677ca247030..3eb7c5a12501e 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac.h
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac.h
+@@ -217,10 +217,15 @@ static inline bool is_mt7922(struct mt76_dev *dev)
+ 	return mt76_chip(dev) == 0x7922;
+ }
+ 
++static inline bool is_mt7932(struct mt76_dev *dev)
++{
++	return mt76_chip(dev) == 0x7932;
++}
++
+ static inline bool is_connac2(struct mt76_dev *dev)
+ {
+ 	return mt76_chip(dev) == 0x7961 || is_mt7922(dev) || is_mt7920(dev) ||
+-				is_mt7902(dev);
++				is_mt7902(dev) || is_mt7932(dev);
+ }
+ 
+ static inline bool is_mt7663(struct mt76_dev *dev)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
+index 2f925d22b9aa7..4cba1a034dbd4 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt76_connac_mcu.c
+@@ -2320,7 +2320,8 @@ mt76_connac_mcu_rate_txpower_band(struct mt76_phy *phy,
+ 			goto out;
+ 
+ 		/* read a CR to avoid PSE buffer underflow */
+-		mt76_connac_mcu_reg_rr(dev, MT_PSE_BASE);
++		if (!is_mt7932(dev))
++			mt76_connac_mcu_reg_rr(dev, MT_PSE_BASE);
+ 	}
+ 
+ out:
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/Makefile b/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
+index 3ef7c9c453869..72371a46ee890 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/Makefile
+@@ -5,7 +5,7 @@ obj-$(CONFIG_MT7921E) += mt7921e.o
+ obj-$(CONFIG_MT7921S) += mt7921s.o
+ obj-$(CONFIG_MT7921U) += mt7921u.o
+ 
+-mt7921-common-y := mac.o mcu.o regd.o main.o init.o debugfs.o
++mt7921-common-y := mac.o mcu.o regd.o main.o init.o debugfs.o mt7932.o mt7932_fullmac.o mt7932_cfg80211.o mt7932_offload.o
+ mt7921-common-$(CONFIG_NL80211_TESTMODE) += testmode.o
+ mt7921e-y := pci.o pci_mac.o pci_mcu.o
+ mt7921s-y := sdio.o sdio_mac.o sdio_mcu.o
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/debugfs.c b/drivers/net/wireless/mediatek/mt76/mt7921/debugfs.c
+index a5a70d8e8544a..0a98f21acff76 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/debugfs.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/debugfs.c
+@@ -266,6 +266,10 @@ int mt7921_init_debugfs(struct mt792x_dev *dev)
+ 	struct dentry *dir;
+ 
+ 	dir = mt76_register_debugfs_fops(&dev->mphy, &fops_regval);
++	if (IS_ERR_OR_NULL(dir))
++		return -ENOMEM;
++	if (is_mt7932(&dev->mt76))
++		mt7932_diag_init(dev, dir);
+ 
+ 	if (mt76_is_mmio(&dev->mt76))
+ 		debugfs_create_devm_seqfile(dev->mt76.dev, "xmit-queues",
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/init.c b/drivers/net/wireless/mediatek/mt76/mt7921/init.c
+index 49be2fa4e3fa1..01f3e650b9d52 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/init.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/init.c
+@@ -90,16 +90,22 @@ static int __mt7921_init_hardware(struct mt792x_dev *dev)
+ 	 */
+ 	mt76_wr(dev, MT_SWDEF_MODE, MT_SWDEF_NORMAL_MODE);
+ 	ret = mt792x_mcu_init(dev);
+-	if (ret)
++	if (ret) {
++		dev_err(dev->mt76.dev, "MCU initialization failed: %d\n", ret);
+ 		goto out;
++	}
+ 
+ 	ret = mt76_eeprom_override(&dev->mphy);
+-	if (ret)
++	if (ret) {
++		dev_err(dev->mt76.dev, "EEPROM override failed: %d\n", ret);
+ 		goto out;
++	}
+ 
+ 	ret = mt7921_mcu_set_eeprom(dev);
+-	if (ret)
++	if (ret) {
++		dev_err(dev->mt76.dev, "EEPROM initialization failed: %d\n", ret);
+ 		goto out;
++	}
+ 
+ 	ret = mt7921_mac_init(dev);
+ out:
+@@ -142,6 +148,18 @@ static void mt7921_init_work(struct work_struct *work)
+ 	mt7921_set_stream_he_caps(&dev->phy);
+ 	mt792x_config_mac_addr_list(dev);
+ 
++	if (is_mt7932(&dev->mt76)) {
++		ret = mt76_prepare_device(&dev->mt76, true, mt76_rates,
++					 ARRAY_SIZE(mt76_rates));
++		if (!ret)
++			ret = mt7932_fullmac_init(dev);
++		if (ret)
++			dev_err(dev->mt76.dev, "MT7932 cfg80211 init failed: %d\n", ret);
++		else
++			dev->hw_init_done = true;
++		return;
++	}
++
+ 	ret = mt76_register_device(&dev->mt76, true, mt76_rates,
+ 				   ARRAY_SIZE(mt76_rates));
+ 	if (ret) {
+@@ -163,6 +181,11 @@ static void mt7921_init_work(struct work_struct *work)
+ 
+ 	/* we support chip reset now */
+ 	dev->hw_init_done = true;
++	if (is_mt7932(&dev->mt76)) {
++		ret = mt7932_fullmac_init(dev);
++		if (ret)
++			dev_err(dev->mt76.dev, "MT7932 native datapath init: %d\n", ret);
++	}
+ 
+ 	mt76_connac_mcu_set_deep_sleep(&dev->mt76, dev->pm.ds_enable);
+ }
+@@ -208,7 +231,7 @@ int mt7921_register_device(struct mt792x_dev *dev)
+ 	dev->pm.stats.last_doze_event = jiffies;
+ 
+ 	if (!mt76_is_usb(&dev->mt76) &&
+-	    !is_mt7902(&dev->mt76)) {
++	    !is_mt7902(&dev->mt76) && !is_mt7932(&dev->mt76)) {
+ 		dev->pm.enable_user = true;
+ 		dev->pm.enable = true;
+ 		dev->pm.ds_enable_user = true;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mac.c b/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
+index e69978184f68c..3729855d53bce 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mac.c
+@@ -461,7 +461,7 @@ void mt7921_mac_add_txs(struct mt792x_dev *dev, void *data)
+ 	if (pid < MT_PACKET_ID_FIRST)
+ 		return;
+ 
+-	if (wcidx >= MT792x_WTBL_SIZE)
++	if (wcidx >= (is_mt7932(&dev->mt76) ? 49 : MT792x_WTBL_SIZE))
+ 		return;
+ 
+ 	rcu_read_lock();
+@@ -540,6 +540,8 @@ static void mt7921_mac_tx_free(struct mt792x_dev *dev, void *data, int len)
+ 		txwi = mt76_token_release(mdev, msdu, &wake);
+ 		if (!txwi)
+ 			continue;
++		if (is_mt7932(mdev) && mt7932_fullmac_tx_free(dev, txwi))
++			continue;
+ 
+ 		mt76_connac2_txwi_free(mdev, txwi, sta, &free_list);
+ 	}
+@@ -575,6 +577,9 @@ bool mt7921_rx_check(struct mt76_dev *mdev, void *data, int len)
+ 		mt7921_mac_tx_free(dev, data, len);
+ 		return false;
+ 	case PKT_TYPE_TXS:
++		if (is_mt7932(mdev))
++			dev_info_ratelimited(mdev->dev, "MT7932 TX status len=%u: %*ph\n",
++				len, min_t(unsigned int, len, 40), data);
+ 		for (rxd += 2; rxd + 8 <= end; rxd += 8)
+ 			mt7921_mac_add_txs(dev, rxd);
+ 		return false;
+@@ -592,11 +597,26 @@ void mt7921_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
+ 	__le32 *end = (__le32 *)&skb->data[skb->len];
+ 	enum rx_pkt_type type;
+ 	u16 flag;
++	int ret;
++	if (is_mt7932(mdev) && skb->len < 24) {
++		dev_kfree_skb(skb);
++		return;
++	}
++	if (is_mt7932(mdev))
++		mt7932_diag_rx(q, skb);
+ 
+ 	type = le32_get_bits(rxd[0], MT_RXD0_PKT_TYPE);
+ 	flag = le32_get_bits(rxd[0], MT_RXD0_PKT_FLAG);
+-
+-	if (type == PKT_TYPE_RX_EVENT && flag == 0x1)
++	if (is_mt7932(mdev) && type != PKT_TYPE_NORMAL &&
++	    type != PKT_TYPE_RX_EVENT && type != PKT_TYPE_TXS &&
++	    type != PKT_TYPE_TXRX_NOTIFY)
++		dev_info_ratelimited(mdev->dev, "MT7932 RX ring=%u type=%u flag=%u bytes=%u\n",
++			 q, type, flag, skb->len);
++
++	if (type == PKT_TYPE_RX_EVENT &&
++	    (flag == 0x1 || (is_mt7932(mdev) &&
++	     (rxd[4] & cpu_to_le32(MT_RXD4_NORMAL_OFLD) ||
++	      rxd[2] & cpu_to_le32(MT_RXD2_NORMAL_HDR_TRANS)))))
+ 		type = PKT_TYPE_NORMAL_MCU;
+ 
+ 	switch (type) {
+@@ -618,10 +638,25 @@ void mt7921_queue_rx_skb(struct mt76_dev *mdev, enum mt76_rxq_id q,
+ 		break;
+ 	case PKT_TYPE_NORMAL_MCU:
+ 	case PKT_TYPE_NORMAL:
+-		if (!mt7921_mac_fill_rx(dev, skb)) {
++		ret = mt7921_mac_fill_rx(dev, skb);
++		if (!ret) {
++			if (is_mt7932(mdev) && mt7932_fullmac_rx(dev, skb))
++				return;
++			if (is_mt7932(mdev) && skb->len >= 30 &&
++			    ieee80211_is_auth(((struct ieee80211_hdr *)skb->data)->frame_control)) {
++				struct ieee80211_mgmt *mgmt = (void *)skb->data;
++
++				dev_info_ratelimited(mdev->dev, "MT7932 RX authentication ring=%u len=%u algorithm=%u transaction=%u status=%u\n",
++					q, skb->len, le16_to_cpu(mgmt->u.auth.auth_alg),
++					le16_to_cpu(mgmt->u.auth.auth_transaction),
++					le16_to_cpu(mgmt->u.auth.status_code));
++			}
++			/* Drain on the NAPI instance servicing this hardware RX ring. */
+ 			mt76_rx(&dev->mt76, q, skb);
+ 			return;
+ 		}
++		if (is_mt7932(mdev))
++			dev_info_ratelimited(mdev->dev, "MT7932 RX decoding failed: %d\n", ret);
+ 		fallthrough;
+ 	default:
+ 		dev_kfree_skb(skb);
+@@ -641,6 +676,12 @@ mt7921_vif_connect_iter(void *priv, u8 *mac,
+ 	if (vif->type == NL80211_IFTYPE_STATION)
+ 		ieee80211_disconnect(vif, true);
+ 
++	if (is_mt7932(&dev->mt76)) {
++		mt7932_add_interface(dev, vif, mvif, true);
++		mt7921_mcu_set_tx(dev, vif);
++		return;
++	}
++
+ 	mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
+ 				    &mvif->bss_conf.mt76,
+ 				    &mvif->sta.deflink.wcid, true);
+@@ -667,7 +708,10 @@ void mt7921_mac_reset_work(struct work_struct *work)
+ 	dev_dbg(dev->mt76.dev, "chip reset\n");
+ 	set_bit(MT76_RESET, &dev->mphy.state);
+ 	dev->hw_full_reset = true;
+-	ieee80211_stop_queues(hw);
++	if (is_mt7932(&dev->mt76))
++		mt7932_fullmac_reset_prepare(dev);
++	else
++		ieee80211_stop_queues(hw);
+ 
+ 	cancel_delayed_work_sync(&dev->mphy.mac_work);
+ 	cancel_delayed_work_sync(&pm->ps_work);
+@@ -701,8 +745,13 @@ void mt7921_mac_reset_work(struct work_struct *work)
+ 	}
+ 
+ 	dev->hw_full_reset = false;
+-	clear_bit(MT76_RESET, &dev->mphy.state);
+ 	pm->suspended = false;
++	if (is_mt7932(&dev->mt76)) {
++		mt7932_fullmac_reset_done(dev, ret);
++		clear_bit(MT76_RESET, &dev->mphy.state);
++		return;
++	}
++	clear_bit(MT76_RESET, &dev->mphy.state);
+ 	ieee80211_wake_queues(hw);
+ 	ieee80211_iterate_active_interfaces(hw,
+ 					    IEEE80211_IFACE_ITER_RESUME_ALL,
+@@ -716,12 +765,14 @@ void mt7921_coredump_work(struct work_struct *work)
+ {
+ 	struct mt792x_dev *dev;
+ 	char *dump, *data;
++	unsigned long timeout;
+ 
+ 	dev = (struct mt792x_dev *)container_of(work, struct mt792x_dev,
+ 						coredump.work.work);
+ 
+-	if (time_is_after_jiffies(dev->coredump.last_activity +
+-				  4 * MT76_CONNAC_COREDUMP_TIMEOUT)) {
++	timeout = is_mt7932(&dev->mt76) ? 5 * HZ :
++		  4 * MT76_CONNAC_COREDUMP_TIMEOUT;
++	if (time_is_after_jiffies(dev->coredump.last_activity + timeout)) {
+ 		queue_delayed_work(dev->mt76.wq, &dev->coredump.work,
+ 				   MT76_CONNAC_COREDUMP_TIMEOUT);
+ 		return;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/main.c b/drivers/net/wireless/mediatek/mt76/mt7921/main.c
+index 68a059504e838..dbd7ad0ce308a 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/main.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/main.c
+@@ -228,6 +228,8 @@ int __mt7921_start(struct mt792x_phy *phy)
+ {
+ 	struct mt76_phy *mphy = phy->mt76;
+ 	int err;
++	if (is_mt7932(mphy->dev))
++		return mt7932_start(phy);
+ 
+ 	err = mt76_connac_mcu_set_mac_enable(mphy->dev, 0, true, false);
+ 	if (err)
+@@ -309,6 +311,13 @@ mt7921_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ 	mt792x_mutex_acquire(dev);
+ 
+ 	mvif->bss_conf.mt76.idx = __ffs64(~dev->mt76.vif_mask);
++	if (is_mt7932(&dev->mt76)) {
++		mvif->bss_conf.mt76.idx = mt7932_host_bss();
++		if (dev->mt76.vif_mask & BIT_ULL(mvif->bss_conf.mt76.idx)) {
++			ret = -ENOSPC;
++			goto out;
++		}
++	}
+ 	if (mvif->bss_conf.mt76.idx >= MT792x_MAX_INTERFACES) {
+ 		ret = -ENOSPC;
+ 		goto out;
+@@ -320,7 +329,10 @@ mt7921_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ 	mvif->bss_conf.mt76.band_idx = 0;
+ 	mvif->bss_conf.mt76.wmm_idx = mvif->bss_conf.mt76.idx % MT76_CONNAC_MAX_WMM_SETS;
+ 
+-	ret = mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
++	if (is_mt7932(&dev->mt76))
++		ret = mt7932_add_interface(dev, vif, mvif, true);
++	else
++		ret = mt76_connac_mcu_uni_add_dev(&dev->mphy, &vif->bss_conf,
+ 					  &mvif->bss_conf.mt76,
+ 					  &mvif->sta.deflink.wcid, true);
+ 	if (ret)
+@@ -329,7 +341,8 @@ mt7921_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ 	dev->mt76.vif_mask |= BIT_ULL(mvif->bss_conf.mt76.idx);
+ 	phy->omac_mask |= BIT_ULL(mvif->bss_conf.mt76.omac_idx);
+ 
+-	idx = MT792x_WTBL_RESERVED - mvif->bss_conf.mt76.idx;
++	idx = is_mt7932(&dev->mt76) ? 7 :
++		MT792x_WTBL_RESERVED - mvif->bss_conf.mt76.idx;
+ 
+ 	INIT_LIST_HEAD(&mvif->sta.deflink.wcid.poll_list);
+ 	mvif->sta.deflink.wcid.idx = idx;
+@@ -347,7 +360,8 @@ mt7921_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ 		mtxq->wcid = idx;
+ 	}
+ 
+-	vif->driver_flags |= IEEE80211_VIF_BEACON_FILTER;
++	if (!is_mt7932(&dev->mt76))
++		vif->driver_flags |= IEEE80211_VIF_BEACON_FILTER;
+ 	if (phy->chip_cap & MT792x_CHIP_CAP_RSSI_NOTIFY_EVT_EN)
+ 		vif->driver_flags |= IEEE80211_VIF_SUPPORTS_CQM_RSSI;
+ 
+@@ -480,6 +494,8 @@ int mt7921_set_channel(struct mt76_phy *mphy)
+ 	struct mt792x_dev *dev = phy->dev;
+ 	int ret;
+ 
++	if (is_mt7932(&dev->mt76))
++		return mt7932_set_channel(phy, 0);
+ 	mt76_connac_pm_wake(mphy, &dev->pm);
+ 	ret = mt7921_mcu_set_chan_info(phy, MCU_EXT_CMD(CHANNEL_SWITCH));
+ 	if (ret)
+@@ -514,6 +530,8 @@ static int mt7921_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
+ 	/* The hardware does not support per-STA RX GTK, fallback
+ 	 * to software mode for these.
+ 	 */
++	if (is_mt7932(&dev->mt76))
++		return mt7932_set_key(dev, vif, sta, key, cmd);
+ 	if ((vif->type == NL80211_IFTYPE_ADHOC ||
+ 	     vif->type == NL80211_IFTYPE_MESH_POINT) &&
+ 	    (key->cipher == WLAN_CIPHER_SUITE_TKIP ||
+@@ -701,6 +719,16 @@ static void mt7921_bss_info_changed(struct ieee80211_hw *hw,
+ 	struct mt792x_dev *dev = mt792x_hw_dev(hw);
+ 
+ 	mt792x_mutex_acquire(dev);
++	if (is_mt7932(&dev->mt76)) {
++		struct mt792x_vif *mvif = (void *)vif->drv_priv;
++		int ret = mvif->bss_conf.mt76.ctx ?
++			mt7932_bss_update(dev, vif) : 0;
++
++		if (ret)
++			dev_err(dev->mt76.dev, "MT7932 BSS update failed: %d\n", ret);
++		mt792x_mutex_release(dev);
++		return;
++	}
+ 
+ 	if (changed & BSS_CHANGED_ERP_SLOT) {
+ 		int slottime = info->use_short_slot ? 9 : 20;
+@@ -816,7 +844,8 @@ int mt7921_mac_sta_add(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 	if (sta->aid > MT7921_MAX_AID)
+ 		return -ENOENT;
+ 
+-	idx = mt76_wcid_alloc(dev->mt76.wcid_mask, MT792x_WTBL_STA - 1);
++	idx = mt76_wcid_alloc(dev->mt76.wcid_mask,
++			     is_mt7932(mdev) ? 13 : MT792x_WTBL_STA - 1);
+ 	if (idx < 0)
+ 		return -ENOSPC;
+ 
+@@ -870,7 +899,9 @@ int mt7921_mac_sta_event(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 	mt792x_mutex_acquire(dev);
+ 
+-	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
++	if (is_mt7932(mdev))
++		mt7932_bss_update(dev, vif);
++	else if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
+ 		mt76_connac_mcu_uni_add_bss(&dev->mphy, vif, &mvif->sta.deflink.wcid,
+ 					    true, mvif->bss_conf.mt76.ctx);
+ 
+@@ -907,7 +938,9 @@ void mt7921_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
+ 
+ 		mvif->wep_sta = NULL;
+ 		ewma_rssi_init(&mvif->bss_conf.rssi);
+-		if (!sta->tdls)
++		if (is_mt7932(mdev))
++			mt7932_bss_update(dev, vif);
++		else if (!sta->tdls)
+ 			mt76_connac_mcu_uni_add_bss(&dev->mphy, vif,
+ 						    &mvif->sta.deflink.wcid, false,
+ 						    mvif->bss_conf.mt76.ctx);
+@@ -1417,7 +1450,9 @@ mt7921_change_chanctx(struct ieee80211_hw *hw,
+ 	vif = container_of((void *)mvif, struct ieee80211_vif, drv_priv);
+ 
+ 	mt792x_mutex_acquire(phy->dev);
+-	if (vif->type == NL80211_IFTYPE_MONITOR) {
++	if (is_mt7932(&phy->dev->mt76)) {
++		mt7932_bss_update(phy->dev, vif);
++	} else if (vif->type == NL80211_IFTYPE_MONITOR) {
+ 		mt7921_mcu_set_sniffer(mvif->phy->dev, vif, true);
+ 		mt7921_mcu_config_sniffer(mvif, ctx);
+ 	} else {
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
+index 40546005c743b..2a75a34d736d2 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mcu.c
+@@ -18,6 +18,8 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
+ 	int mcu_cmd = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
+ 	struct mt76_connac2_mcu_rxd *rxd;
+ 	int ret = 0;
++	if (is_mt7932(mdev))
++		return mt7932_mcu_parse_response(mdev, cmd, skb, seq);
+ 
+ 	if (!skb) {
+ 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n",
+@@ -86,7 +88,14 @@ static int mt7921_mcu_read_eeprom(struct mt792x_dev *dev, u32 offset, u8 *val)
+ 	if (ret)
+ 		return ret;
+ 
++	if (skb->len < sizeof(*res)) {
++		dev_kfree_skb(skb);
++		return -EINVAL;
++	}
+ 	res = (struct mt7921_mcu_eeprom_info *)skb->data;
++	if (is_mt7932(&dev->mt76))
++		dev_info(dev->mt76.dev, "MT7932 efuse block %#x: %*ph\n",
++			 offset & ~15U, (int)sizeof(*res), res);
+ 	*val = res->data[offset % MT7921_EEPROM_BLOCK_SIZE];
+ 	dev_kfree_skb(skb);
+ 
+@@ -216,6 +225,10 @@ mt7921_mcu_debug_msg_event(struct mt792x_dev *dev, struct sk_buff *skb)
+ 		u8 content[512];
+ 	} __packed * msg;
+ 
++	/* Neo emits compressed index records, already retained in private debugfs. */
++	if (is_mt7932(&dev->mt76))
++		return;
++
+ 	skb_pull(skb, sizeof(struct mt76_connac2_mcu_rxd));
+ 	msg = (struct mt7921_debug_msg *)skb->data;
+ 
+@@ -299,17 +312,40 @@ mt7921_mcu_rx_unsolicited_event(struct mt792x_dev *dev, struct sk_buff *skb)
+ 
+ 	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
+ 	switch (rxd->eid) {
++	case 0x10:
++		if (is_mt7932(&dev->mt76) && skb->len >= 60) {
++			u8 *grant = skb->data + 36;
++
++			dev_info(dev->mt76.dev, "MT7932 ROC bss=%u token=%u status=%u channel=%u band=%u duration=%u\n",
++				 grant[0], grant[1], grant[2], grant[3], grant[5],
++				 get_unaligned_le32(grant + 12));
++
++			if (grant[0] < 4 && grant[1] == dev->phy.roc_token_id &&
++			    !grant[2]) {
++				dev->phy.roc_grant = true;
++				wake_up(&dev->phy.roc_wait);
++				if (grant[9] == MT7921_ROC_REQ_ROC)
++					ieee80211_ready_on_channel(dev->mphy.hw);
++				mod_timer(&dev->phy.roc_timer, jiffies +
++					msecs_to_jiffies(get_unaligned_le32(grant + 12)));
++			}
++		}
++		break;
+ 	case MCU_EVENT_BSS_BEACON_LOSS:
+ 		mt7921_mcu_connection_loss_event(dev, skb);
+ 		break;
+ 	case MCU_EVENT_SCHED_SCAN_DONE:
+ 	case MCU_EVENT_SCAN_DONE:
++		if (is_mt7932(&dev->mt76))
++			break; /* Fullmac event worker owns scan completion. */
+ 		mt7921_mcu_scan_event(dev, skb);
+ 		return;
+ 	case MCU_EVENT_DBG_MSG:
+ 		mt7921_mcu_debug_msg_event(dev, skb);
+ 		break;
+ 	case MCU_EVENT_COREDUMP:
++		if (is_mt7932(&dev->mt76) && !dev->fw_assert)
++			mt76_wr(dev, 0x11484, 0x800);
+ 		dev->fw_assert = true;
+ 		mt76_connac_mcu_coredump_event(&dev->mt76, skb,
+ 					       &dev->coredump);
+@@ -357,8 +393,25 @@ void mt7921_mcu_rx_event(struct mt792x_dev *dev, struct sk_buff *skb)
+ 	}
+ 
+ 	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
++	if (is_mt7932(&dev->mt76))
++		mt7932_fullmac_event(dev, skb);
++	if (is_mt7932(&dev->mt76) && skb->len >= 36 &&
++	    (rxd->eid == 0xea || rxd->eid == 0xee))
++		dev_info_ratelimited(dev->mt76.dev, "MT7932 MLME event eid=%#x ext=%#x seq=%u len=%u\n",
++			 rxd->eid, rxd->ext_eid, rxd->seq, skb->len);
++	if (is_mt7932(&dev->mt76) && skb->len >= 36 &&
++	    (rxd->eid == 0x0d || rxd->eid == 0x10 || rxd->eid == 0x5d || rxd->eid == 0x5e ||
++	     rxd->eid == 0xd7))
++		dev_info(dev->mt76.dev, "MT7932 event %#x seq=%u len=%u: %*ph\n",
++			 rxd->eid, rxd->seq, skb->len,
++			 min_t(unsigned int, skb->len - 36, 64), skb->data + 36);
++	if (is_mt7932(&dev->mt76) && skb->len >= 32 &&
++	    get_unaligned_le16(skb->data + 26) == 0xe000) {
++		mt76_mcu_rx_event(&dev->mt76, skb);
++		return;
++	}
+ 
+-	if (rxd->option & MCU_UNI_CMD_UNSOLICITED_EVENT) {
++	if (!is_mt7932(&dev->mt76) && rxd->option & MCU_UNI_CMD_UNSOLICITED_EVENT) {
+ 		mt7921_mcu_uni_rx_unsolicited_event(dev, skb);
+ 		return;
+ 	}
+@@ -368,7 +421,8 @@ void mt7921_mcu_rx_event(struct mt792x_dev *dev, struct sk_buff *skb)
+ 		return;
+ 	}
+ 
+-	if (rxd->ext_eid == MCU_EXT_EVENT_RATE_REPORT ||
++	if ((is_mt7932(&dev->mt76) && rxd->eid == 0x10) ||
++	    rxd->ext_eid == MCU_EXT_EVENT_RATE_REPORT ||
+ 	    rxd->eid == MCU_EVENT_BSS_BEACON_LOSS ||
+ 	    rxd->eid == MCU_EVENT_SCHED_SCAN_DONE ||
+ 	    rxd->eid == MCU_EVENT_RSSI_NOTIFY ||
+@@ -616,13 +670,17 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
+ 		len = le32_to_cpu(tlv->len);
+ 		if (skb->len < len)
+ 			break;
++		if (is_mt7932(phy->dev))
++			dev_info(phy->dev->dev, "MT7932 capability tag=%u len=%u: %*ph\n",
++				 le32_to_cpu(tlv->type), len, min(len, 12), skb->data);
+ 
+ 		switch (le32_to_cpu(tlv->type)) {
+ 		case MT_NIC_CAP_6G:
+ 			phy->cap.has_6ghz = skb->data[0];
+ 			break;
+ 		case MT_NIC_CAP_MAC_ADDR:
+-			memcpy(phy->macaddr, (void *)skb->data, ETH_ALEN);
++			if (!is_mt7932(phy->dev) || is_valid_ether_addr(skb->data))
++				memcpy(phy->macaddr, (void *)skb->data, ETH_ALEN);
+ 			break;
+ 		case MT_NIC_CAP_PHY:
+ 			mt7921_mcu_parse_phy_cap(phy->dev, skb);
+@@ -633,7 +691,9 @@ static int mt7921_mcu_get_nic_capability(struct mt792x_phy *mphy)
+ 							     skb);
+ 			break;
+ 		case MT_NIC_CAP_CHIP_CAP:
+-			memcpy(&mphy->chip_cap, (void *)skb->data, sizeof(u64));
++			/* MT7932 tag 0x20 describes roaming, not mt7921 chip flags. */
++			if (!is_mt7932(phy->dev) && len >= sizeof(u64))
++				memcpy(&mphy->chip_cap, skb->data, sizeof(u64));
+ 			break;
+ 		default:
+ 			break;
+@@ -663,7 +723,7 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
+ {
+ 	int err;
+ 
+-	err = mt792x_load_firmware(dev);
++	err = is_mt7932(&dev->mt76) ? mt7932_load_firmware(dev) : mt792x_load_firmware(dev);
+ 	if (err)
+ 		return err;
+ 
+@@ -671,7 +731,7 @@ int mt7921_run_firmware(struct mt792x_dev *dev)
+ 	if (err)
+ 		return err;
+ 
+-	err = mt7921_load_clc(dev, mt792x_ram_name(dev));
++	err = is_mt7932(&dev->mt76) ? 0 : mt7921_load_clc(dev, mt792x_ram_name(dev));
+ 	if (err)
+ 		return err;
+ 	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
+@@ -794,6 +854,19 @@ int mt7921_mcu_set_roc(struct mt792x_phy *phy, struct mt792x_vif *vif,
+ {
+ 	int center_ch = ieee80211_frequency_to_channel(chan->center_freq);
+ 	struct mt792x_dev *dev = phy->dev;
++	if (is_mt7932(&dev->mt76)) {
++		u8 legacy[24] = {
++			vif->bss_conf.mt76.idx, token_id, 0, chan->hw_value, 0,
++			chan->band == NL80211_BAND_2GHZ ? 1 :
++			chan->band == NL80211_BAND_5GHZ ? 2 : 3,
++			0, center_ch, 0, type, 0,
++		};
++
++		put_unaligned_le32(duration, legacy + 12);
++		dev_info(dev->mt76.dev, "MT7932 channel request bss=%u token=%u channel=%u band=%u type=%u duration=%u\n",
++			 legacy[0], token_id, legacy[3], legacy[5], type, duration);
++		return mt76_mcu_send_msg(&dev->mt76, 0x1c, legacy, sizeof(legacy), false);
++	}
+ 	struct {
+ 		struct {
+ 			u8 rsv[4];
+@@ -859,6 +932,11 @@ int mt7921_mcu_abort_roc(struct mt792x_phy *phy, struct mt792x_vif *vif,
+ 			 u8 token_id)
+ {
+ 	struct mt792x_dev *dev = phy->dev;
++	if (is_mt7932(&dev->mt76)) {
++		u8 legacy[24] = { vif->bss_conf.mt76.idx, token_id, 1 };
++
++		return mt76_mcu_send_msg(&dev->mt76, 0x1c, legacy, sizeof(legacy), false);
++	}
+ 	struct {
+ 		struct {
+ 			u8 rsv[4];
+@@ -954,7 +1032,52 @@ int mt7921_mcu_set_eeprom(struct mt792x_dev *dev)
+ 		.buffer_mode = EE_MODE_EFUSE,
+ 		.format = EE_FORMAT_WHOLE,
+ 	};
++	if (is_mt7932(&dev->mt76)) {
++		const struct firmware *fw;
++		u8 version, power;
++		const char *name;
++		int ret, offset;
++		u8 upload[1028];
++
++		ret = mt7921_mcu_read_eeprom(dev, 0x7a, &version);
++		if (ret)
++			return ret;
++		ret = mt7921_mcu_read_eeprom(dev, 0x164, &power);
++		if (ret)
++			return ret;
++		dev_info(dev->mt76.dev, "MT7932 module %#x target power %#x\n", version, power);
++		if ((version & 15) && power)
++			goto efuse;
++		name = version & 15 ? "mediatek/PPR_MT7932.bin" :
++					 "mediatek/EEPROM_MT7932_1.bin";
++		ret = request_firmware(&fw, name, dev->mt76.dev);
++		if (ret)
++			return ret;
++		if ((version & 15) ? fw->size != 412 :
++		    fw->size != 2560 || get_unaligned_le16(fw->data) != 0x7932) {
++			ret = -EINVAL;
++			goto release;
++		}
++		for (offset = 0; offset < fw->size; offset += 1024) {
++			int size = min_t(size_t, 1024, fw->size - offset);
++
++			upload[0] = version & 15 ? 2 : 1;
++			upload[1] = version & 15 ? 0 : 0x41 | ((offset / 1024) << 2);
++			put_unaligned_le16(size, upload + 2);
++			memcpy(upload + 4, fw->data + offset, size);
++			ret = mt76_mcu_send_msg(&dev->mt76, MCU_EXT_QUERY(EFUSE_BUFFER_MODE),
++					       upload, size + 4, true);
++			if (ret)
++				break;
++		}
++release:
++		release_firmware(fw);
++		if (!ret && (version & 15))
++			ret = mt7932_load_calibration(dev);
++		return ret;
++	}
+ 
++efuse:
+ 	return mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD(EFUSE_BUFFER_MODE),
+ 				 &req, sizeof(req), true);
+ }
+@@ -1088,6 +1211,8 @@ int mt7921_mcu_sta_update(struct mt792x_dev *dev, struct ieee80211_sta *sta,
+ 	};
+ 	struct mt792x_sta *msta;
+ 
++	if (is_mt7932(&dev->mt76))
++		return mt7932_sta_update(dev, sta, vif, enable, state);
+ 	msta = sta ? (struct mt792x_sta *)sta->drv_priv : NULL;
+ 	info.wcid = msta ? &msta->deflink.wcid : &mvif->sta.deflink.wcid;
+ 	info.newly = msta ? state != MT76_STA_INFO_STATE_ASSOC : true;
+@@ -1482,6 +1607,15 @@ int mt7921_mcu_wf_rf_pin_ctrl(struct mt792x_phy *phy, u8 action)
+ int mt7921_mcu_set_rxfilter(struct mt792x_dev *dev, u32 fif,
+ 			    u8 bit_op, u32 bit_map)
+ {
++	if (is_mt7932(&dev->mt76)) {
++		u8 filter[68] = {};
++
++		/* The legacy firmware takes a filter word at offset zero. */
++		put_unaligned_le32(0x6000000f, filter);
++		return mt76_mcu_send_msg(&dev->mt76, 0x0a, filter,
++					 sizeof(filter), false);
++	}
++
+ 	struct {
+ 		u8 rsv[4];
+ 		u8 mode;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7921.h b/drivers/net/wireless/mediatek/mt76/mt7921/mt7921.h
+index fb8654b7c5e7e..a776697713250 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/mt7921.h
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7921.h
+@@ -7,6 +7,40 @@
+ #include "../mt792x.h"
+ #include "regs.h"
+ 
++int mt7932_load_firmware(struct mt792x_dev *dev);
++int mt7932_load_calibration(struct mt792x_dev *dev);
++int mt7932_start(struct mt792x_phy *phy);
++u8 mt7932_host_bss(void);
++void mt7932_diag_init(struct mt792x_dev *dev, struct dentry *dir);
++void mt7932_diag_rx(enum mt76_rxq_id q, struct sk_buff *skb);
++int mt7932_fullmac_init(struct mt792x_dev *dev);
++void mt7932_fullmac_remove(struct mt792x_dev *dev);
++void mt7932_fullmac_quiesce(struct mt792x_dev *dev);
++void mt7932_fullmac_tx_purge(struct mt792x_dev *dev);
++void mt7932_fullmac_reset_prepare(struct mt792x_dev *dev);
++void mt7932_fullmac_reset_done(struct mt792x_dev *dev, int error);
++int mt7932_fullmac_reinit(struct mt792x_dev *dev);
++void mt7932_fullmac_event(struct mt792x_dev *dev, struct sk_buff *skb);
++bool mt7932_fullmac_rx(struct mt792x_dev *dev, struct sk_buff *skb);
++bool mt7932_fullmac_is_tx(struct mt792x_dev *dev, struct sk_buff *skb);
++void mt7932_fullmac_txwi(struct mt792x_dev *dev, __le32 *txwi,
++			struct sk_buff *skb);
++bool mt7932_fullmac_tx_free(struct mt792x_dev *dev, struct mt76_txwi_cache *t);
++int mt7932_add_interface(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++			struct mt792x_vif *mvif, bool enable);
++int mt7932_set_channel(struct mt792x_phy *phy, u8 bss_idx);
++int mt7932_bss_update(struct mt792x_dev *dev, struct ieee80211_vif *vif);
++int mt7932_set_key(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++		   struct ieee80211_sta *sta, struct ieee80211_key_conf *key,
++		   enum set_key_cmd cmd);
++int mt7932_sta_update(struct mt792x_dev *dev, struct ieee80211_sta *sta,
++		     struct ieee80211_vif *vif, bool enable,
++		     enum mt76_sta_info_state state);
++int mt7932_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
++			  int cmd, int *seq);
++int mt7932_mcu_parse_response(struct mt76_dev *mdev, int cmd,
++			    struct sk_buff *skb, int seq);
++
+ #define MT7921_MAX_AID                  20
+ 
+ #define MT7921_TX_RING_SIZE		2048
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932.c b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932.c
+new file mode 100644
+index 0000000000000..c8a5a6f6ae754
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932.c
+@@ -0,0 +1,1123 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT7932 CONNAC2 boot transport, based on documented hardware behavior. */
++#include <linux/firmware.h>
++#include <linux/debugfs.h>
++#include <linux/ktime.h>
++#include <linux/pci.h>
++#include <linux/unaligned.h>
++#include "mt7921.h"
++#include "mcu.h"
++#include "mt7932_offload.h"
++#include "mt7932_mcu.h"
++#include "mt7932_fullmac.h"
++#include "mt7932_regs.h"
++#include "../mt76_connac2_mac.h"
++
++static u8 mt7932_diag_data[1024 * 1024];
++static unsigned int mt7932_diag_used = 4;
++static DEFINE_SPINLOCK(mt7932_diag_lock);
++static struct debugfs_blob_wrapper mt7932_diag_blob = {
++	.data = mt7932_diag_data,
++	.size = sizeof(mt7932_diag_data),
++};
++
++/* Root-only protocol bring-up transport, limited to reversible runtime settings. */
++static ssize_t mt7932_runtime_write(struct file *file, const char __user *user,
++				   size_t count, loff_t *ppos)
++{
++	struct mt792x_dev *dev = file->private_data;
++	u8 *request;
++	u16 cmd;
++	int ret;
++
++	if (count < 2 || count > 1538)
++		return -EINVAL;
++	request = memdup_user(user, count);
++	if (IS_ERR(request))
++		return PTR_ERR(request);
++	cmd = get_unaligned_le16(request);
++	switch (cmd) {
++	case MT7932_CMD_CUSTOMER_CONFIG: /* Runtime key/value configuration. */
++	case MT7932_CMD_QUEUE_MANAGEMENT: /* Queue management. */
++	case MT7932_CMD_RUNTIME_93: /* Payload semantics unresolved. */
++	case MT7932_CMD_PROBE_PRIVACY: /* Receive filtering. */
++	case MT7932_CMD_RTS: /* RTS protection. */
++	case MT7932_CMD_BEACON_PARSE: /* Beacon IE parse result. */
++	case MT7932_CMD_SME_RNR: /* Reduced-neighbor report. */
++	case MT7932_CMD_SME_DHCP_RELEASE: /* DHCP channel privilege release. */
++		mt792x_mutex_acquire(dev);
++		ret = mt76_mcu_send_msg(&dev->mt76, cmd, request + 2,
++				      count - 2, false);
++		mt792x_mutex_release(dev);
++		break;
++	default:
++		ret = -EOPNOTSUPP;
++	}
++	memzero_explicit(request, count);
++	kfree(request);
++	return ret ? ret : count;
++}
++
++static const struct file_operations mt7932_runtime_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = mt7932_runtime_write,
++	.llseek = noop_llseek,
++};
++
++/* Exercise the real recovery path without deliberately crashing firmware. */
++static int mt7932_recovery_set(void *data, u64 value)
++{
++	struct mt792x_dev *dev = data;
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++	int ret = 0;
++
++	if (value != 1)
++		return -EINVAL;
++	if (!fm || !dev->hw_init_done)
++		return -ENODEV;
++	wiphy_lock(fm->wiphy);
++	if (fm->removing)
++		ret = -ENODEV;
++	else
++		mt792x_reset(&dev->mt76);
++	wiphy_unlock(fm->wiphy);
++	return ret;
++}
++DEFINE_DEBUGFS_ATTRIBUTE(mt7932_recovery_fops, NULL, mt7932_recovery_set, "%llu\n");
++
++void mt7932_diag_init(struct mt792x_dev *dev, struct dentry *dir)
++{
++	debugfs_create_blob("neo_firmware_events", 0400, dir, &mt7932_diag_blob);
++	debugfs_create_file("neo_recover", 0200, dir, dev, &mt7932_recovery_fops);
++	debugfs_create_file("neo_runtime_command", 0200, dir, dev,
++			    &mt7932_runtime_fops);
++}
++
++void mt7932_diag_rx(enum mt76_rxq_id q, struct sk_buff *skb)
++{
++	unsigned long flags;
++	u8 *p;
++
++	/* Opaque firmware diagnostics only; never expose normal data-ring traffic. */
++	if (q != MT_RXQ_MCU && q != MT_RXQ_MCU_WA && q != MT_RXQ_BAND2_WA)
++		return;
++	if (skb->len > 2352)
++		return;
++	spin_lock_irqsave(&mt7932_diag_lock, flags);
++	if (skb->len + 12 <= sizeof(mt7932_diag_data) - mt7932_diag_used) {
++		p = mt7932_diag_data + mt7932_diag_used;
++		put_unaligned_le16(q, p);
++		put_unaligned_le16(skb->len, p + 2);
++		put_unaligned_le64(ktime_get_boottime_ns(), p + 4);
++		if (!skb_copy_bits(skb, 0, p + 12, skb->len)) {
++			mt7932_diag_used += 12 + skb->len;
++			put_unaligned_le32(mt7932_diag_used, mt7932_diag_data);
++		}
++	}
++	spin_unlock_irqrestore(&mt7932_diag_lock, flags);
++}
++
++static unsigned int mt7932_mlme_config;
++module_param(mt7932_mlme_config, uint, 0600);
++MODULE_PARM_DESC(mt7932_mlme_config, "MT7932 experimental MLME configuration word");
++static unsigned int mt7932_host_bss_index = 1;
++module_param(mt7932_host_bss_index, uint, 0600);
++MODULE_PARM_DESC(mt7932_host_bss_index, "MT7932 host SME BSS index (0=AIS, 1=host-managed client)");
++
++struct mt7932_shared_memory {
++	void *cpu[3];
++	dma_addr_t dma[3];
++};
++
++static void mt7932_shared_release(struct device *dev, void *res)
++{
++	struct mt7932_shared_memory *mem = res;
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(mem->cpu); i++)
++		if (mem->cpu[i])
++			dma_free_coherent(dev, SZ_16K, mem->cpu[i], mem->dma[i]);
++}
++
++static int mt7932_publish_shared_memory(struct mt792x_dev *dev)
++{
++	struct mt7932_shared_memory *mem;
++	struct device *device = dev->mt76.dev;
++	int i;
++
++	mem = devres_find(device, mt7932_shared_release, NULL, NULL);
++	if (!mem) {
++		mem = devres_alloc(mt7932_shared_release, sizeof(*mem), GFP_KERNEL);
++		if (!mem)
++			return -ENOMEM;
++		for (i = 0; i < ARRAY_SIZE(mem->cpu); i++) {
++			mem->cpu[i] = dma_alloc_coherent(device, SZ_16K,
++						       &mem->dma[i], GFP_KERNEL);
++			if (!mem->cpu[i] || upper_32_bits(mem->dma[i])) {
++				mt7932_shared_release(device, mem);
++				devres_free(mem);
++				return -ENOMEM;
++			}
++		}
++		devres_add(device, mem);
++	}
++	for (i = 0; i < ARRAY_SIZE(mem->cpu); i++)
++		memset(mem->cpu[i], 0, SZ_16K);
++	/* Firmware expects a 0x300-byte status block and 0x320-byte descriptors. */
++	dma_wmb();
++	mt76_wr(dev, MT7932_HOST_DMA_CONTROL0, MT7932_HOST_DMA_CONTROL0_INIT);
++	mt76_wr(dev, MT7932_HOST_DMA_CONTROL1, MT7932_HOST_DMA_CONTROL1_INIT);
++	mt76_wr(dev, MT7932_HOST_DMA_ADDR0, lower_32_bits(mem->dma[0]));
++	mt76_wr(dev, MT7932_HOST_DMA_ADDR1, lower_32_bits(mem->dma[1]));
++	mt76_wr(dev, MT7932_HOST_DMA_ADDR2, lower_32_bits(mem->dma[2]));
++	dev_info(device, "MT7932 shared host DMA buffers published\n");
++	return 0;
++}
++
++u8 mt7932_host_bss(void)
++{
++	return min_t(unsigned int, mt7932_host_bss_index, 1);
++}
++
++/* Same two manufacturer privacy records qualified in m1n1 044d00d8.
++ * Index39 is inclusive (40 bitmap bytes); extension58 occupies the LAST byte.
++ * These are IE permissions, not RF-power or timing calibration settings.
++ * Repeat before MLME/scan activation after every firmware initialization.
++ */
++static int mt7932_probe_privacy(struct mt76_dev *mdev)
++{
++	static const u8 ordinary[] = {
++		WLAN_EID_SSID, WLAN_EID_SUPP_RATES, WLAN_EID_DS_PARAMS,
++		WLAN_EID_HT_CAPABILITY, WLAN_EID_EXT_SUPP_RATES,
++		WLAN_EID_BSS_COEX_2040, WLAN_EID_INTERWORKING,
++		WLAN_EID_ADVERTISEMENT_PROTOCOL, WLAN_EID_EXT_CAPABILITY,
++		WLAN_EID_VHT_CAPABILITY, WLAN_EID_VENDOR_SPECIFIC, WLAN_EID_EXTENSION,
++	};
++	static const u8 extended[] = {
++		WLAN_EID_EXT_HE_CAPABILITY, WLAN_EID_EXT_SHORT_SSID_LIST,
++	};
++	struct mt7932_probe_privacy bitmap = {
++		.last_bitmap_byte = sizeof(bitmap.bitmap) - 1,
++	};
++	struct mt7932_probe_privacy policy = {
++		.subcommand = 1,
++		.unknown_policy0 = 20,
++		.unknown_policy1 = 20,
++	};
++	struct sk_buff *reply;
++	int ret, i;
++
++	for (i = 0; i < ARRAY_SIZE(ordinary); i++)
++		bitmap.bitmap[ordinary[i] / BITS_PER_BYTE] |=
++			BIT(ordinary[i] % BITS_PER_BYTE);
++	for (i = 0; i < ARRAY_SIZE(extended); i++)
++		bitmap.bitmap[MT7932_PRIVACY_ORDINARY_BYTES +
++			      extended[i] / BITS_PER_BYTE] |=
++			BIT(extended[i] % BITS_PER_BYTE);
++	ret = mt76_mcu_send_msg(mdev, MT7932_CMD_PROBE_PRIVACY,
++			       &bitmap, sizeof(bitmap), false);
++	if (ret)
++		return ret;
++	ret = mt76_mcu_send_msg(mdev, MT7932_CMD_PROBE_PRIVACY,
++			       &policy, sizeof(policy), false);
++	if (ret)
++		return ret;
++	/* Consume a synchronous capability reply before discovery starts. */
++	ret = mt76_mcu_send_and_get_msg(mdev, MCU_CE_CMD(GET_NIC_CAPAB),
++				      NULL, 0, true, &reply);
++	if (!ret) {
++		dev_kfree_skb(reply);
++		dev_info(mdev->dev, "MT7932 probe-request privacy initialized\n");
++	}
++	return ret;
++}
++
++static int mt7932_basic_config(struct mt76_dev *mdev)
++{
++	struct mt7932_basic_config basic = MT7932_BASIC_CONFIG_INITIALIZER(1);
++	u8 mlme[4];
++	/* Queue-management startup records observed on this 7932 firmware ABI. */
++	u8 qm[3][32] = {
++		{ 0x10, 0x11, 2, 0, 3, 0, 7, 0, 0x2f, 0, 2 },
++		{ 0xe0, 0x6e, 2, 0, 0x0f, 0, 0xff, 3, 0, 0, 3 },
++		{ 0x0f, 0, 1 },
++	};
++	int ret = mt76_mcu_send_msg(mdev, MT7932_CMD_BASIC_CONFIG,
++				     &basic, sizeof(basic), false);
++	int i;
++
++	if (ret)
++		return ret;
++	ret = mt7932_probe_privacy(mdev);
++	if (ret)
++		return ret;
++	/* Test host SME operation; the offload configuration bits are undocumented. */
++	put_unaligned_le32(mt7932_mlme_config, mlme);
++	ret = mt76_mcu_send_msg(mdev, MT7932_CMD_SME_CONFIG,
++			       mlme, sizeof(mlme), false);
++	if (ret)
++		return ret;
++	for (i = 0; i < ARRAY_SIZE(qm); i++) {
++		ret = mt76_mcu_send_msg(mdev, MT7932_CMD_QUEUE_MANAGEMENT,
++			       qm[i], sizeof(qm[i]), false);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++int mt7932_start(struct mt792x_phy *phy)
++{
++	struct mt76_dev *mdev = phy->mt76->dev;
++	u8 dbdc[36] = { [4] = 2, [6] = 36 };
++	u8 power[4] = {};
++	int ret;
++
++	ret = mt76_mcu_send_msg(mdev, MCU_CMD(NIC_POWER_CTRL),
++			       power, sizeof(power), false);
++	if (ret)
++		return ret;
++	ret = mt76_mcu_send_msg(mdev, MT7932_CMD_DBDC, dbdc, sizeof(dbdc), false);
++	if (ret)
++		return ret;
++	ret = mt76_connac_mcu_set_channel_domain(phy->mt76);
++	if (ret)
++		return ret;
++	set_bit(MT76_STATE_RUNNING, &phy->mt76->state);
++	return 0;
++}
++
++static int mt7932_fill_rlm(struct mt792x_phy *phy,
++			 const struct cfg80211_chan_def *ch, u8 bss_idx,
++			 struct mt7932_rlm *rlm)
++{
++	if (!ch->chan)
++		return -EINVAL;
++	rlm->bss_idx = bss_idx;
++	rlm->band = ch->chan->band == NL80211_BAND_2GHZ ? MT7932_BAND_2GHZ :
++		    ch->chan->band == NL80211_BAND_5GHZ ? MT7932_BAND_5GHZ :
++						       MT7932_BAND_6GHZ;
++	rlm->primary_channel = ch->chan->hw_value;
++	if (ch->width != NL80211_CHAN_WIDTH_20 &&
++	    ch->width != NL80211_CHAN_WIDTH_20_NOHT)
++		rlm->secondary_channel_offset =
++			ch->center_freq1 > ch->chan->center_freq ?
++			IEEE80211_HT_PARAM_CHA_SEC_ABOVE :
++			IEEE80211_HT_PARAM_CHA_SEC_BELOW;
++	rlm->short_slot_time = 1;
++	switch (ch->width) {
++	case NL80211_CHAN_WIDTH_80:
++		rlm->vht_width = IEEE80211_VHT_CHANWIDTH_80MHZ;
++		break;
++	case NL80211_CHAN_WIDTH_160:
++		rlm->vht_width = IEEE80211_VHT_CHANWIDTH_160MHZ;
++		break;
++	case NL80211_CHAN_WIDTH_80P80:
++		rlm->vht_width = IEEE80211_VHT_CHANWIDTH_80P80MHZ;
++		break;
++	default:
++		rlm->vht_width = IEEE80211_VHT_CHANWIDTH_USE_HT;
++		break;
++	}
++	if (rlm->vht_width)
++		rlm->center_channel1 = ieee80211_frequency_to_channel(ch->center_freq1);
++	if (ch->center_freq2)
++		rlm->center_channel2 = ieee80211_frequency_to_channel(ch->center_freq2);
++	rlm->tx_nss = rlm->rx_nss = hweight8(phy->mt76->antenna_mask);
++	return 0;
++}
++
++int mt7932_set_channel(struct mt792x_phy *phy, u8 bss_idx)
++{
++	struct mt7932_rlm rlm = {};
++	int ret = mt7932_fill_rlm(phy, &phy->mt76->chandef, bss_idx, &rlm);
++
++	if (ret)
++		return ret;
++	return mt76_mcu_send_msg(phy->mt76->dev, MT7932_CMD_SET_RLM,
++			       &rlm, sizeof(rlm), false);
++}
++
++int mt7932_add_interface(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++			struct mt792x_vif *mvif, bool enable)
++{
++	struct mt7932_activate_bss activate = {};
++	struct mt7932_ais_mac mac = {};
++	int ret;
++
++	if (vif->type != NL80211_IFTYPE_STATION ||
++	    mvif->bss_conf.mt76.idx > MT7932_DISCOVERY_BSS)
++		return -EOPNOTSUPP;
++	/* AIS binds its address directly; host-owned roles use MUAR. */
++	if (enable && mvif->bss_conf.mt76.idx == MT7932_AIS_BSS) {
++		mac.bss_idx = mvif->bss_conf.mt76.idx;
++		ether_addr_copy(mac.mac, vif->addr);
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_AIS_MAC,
++				       &mac, sizeof(mac), false);
++		if (ret)
++			return ret;
++	}
++	activate.bss_idx = mvif->bss_conf.mt76.idx;
++	activate.active = enable;
++	/* The P2P client role delegates management frames to the host SME. */
++	activate.network_type = mvif->bss_conf.mt76.idx ? 1 : 0;
++	activate.omac_idx = mvif->bss_conf.mt76.omac_idx;
++	ether_addr_copy(activate.mac, vif->addr);
++	/* Scan-only contexts have no group key or allocated firmware BMC row. */
++	activate.bmc_wcid = MT7932_NO_WCID;
++	activate.unknown_11 = 1;
++	return mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_ACTIVATE_BSS,
++			       &activate, sizeof(activate), false);
++}
++
++int mt7932_bss_update(struct mt792x_dev *dev, struct ieee80211_vif *vif)
++{
++	struct mt792x_vif *mvif = (void *)vif->drv_priv;
++	struct ieee80211_bss_conf *info = &vif->bss_conf;
++	const struct cfg80211_chan_def *ch;
++	u8 bss[116] = {};
++	int ret;
++
++	ch = mvif->bss_conf.mt76.ctx ? &mvif->bss_conf.mt76.ctx->def :
++		&dev->mphy.chandef;
++	if (!ch->chan)
++		return -EINVAL;
++	bss[0] = mvif->bss_conf.mt76.idx;
++	/* Legacy ENUM_PARAM_MEDIA_STATE: connected=0, disconnected=1. */
++	bss[1] = !vif->cfg.assoc;
++	bss[3] = vif->cfg.ssid_len;
++	memcpy(bss + 4, vif->cfg.ssid, bss[3]);
++	if (info->bssid)
++		memcpy(bss + 0x24, info->bssid, ETH_ALEN);
++	bss[0x2a] = info->qos;
++	bss[0x2b] = 1;
++	put_unaligned_le16(ch->chan->band == NL80211_BAND_2GHZ ? 0xfff : 0xff0,
++			   bss + 0x2c);
++	put_unaligned_le16(info->basic_rates <<
++			   (ch->chan->band == NL80211_BAND_2GHZ ? 0 : 4), bss + 0x2e);
++	bss[0x30] = mvif->wep_sta ? mvif->wep_sta->deflink.wcid.idx + 2 : 0xfe;
++	bss[0x34] = ch->chan->band == NL80211_BAND_2GHZ ? 1 : 2;
++	bss[0x37] = 0x7f;
++	bss[0x3a] = 7;
++	ret = mt7932_fill_rlm(&dev->phy, ch, bss[0], (void *)(bss + 0x44));
++	if (ret)
++		return ret;
++	bss[0x5b] = mvif->bss_conf.mt76.wmm_idx;
++	bss[0x5d] = hweight8(dev->mphy.antenna_mask);
++	memcpy(bss + 0x60, &info->he_oper.params, 3);
++	bss[0x63] = info->he_bss_color.color;
++	put_unaligned_le16(info->he_oper.nss_set, bss + 0x64);
++	dev_info(dev->mt76.dev, "MT7932 BSS bss=%u media_state=%u ap=%u bmc=%u band=%u channel=%u\n",
++		 bss[0], bss[1], bss[0x30], bss[0x3a], bss[0x45], bss[0x46]);
++	ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SET_RLM, bss + 0x44, 22, false);
++	if (ret)
++		return ret;
++	return mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SET_BSS, bss, sizeof(bss), false);
++}
++
++int mt7932_sta_update(struct mt792x_dev *dev, struct ieee80211_sta *sta,
++		     struct ieee80211_vif *vif, bool enable,
++		     enum mt76_sta_info_state state)
++{
++	struct mt792x_vif *mvif = (void *)vif->drv_priv;
++	struct mt792x_sta *msta;
++	struct ieee80211_link_sta *link;
++	u8 body[200] = {};
++	int idx, band, shift;
++
++	if (!sta)
++		return mt7932_bss_update(dev, vif);
++	msta = (void *)sta->drv_priv;
++	link = &sta->deflink;
++	idx = msta->deflink.wcid.idx;
++	if (idx > 12)
++		return -ENOSPC;
++	if (!enable) {
++		u8 remove[5] = { 0, idx + 2, mvif->bss_conf.mt76.idx };
++
++		return mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_REMOVE_STA, remove, sizeof(remove), false);
++	}
++	band = mvif->bss_conf.mt76.ctx ? mvif->bss_conf.mt76.ctx->def.chan->band :
++		NL80211_BAND_2GHZ;
++	shift = band == NL80211_BAND_2GHZ ? 0 : 4;
++	body[0] = idx + 2;
++	body[1] = mvif->bss_conf.mt76.idx ? 0x42 : 0x41;
++	memcpy(body + 2, sta->addr, ETH_ALEN);
++	put_unaligned_le16(sta->aid, body + 8);
++	put_unaligned_le16(dev->mphy.hw->conf.listen_interval, body + 10);
++	body[0xc] = mvif->bss_conf.mt76.idx;
++	body[0xd] = band == NL80211_BAND_2GHZ ? 7 : 8;
++	put_unaligned_le16(link->supp_rates[band] << shift, body + 0xe);
++	put_unaligned_le16(vif->bss_conf.basic_rates << shift, body + 0x10);
++	body[0x12] = sta->wme;
++	body[0x14] = state == MT76_STA_INFO_STATE_ASSOC ? 2 : 0;
++	body[0x17] = 1;
++	if (link->ht_cap.ht_supported) {
++		body[0xd] |= BIT(4);
++		body[0x15] = link->ht_cap.mcs.rx_mask[0];
++		memcpy(body + 0x18, link->ht_cap.mcs.rx_mask, 10);
++		memcpy(body + 0x22, &link->ht_cap.mcs.rx_highest, 2);
++		memcpy(body + 0x24, &link->ht_cap.mcs.tx_params, 1);
++		put_unaligned_le16(link->ht_cap.cap, body + 0x28);
++		body[0x30] = link->ht_cap.ampdu_factor | link->ht_cap.ampdu_density << 2;
++	}
++	body[0x32] = to_rcpi(-ewma_rssi_read(&mvif->bss_conf.rssi));
++	body[0x33] = body[0x14] == 2;
++	body[0x36] = idx;
++	body[0x37] = 0xff;
++	if (link->vht_cap.vht_supported) {
++		body[0xd] |= BIT(5);
++		put_unaligned_le32(link->vht_cap.cap, body + 0x38);
++		memcpy(body + 0x3c, &link->vht_cap.vht_mcs, 8);
++	}
++	body[0x44] = 3;
++	put_unaligned_le16(0xffff, body + 0x60);
++	body[0x7d] = 1;
++	if (link->he_cap.has_he) {
++		body[0xd] |= BIT(6);
++		memcpy(body + 0x88, link->he_cap.he_cap_elem.mac_cap_info, 6);
++		memcpy(body + 0x8e, link->he_cap.he_cap_elem.phy_cap_info, 11);
++		memcpy(body + 0x9c, &link->he_cap.he_mcs_nss_supp, 12);
++		memcpy(body + 0xa8, &link->he_6ghz_capa.capa, 2);
++	}
++	dev_info(dev->mt76.dev, "MT7932 STA sta=%u wcid=%u bss=%u state=%u\n",
++		 body[0], body[0x36], body[0xc], body[0x14]);
++	return mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SET_STA, body, sizeof(body), body[0x33]);
++}
++
++int mt7932_set_key(struct mt792x_dev *dev, struct ieee80211_vif *vif,
++		   struct ieee80211_sta *sta, struct ieee80211_key_conf *key,
++		   enum set_key_cmd cmd)
++{
++	struct mt792x_vif *mvif = (void *)vif->drv_priv;
++	struct mt792x_sta *msta = sta ? (void *)sta->drv_priv : &mvif->sta;
++	struct mt76_wcid *wcid = &msta->deflink.wcid;
++	u8 body[64] = {};
++	int ret;
++
++	if (key->cipher != WLAN_CIPHER_SUITE_CCMP || key->keylen != 16)
++		return -EOPNOTSUPP;
++	body[0] = cmd == SET_KEY;
++	body[1] = !!(key->flags & IEEE80211_KEY_FLAG_PAIRWISE);
++	body[2] = body[1];
++	if (sta)
++		memcpy(body + 4, sta->addr, ETH_ALEN);
++	else
++		eth_broadcast_addr(body + 4);
++	body[10] = mvif->bss_conf.mt76.idx;
++	body[11] = 4;
++	body[12] = key->keyidx;
++	body[13] = key->keylen;
++	body[14] = wcid->idx;
++	memcpy(body + 16, key->key, key->keylen);
++	mt792x_mutex_acquire(dev);
++	ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_ADD_REMOVE_KEY, body, sizeof(body), false);
++	if (!ret) {
++		wcid->hw_key_idx = cmd == SET_KEY ? key->keyidx : -1;
++		mt76_wcid_key_setup(&dev->mt76, wcid, cmd == SET_KEY ? key : NULL);
++	}
++	mt792x_mutex_release(dev);
++	memzero_explicit(body, sizeof(body));
++	return ret;
++}
++
++int mt7932_load_calibration(struct mt792x_dev *dev)
++{
++	const struct mt7932_cal_file_header *header;
++	const struct mt7932_cal_profile_reply *profile;
++	const struct firmware *fw;
++	struct sk_buff *reply;
++	struct mt7932_cal_profile_query query = {
++		.selector = MT7932_CAL_PROFILE_SELECTOR,
++	};
++	char name[80];
++	size_t pos;
++	u32 count, i;
++	int ret;
++
++	ret = mt7932_basic_config(&dev->mt76);
++	if (ret)
++		return ret;
++	snprintf(name, sizeof(name), "mediatek/mt7932/calibration-%pm.bin",
++		 dev->mphy.macaddr);
++	ret = request_firmware(&fw, name, dev->mt76.dev);
++	if (ret)
++		return ret;
++	ret = -EINVAL;
++	header = (const void *)fw->data;
++	if (fw->size < sizeof(*header) || fw->size > MT7932_CAL_MAX_FILE_SIZE ||
++	    memcmp(header->magic, MT7932_CAL_MAGIC, sizeof(header->magic)) ||
++	    !ether_addr_equal(header->mac, dev->mphy.macaddr))
++		goto out;
++	count = le32_to_cpu(header->count);
++	if (!count || count > MT7932_CAL_MAX_RECORDS)
++		goto out;
++	/* Validate the entire replay before provisioning this individual board. */
++	for (pos = sizeof(*header), i = 0; i < count; i++) {
++		const struct mt7932_cal_file_record *record;
++		u32 size;
++
++		if (pos > fw->size || fw->size - pos < sizeof(*record))
++			goto out;
++		record = (const void *)(fw->data + pos);
++		size = le32_to_cpu(record->len);
++		pos += sizeof(*record);
++		if (!size || size > MT7932_CAL_MAX_PAYLOAD || size > fw->size - pos ||
++		    record->set_query > 1 || record->wait_response > 1)
++			goto out;
++		if (record->cid == FIELD_GET(__MCU_CMD_FIELD_ID, MT7932_CMD_CAL_EXT_21)) {
++			const struct mt7932_cal_ext_fragment *fragment = (const void *)record->data;
++
++			if (record->ext_cid != FIELD_GET(__MCU_CMD_FIELD_EXT_ID,
++							 MT7932_CMD_CAL_EXT_21) ||
++			    size < sizeof(*fragment) ||
++			    size > sizeof(*fragment) + MT7932_CAL_EXT_MAX_DATA ||
++			    fragment->type != MT7932_CAL_EXT_FRAGMENT ||
++			    le16_to_cpu(fragment->len) != size - sizeof(*fragment))
++				goto out;
++		} else if ((record->cid != MT7932_CMD_PRECAL &&
++			    record->cid != MT7932_CMD_CAL_D7) || record->ext_cid) {
++			goto out;
++		}
++		pos += size;
++	}
++	if (pos != fw->size)
++		goto out;
++	ret = mt76_mcu_send_and_get_msg(&dev->mt76,
++			MT7932_CMD_CAL_PROFILE | __MCU_CMD_FIELD_QUERY,
++			&query, sizeof(query), true, &reply);
++	if (ret)
++		goto out;
++	profile = (const void *)reply->data;
++	if (reply->len < sizeof(*profile) || profile->cid != MT7932_CMD_CAL_PROFILE) {
++		dev_err(dev->mt76.dev, "MT7932 calibration-type query invalid (len %u)\n",
++			 reply->len);
++		ret = -EINVAL;
++	} else {
++		dev_info(dev->mt76.dev, "MT7932 calibration profile: %*ph\n",
++			 (int)sizeof(*profile), reply->data);
++	}
++	dev_kfree_skb(reply);
++	if (ret)
++		goto out;
++	for (pos = sizeof(*header), i = 0; i < count; i++) {
++		const struct mt7932_cal_file_record *record = (const void *)(fw->data + pos);
++		u32 size = le32_to_cpu(record->len);
++		int cmd = FIELD_PREP(__MCU_CMD_FIELD_ID, record->cid) |
++			  FIELD_PREP(__MCU_CMD_FIELD_EXT_ID, record->ext_cid);
++
++		if (!record->set_query)
++			cmd |= __MCU_CMD_FIELD_QUERY;
++		ret = mt76_mcu_send_msg(&dev->mt76, cmd, record->data, size,
++				      !record->set_query || record->wait_response);
++		if (ret)
++			goto out;
++		pos += sizeof(*record) + size;
++	}
++	dev_info(dev->mt76.dev, "MT7932 board calibration uploaded (%u records)\n", count);
++out:
++	release_firmware(fw);
++	return ret;
++}
++
++int mt7932_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
++			  int cmd, int *wait_seq)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	struct mt76_connac2_mcu_txd *hdr;
++	u8 seq = ++mdev->mcu.msg_seq;
++	bool running = test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
++
++	if (!seq)
++		seq = ++mdev->mcu.msg_seq;
++	if (wait_seq)
++		*wait_seq = seq;
++	mdev->mcu.timeout = 6 * HZ;
++	if (cmd == MCU_CMD(FW_SCATTER))
++		return mt76_tx_queue_skb_raw(dev, mdev->q_mcu[MT_MCUQ_FWDL], skb, 0);
++	/* MT7932 uses legacy flat commands; do not send CONNAC UNI TLVs. */
++	if (cmd & __MCU_CMD_FIELD_UNI) {
++		dev_err(mdev->dev, "MT7932 unsupported UNI command %#x\n", cmd);
++		dev_kfree_skb(skb);
++		return -EOPNOTSUPP;
++	}
++	if (running && cmd == MCU_CE_CMD(SET_CHAN_DOMAIN)) {
++		struct mt7932_channel_domain_input *input = (void *)skb->data;
++		struct mt7932_channel_domain *domain = (void *)skb->data;
++		struct mt7932_domain_channel *channels;
++		unsigned int count, i;
++
++		if (skb->len < sizeof(*input)) {
++			dev_kfree_skb(skb);
++			return -EINVAL;
++		}
++		count = input->n_2ch + input->n_5ch + input->n_6ch;
++		if (skb->len != sizeof(*domain) + sizeof(*channels) * count) {
++			dev_kfree_skb(skb);
++			return -EINVAL;
++		}
++		if (domain->alpha2[0] == '0' && domain->alpha2[1] == '0') {
++			domain->alpha2[0] = 'X';
++			domain->alpha2[1] = 'Z';
++		}
++		domain->unknown_policy4 = cpu_to_le16(1);
++		domain->unknown_policy6 = dev->mphy.cap.has_6ghz ? 2 : 0;
++		domain->flags = (mdev->region ? MT7932_DOMAIN_HAS_DFS_REGION |
++				FIELD_PREP(MT7932_DOMAIN_DFS_REGION, mdev->region) : 0) |
++				(input->n_6ch ? MT7932_DOMAIN_HAS_6GHZ : 0);
++		domain->unknown_fcc_policy = mdev->region == NL80211_DFS_FCC ? 0x0f : 0;
++		channels = (void *)(domain + 1);
++		for (i = 0; i < count; i++) {
++			u32 flags = le32_to_cpu(channels[i].flags);
++
++			flags = (flags & IEEE80211_CHAN_NO_IR ? MT7932_CHANNEL_PASSIVE : 0) |
++				(flags & IEEE80211_CHAN_RADAR ? MT7932_CHANNEL_DFS : 0);
++			channels[i].flags = cpu_to_le32(flags);
++		}
++	}
++
++	if (running && cmd == MCU_CE_CMD(START_HW_SCAN)) {
++		struct mt76_connac_hw_scan_req *req = (void *)skb->data;
++		struct mt7932_scan_request *native;
++		struct mt76_connac_hw_scan_req *common;
++		struct sk_buff *wire;
++
++		if (skb->len != sizeof(*req)) {
++			dev_kfree_skb(skb);
++			return -EINVAL;
++		}
++		wire = mt76_mcu_msg_alloc(mdev, NULL, sizeof(*native));
++		if (!wire) {
++			dev_kfree_skb(skb);
++			return -ENOMEM;
++		}
++		native = skb_put_zero(wire, sizeof(*native));
++		common = (void *)native->common;
++		memcpy(native->common, req, sizeof(native->common));
++		memcpy(native->ext_ssids, req->ext_ssids, sizeof(native->ext_ssids));
++		ether_addr_copy(native->bssid, req->bssid);
++		ether_addr_copy(native->random_mac, req->random_mac);
++		/* No split scan or DBDC policy on this single-radio setup. */
++		common->scan_func &= ~SCAN_FUNC_SPLIT_SCAN;
++		common->scan_func |= MT7932_SCAN_DISABLE_DBDC;
++		common->probe_req_num = 0;
++		common->version = 1;
++		/* Receive beacons while the active-probe ABI is brought up. */
++		common->scan_type = 0;
++		if (req->ssid_type_ext && common->ssids_num)
++			common->ssid_type = MT7932_SCAN_SPECIFIED_SSIDS;
++		/* Firmware generates rate and PHY capability IEs itself. Keep the
++		 * caller's additional IEs without duplicating those capabilities.
++		 */
++		{
++			u8 *ies = common->ies;
++			unsigned int len = le16_to_cpu(common->ies_len);
++			unsigned int pos = 0, out = 0;
++
++			if (len > sizeof(common->ies))
++				goto invalid_scan;
++			while (pos < len) {
++				unsigned int size;
++				u8 id;
++				bool generated;
++
++				if (len - pos < 2)
++					goto invalid_scan;
++				id = ies[pos];
++				size = 2 + ies[pos + 1];
++				if (size > len - pos)
++					goto invalid_scan;
++				generated = id == WLAN_EID_SSID ||
++					id == WLAN_EID_SUPP_RATES ||
++					id == WLAN_EID_EXT_SUPP_RATES ||
++					id == WLAN_EID_HT_CAPABILITY ||
++					id == WLAN_EID_VHT_CAPABILITY ||
++					id == WLAN_EID_EXT_CAPABILITY ||
++					id == WLAN_EID_SUPPORTED_REGULATORY_CLASSES ||
++					(id == WLAN_EID_EXTENSION && size > 2 &&
++					 (ies[pos + 2] == WLAN_EID_EXT_HE_CAPABILITY ||
++					  ies[pos + 2] == WLAN_EID_EXT_HE_6GHZ_CAPA));
++				if (!generated) {
++					memmove(ies + out, ies + pos, size);
++					out += size;
++				}
++				pos += size;
++			}
++			memset(ies + out, 0, sizeof(common->ies) - out);
++			common->ies_len = cpu_to_le16(out);
++		}
++		goto scan_valid;
++invalid_scan:
++		dev_kfree_skb(wire);
++		dev_kfree_skb(skb);
++		return -EINVAL;
++scan_valid:
++		dev_info(mdev->dev, "MT7932 scan seq=%u bss=%u type=%u mask=%#x channels=%u+%u band=%u\n",
++			 common->seq_num, common->bss_idx, common->scan_type,
++			 common->scan_func, common->channels_num,
++			 common->ext_channels_num, common->channel_type);
++		common->channel_dwell_time = cpu_to_le16(MT7932_SCAN_DWELL_MS);
++		common->timeout_value = cpu_to_le16(MT7932_SCAN_FW_TIMEOUT_MS);
++		common->channel_min_dwell_time = cpu_to_le16(MT7932_SCAN_MIN_DWELL_MS);
++		dev_kfree_skb(skb);
++		skb = wire;
++	}
++	if (running && cmd == MCU_CE_CMD(SET_RATE_TX_POWER)) {
++		struct mt76_connac_tx_power_limit_tlv *req = (void *)skb->data;
++		struct mt76_connac_sku_tlv *rates;
++		struct mt76_connac_tx_power_limit_tlv *header;
++		struct mt7932_power_channel *channels;
++		struct sk_buff *wire;
++		int i, j, len;
++
++		if (skb->len < sizeof(*req) || req->n_chan > MT7932_POWER_MAX_CHANNELS ||
++		    skb->len != sizeof(*req) + req->n_chan * sizeof(*rates)) {
++			dev_kfree_skb(skb);
++			return -EINVAL;
++		}
++		len = sizeof(*header) + sizeof(*channels) * req->n_chan;
++		wire = mt76_mcu_msg_alloc(mdev, NULL, len);
++		if (!wire) {
++			dev_kfree_skb(skb);
++			return -ENOMEM;
++		}
++		header = skb_put_zero(wire, len);
++		memcpy(header, req, sizeof(*header));
++		header->ver = MT7932_POWER_WIRE_VERSION;
++		header->pad0 = MT7932_POWER_WIRE_FORMAT;
++		header->len = cpu_to_le16(len);
++		channels = (void *)(header + 1);
++		rates = (void *)(skb->data + sizeof(*req));
++		for (i = 0; i < req->n_chan; i++) {
++			s8 limit = MT7932_POWER_CEILING_HALF_DBM;
++
++			for (j = 0; j < ARRAY_SIZE(rates[i].pwr_limit); j++)
++				limit = min(limit, rates[i].pwr_limit[j]);
++			channels[i].channel = rates[i].channel;
++			memset(channels[i].rate_limit, limit, sizeof(channels[i].rate_limit));
++		}
++		dev_kfree_skb(skb);
++		skb = wire;
++	}
++	hdr = (void *)skb_push(skb, sizeof(*hdr));
++	memset(hdr, 0, sizeof(*hdr));
++	hdr->txd[0] = cpu_to_le32(FIELD_PREP(MT_TXD0_TX_BYTES, skb->len) |
++				FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD));
++	hdr->txd[1] = cpu_to_le32(FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD));
++	hdr->len = cpu_to_le16(skb->len - sizeof(hdr->txd));
++	hdr->cid = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
++	hdr->pkt_type = MCU_PKT_ID;
++	hdr->seq = seq;
++	if (running) {
++		hdr->ext_cid = FIELD_GET(__MCU_CMD_FIELD_EXT_ID, cmd);
++		hdr->set_query = !(cmd & __MCU_CMD_FIELD_QUERY) &&
++				 hdr->cid != MCU_CE_CMD_GET_NIC_CAPAB;
++		hdr->ext_cid_ack = !!wait_seq;
++	}
++	return mt76_tx_queue_skb_raw(dev, mdev->q_mcu[MT_MCUQ_WM], skb, 0);
++}
++EXPORT_SYMBOL_GPL(mt7932_mcu_send_message);
++
++int mt7932_mcu_parse_response(struct mt76_dev *mdev, int cmd,
++			    struct sk_buff *skb, int seq)
++{
++	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
++	const struct mt76_connac2_mcu_rxd *rxd;
++	u8 cid = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
++	u16 type;
++
++	if (!skb) {
++		dev_err(mdev->dev, "MT7932 command %#x seq %u timed out\n", cmd, seq);
++		return -ETIMEDOUT;
++	}
++	if (cid == MCU_CMD_PATCH_SEM_CONTROL || cid == MCU_CE_CMD_GET_NIC_CAPAB)
++		dev_info(mdev->dev, "MT7932 CID %#x reply len=%u: %*ph\n", cid,
++			 skb->len, min_t(unsigned int, skb->len, 48), skb->data);
++	if (skb->len < MT7932_BOOT_HEADER_SIZE)
++		return -EINVAL;
++	rxd = (const void *)skb->data;
++	if (rxd->seq != seq)
++		return -EAGAIN;
++	type = le16_to_cpu(rxd->pkt_type_id);
++	/* The Neo ROM emits packet type7 in its eight-byte event header. */
++	if (type == MT7932_BOOT_PACKET_TYPE || (type == MT7932_ROM_PACKET_TYPE &&
++	    !test_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state))) {
++		u8 expected_eid = cid == MCU_CMD_PATCH_SEM_CONTROL ? MCU_EVENT_MT_PATCH_SEM :
++				  cid == MCU_CMD_INIT_ACCESS_REG ? MCU_EVENT_ACCESS_REG :
++								  MCU_EVENT_GENERIC;
++		u8 status;
++
++		/* Preserve the existing four-byte minimum boot reply payload. */
++		if (skb->len < MT7932_BOOT_HEADER_SIZE + sizeof(__le32))
++			return -EINVAL;
++		if (rxd->eid != expected_eid)
++			return -EAGAIN;
++		status = skb->data[MT7932_BOOT_HEADER_SIZE];
++		skb_pull(skb, MT7932_BOOT_HEADER_SIZE);
++		if (cid == MCU_CMD_PATCH_SEM_CONTROL) {
++			dev_info(mdev->dev, "MT7932 patch semaphore status %u\n", status);
++			return status;
++		}
++		if (cid == MCU_CMD_INIT_ACCESS_REG)
++			return 0;
++		if (status != MT7932_BOOT_SUCCESS)
++			dev_err(mdev->dev, "MT7932 boot CID %#x status %u\n", cid, status);
++		return status == MT7932_BOOT_SUCCESS ? 0 : -EIO;
++	}
++	if (type != MT7932_RUNTIME_PACKET_TYPE || skb->len < sizeof(*rxd))
++		return -EINVAL;
++	if (cmd == MCU_CE_QUERY(REG_READ)) {
++		const struct mt7932_register_result *result = (const void *)rxd->tlv;
++
++		if (skb->len < sizeof(*rxd) + sizeof(*result))
++			return -EINVAL;
++		return (int)le32_to_cpu(result->value);
++	}
++	/* A generic result includes the CID; reject unrelated command replies. */
++	if (rxd->eid == MT7932_EVENT_COMMAND_RESULT) {
++		const struct mt7932_command_result *result = (const void *)rxd->tlv;
++
++		if (skb->len < sizeof(*rxd) + sizeof(*result))
++			return -EINVAL;
++		if (result->cid != cid)
++			return -EAGAIN;
++		if (result->status)
++			return -EIO;
++	}
++	skb_pull(skb, sizeof(*rxd));
++	return 0;
++}
++EXPORT_SYMBOL_GPL(mt7932_mcu_parse_response);
++
++static int mt7932_scatter(struct mt792x_dev *dev, const u8 *data, size_t len)
++{
++	struct mt76_queue *q = dev->mt76.q_mcu[MT_MCUQ_FWDL];
++	unsigned long expires;
++
++	while (len) {
++		size_t size = min_t(size_t, len, MT7932_FW_SCATTER_CHUNK);
++		int ret;
++
++		expires = jiffies + 6 * HZ;
++		while (READ_ONCE(q->queued) + 1 >= q->ndesc - 1) {
++			mt76_queue_tx_cleanup(dev, q, false);
++			if (time_after(jiffies, expires)) {
++				dev_err(dev->mt76.dev, "MT7932 firmware download ring stalled\n");
++				return -ETIMEDOUT;
++			}
++			usleep_range(100, 200);
++		}
++		ret = mt76_mcu_send_msg(&dev->mt76, MCU_CMD(FW_SCATTER),
++				       data, size, false);
++		if (ret)
++			return ret;
++		mt76_queue_tx_cleanup(dev, q, false);
++		data += size;
++		len -= size;
++	}
++	/* Finish consuming this target before issuing the next boot command. */
++	expires = jiffies + 6 * HZ;
++	while (READ_ONCE(q->queued)) {
++		mt76_queue_tx_cleanup(dev, q, false);
++		if (time_after(jiffies, expires))
++			return -ETIMEDOUT;
++		usleep_range(100, 200);
++	}
++	return 0;
++}
++
++static int mt7932_download(struct mt792x_dev *dev, u8 cid, u32 addr,
++			  const u8 *data, u32 len)
++{
++	struct { __le32 addr, len, mode; } req = {
++		cpu_to_le32(addr), cpu_to_le32(len), cpu_to_le32(DL_MODE_NEED_RSP),
++	};
++	int ret = mt76_mcu_send_msg(&dev->mt76, cid, &req,
++				   sizeof(req), true);
++
++	if (ret)
++		return ret;
++	return mt7932_scatter(dev, data, len);
++}
++
++static int mt7932_secure_command(struct mt792x_dev *dev, u8 cid,
++				 const void *data, size_t len)
++{
++	int ret;
++
++	mt76_wr(dev, MT7932_PCIE_REMAP(0), MT7932_PCIE_REMAP_BOOT);
++	udelay(MT7932_PCIE_REMAP_SETTLE_US);
++	if (!mt76_poll_msec(dev, MT7932_SECURE_READY, MT7932_SECURE_READY_BIT,
++			    MT7932_SECURE_READY_BIT, 5000)) {
++		ret = -ETIMEDOUT;
++		goto restore;
++	}
++	ret = mt76_mcu_send_msg(&dev->mt76, cid, data, len, true);
++	mt76_wr(dev, MT7932_SECURE_COMPLETE, MT7932_SECURE_COMPLETE_BIT);
++restore:
++	mt76_wr(dev, MT7932_PCIE_REMAP(0), MT7932_PCIE_REMAP_RUNTIME);
++	return ret;
++}
++
++static int mt7932_load_patch(struct mt792x_dev *dev)
++{
++	const struct mt76_connac2_patch_hdr *hdr;
++	const struct firmware *fw;
++	u8 sem[4] = { MT7932_PATCH_SEM_REQUEST };
++	u32 n, i, wifi_sections = 0;
++	int ret, tries;
++
++	for (tries = 0; tries < 50; tries++) {
++		ret = mt76_mcu_send_msg(&dev->mt76, MCU_CMD(PATCH_SEM_CONTROL),
++					sem, sizeof(sem), true);
++		if (ret != MT7932_PATCH_SEM_BUSY)
++			break;
++		msleep(100);
++	}
++	if (ret == MT7932_PATCH_ALREADY_LOADED)
++		return 0;
++	if (ret != MT7932_PATCH_SEM_ACQUIRED)
++		dev_err(dev->mt76.dev, "MT7932 patch semaphore request failed: %d\n", ret);
++	if (ret != MT7932_PATCH_SEM_ACQUIRED)
++		return ret < 0 ? ret : -EIO;
++	ret = request_firmware(&fw, MT7932_ROM_PATCH, dev->mt76.dev);
++	if (ret)
++		return ret;
++	ret = -EINVAL;
++	if (fw->size < sizeof(*hdr))
++		goto out;
++	hdr = (const void *)fw->data;
++	n = be32_to_cpu(hdr->desc.n_region);
++	if (!n || n > (fw->size - sizeof(*hdr)) / sizeof(struct mt76_connac2_patch_sec))
++		goto out;
++	/* Reject malformed sections before sending any of the patch. */
++	for (i = 0; i < n; i++) {
++		const struct mt76_connac2_patch_sec *sec =
++			(const void *)(fw->data + sizeof(*hdr) + i * sizeof(*sec));
++		u32 off = be32_to_cpu(sec->offs), len = be32_to_cpu(sec->info.len);
++
++		if (get_unaligned_be32(&sec->info.rsv[0]) != MT7932_PATCH_WIFI_SECTION)
++			continue;
++		wifi_sections++;
++		if (!len || off < sizeof(*hdr) + n * sizeof(*sec) ||
++		    off > fw->size || len > fw->size - off ||
++		    len > be32_to_cpu(sec->size))
++			goto out;
++		if (be32_to_cpu(sec->info.sec_key_idx) != PATCH_SEC_NOT_SUPPORT) {
++			ret = -EOPNOTSUPP;
++			goto out;
++		}
++	}
++	if (!wifi_sections)
++		goto out;
++	for (i = 0; i < n; i++) {
++		const struct mt76_connac2_patch_sec *sec =
++			(const void *)(fw->data + sizeof(*hdr) + i * sizeof(*sec));
++		u32 off = be32_to_cpu(sec->offs), len = be32_to_cpu(sec->info.len);
++
++		if (get_unaligned_be32(&sec->info.rsv[0]) != MT7932_PATCH_WIFI_SECTION)
++			continue;
++		ret = mt7932_download(dev, MCU_CMD_PATCH_START_REQ,
++				      be32_to_cpu(sec->info.addr),
++				      fw->data + off, len);
++		if (ret)
++			goto out;
++	}
++	{
++		u8 finish[4] = {};
++		ret = mt7932_secure_command(dev, MCU_CMD_PATCH_FINISH_REQ,
++					    finish, sizeof(finish));
++	}
++out:
++	release_firmware(fw);
++	return ret;
++}
++
++static int mt7932_load_ram(struct mt792x_dev *dev)
++{
++	const struct mt76_connac2_fw_trailer *trailer;
++	const struct mt76_connac2_fw_region *regions;
++	const struct firmware *fw;
++	struct { __le32 option, addr; } start = {};
++	size_t data_size, off = 0;
++	int ret, i;
++
++	ret = request_firmware(&fw, MT7932_FIRMWARE_WM, dev->mt76.dev);
++	if (ret)
++		return ret;
++	ret = -EINVAL;
++	if (fw->size < sizeof(*trailer))
++		goto out;
++	trailer = (const void *)(fw->data + fw->size - sizeof(*trailer));
++	if (!trailer->n_region || trailer->n_region > MT7932_FW_MAX_REGIONS ||
++	    fw->size < sizeof(*trailer) + trailer->n_region * sizeof(*regions))
++		goto out;
++	data_size = fw->size - sizeof(*trailer) - trailer->n_region * sizeof(*regions);
++	regions = (const void *)(fw->data + data_size);
++	/* Validate every region before issuing the first download command. */
++	for (i = 0; i < trailer->n_region; i++) {
++		u32 len = le32_to_cpu(regions[i].len);
++		if (off > data_size || len > data_size - off)
++			goto out;
++		if (regions[i].feature_set & FW_FEATURE_SET_ENCRYPT) {
++			ret = -EOPNOTSUPP;
++			goto out;
++		}
++		off += len;
++	}
++	off = 0;
++	for (i = 0; i < trailer->n_region; i++) {
++		u32 len = le32_to_cpu(regions[i].len);
++		if (!(regions[i].feature_set & FW_FEATURE_NON_DL)) {
++			ret = mt7932_download(dev, MCU_CMD_TARGET_ADDRESS_LEN_REQ,
++					      le32_to_cpu(regions[i].addr),
++					      fw->data + off, len);
++			if (ret)
++				goto out;
++		}
++		if (regions[i].feature_set & FW_FEATURE_OVERRIDE_ADDR) {
++			start.option = cpu_to_le32(FW_START_OVERRIDE);
++			start.addr = regions[i].addr;
++		}
++		off += len;
++	}
++	ret = mt7932_secure_command(dev, MCU_CMD_FW_START_REQ, &start, sizeof(start));
++out:
++	release_firmware(fw);
++	return ret;
++}
++
++int mt7932_load_firmware(struct mt792x_dev *dev)
++{
++	struct pci_dev *pdev = to_pci_dev(dev->mt76.dev);
++	u32 state;
++	int ret, i;
++
++	mt7932_fullmac_reset(dev);
++	clear_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
++	ret = mt7932_publish_shared_memory(dev);
++	if (ret)
++		return ret;
++	ret = mt7932_load_patch(dev);
++	if (ret)
++		return ret;
++	ret = mt7932_load_ram(dev);
++	if (ret)
++		return ret;
++	for (i = 0; i < 1000; i++) {
++		ret = pci_read_config_dword(pdev, MT7932_PCIE_FW_STATE, &state);
++		if (ret || state == ~0U)
++			return -EIO;
++		if (FIELD_GET(MT7932_PCIE_FW_STATE_MASK, state) ==
++		    MT7932_PCIE_FW_STATE_READY) {
++			set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
++			dev_info(dev->mt76.dev, "MT7932 firmware ready\n");
++			return mt76_mcu_send_msg(&dev->mt76, __MCU_CMD_FIELD_CE, NULL, 0, false);
++		}
++		msleep(5);
++	}
++	return -ETIMEDOUT;
++}
++MODULE_FIRMWARE(MT7932_FIRMWARE_WM);
++MODULE_FIRMWARE(MT7932_ROM_PATCH);
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_cfg80211.c b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_cfg80211.c
+new file mode 100644
+index 0000000000000..2d322f5506eb5
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_cfg80211.c
+@@ -0,0 +1,494 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT7932 firmware SME frontend using the standard cfg80211 station API. */
++#include <linux/etherdevice.h>
++#include <linux/unaligned.h>
++#include "mt7921.h"
++#include "regd.h"
++#include "mt7932_offload.h"
++#include "mt7932_fullmac.h"
++#include "mt7932_mcu.h"
++
++#define MT7932_SCAN_MAX_SSIDS 4
++#define MT7932_SCAN_TIMEOUT (20 * HZ)
++#define MT7932_CONNECT_TIMEOUT (45 * HZ)
++#define MT7932_DISCONNECT_TIMEOUT (5 * HZ)
++
++static struct mt7932_fullmac *mt7932_wiphy_priv(struct wiphy *wiphy)
++{
++	return *(struct mt7932_fullmac **)wiphy_priv(wiphy);
++}
++
++void mt7932_cfg80211_scan_done(struct mt7932_fullmac *fm, bool aborted)
++{
++	struct cfg80211_scan_info info = { .aborted = aborted };
++	struct cfg80211_scan_request *request = fm->scan_request;
++
++	lockdep_assert_wiphy(fm->wiphy);
++	if (!request)
++		return;
++	fm->scan_request = NULL;
++	fm->scan_next_channel = 0;
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->scan_timeout);
++	cfg80211_scan_done(request, &info);
++}
++
++static void mt7932_cancel_scan(struct mt7932_fullmac *fm)
++{
++	struct {
++		u8 seq_num;
++		u8 is_ext_channel;
++		u8 reserved[2];
++	} __packed cmd = { .seq_num = fm->scan_seq & MT7932_SCAN_SEQUENCE_MASK };
++	int ret;
++
++	if (!fm->scan_request)
++		return;
++	mt792x_mutex_acquire(fm->dev);
++	ret = mt76_mcu_send_msg(&fm->dev->mt76, MCU_CE_CMD(CANCEL_HW_SCAN),
++			       &cmd, sizeof(cmd), false);
++	mt792x_mutex_release(fm->dev);
++	/* Same ordered cancel protocol used by mt76_connac_mcu_cancel_hw_scan.
++	 * Finish once; late completions cannot finish a newer scan sequence.
++	 */
++	mt7932_cfg80211_scan_done(fm, true);
++	if (ret)
++		mt792x_reset(&fm->dev->mt76);
++}
++
++static void mt7932_scan_timeout(struct wiphy *wiphy, struct wiphy_work *work)
++{
++	mt7932_cancel_scan(mt7932_wiphy_priv(wiphy));
++}
++
++static void mt7932_cfg_abort_scan(struct wiphy *wiphy, struct wireless_dev *wdev)
++{
++	mt7932_cancel_scan(mt7932_wiphy_priv(wiphy));
++}
++
++void mt7932_cfg80211_connected(struct mt7932_fullmac *fm)
++{
++	lockdep_assert_wiphy(fm->wiphy);
++	if (!fm->connecting || fm->disconnecting)
++		return;
++	fm->connecting = false;
++	fm->connected = true;
++	fm->connected_at = jiffies;
++	WRITE_ONCE(fm->last_activity, jiffies);
++	WRITE_ONCE(fm->signal_valid, false);
++	dev_get_stats(fm->netdev, &fm->station_start_stats);
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->connect_timeout);
++	cfg80211_connect_result(fm->netdev, fm->bssid, NULL, 0, NULL, 0,
++				WLAN_STATUS_SUCCESS, GFP_KERNEL);
++	cfg80211_port_authorized(fm->netdev, fm->bssid, NULL, 0, GFP_KERNEL);
++	netif_carrier_on(fm->netdev);
++}
++
++void mt7932_cfg80211_disconnected(struct mt7932_fullmac *fm, u16 reason)
++{
++	lockdep_assert_wiphy(fm->wiphy);
++	netif_carrier_off(fm->netdev);
++	fm->active = false;
++	fm->peer_wcid = MT7932_NO_WCID;
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->connect_timeout);
++	if (fm->connecting)
++		cfg80211_connect_result(fm->netdev, fm->bssid, NULL, 0, NULL, 0,
++					WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
++	else if (fm->connected)
++		cfg80211_disconnected(fm->netdev,
++			fm->disconnecting ? fm->disconnect_reason : reason,
++			NULL, 0, fm->disconnecting, GFP_KERNEL);
++	fm->connecting = false;
++	fm->connected = false;
++	fm->disconnecting = false;
++}
++
++static void mt7932_connect_timeout(struct wiphy *wiphy, struct wiphy_work *work)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++
++	if (fm->disconnecting) {
++		/* A missing firmware completion requires actual recovery, not a
++		 * fabricated success notification while the radio stays joined.
++		 */
++		mt792x_reset(&fm->dev->mt76);
++		return;
++	}
++	if (fm->connecting) {
++		cfg80211_connect_timeout(fm->netdev, fm->bssid, NULL, 0,
++			GFP_KERNEL, NL80211_TIMEOUT_UNSPECIFIED);
++		fm->connecting = false;
++		fm->disconnecting = true;
++		fm->disconnect_reason = WLAN_REASON_UNSPECIFIED;
++		if (mt7932_offload_disconnect(fm->dev, fm->bssid))
++			mt792x_reset(&fm->dev->mt76);
++		else
++			wiphy_delayed_work_queue(wiphy, &fm->connect_timeout,
++						MT7932_DISCONNECT_TIMEOUT);
++	}
++}
++
++/* Discovery uses the firmware's host-owned context separately from AIS.
++ * The old mac80211 add_interface callback supplied this initialization.
++ */
++static int mt7932_prepare_discovery(struct mt7932_fullmac *fm)
++{
++	struct mt792x_dev *dev = fm->dev;
++	struct mt7932_activate_bss activate = {
++		.bss_idx = MT7932_DISCOVERY_BSS,
++		.active = 1,
++		.network_type = 1, /* Host-managed P2P client role. */
++		.omac_idx = MT7932_DISCOVERY_BSS,
++		.bmc_wcid = MT7932_NO_WCID,
++		.unknown_11 = 1,
++	};
++	int ret;
++
++	if (fm->scan_context_active)
++		return 0;
++	ether_addr_copy(activate.mac, dev->mphy.macaddr);
++	ret = mt7932_start(&dev->phy);
++	if (!ret)
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_ACTIVATE_BSS,
++				       &activate, sizeof(activate), false);
++	if (!ret && !dev->mphy.chandef.chan) {
++		struct ieee80211_supported_band *band;
++
++		band = fm->wiphy->bands[NL80211_BAND_2GHZ];
++		if (!band || !band->n_channels)
++			return -ENODEV;
++		cfg80211_chandef_create(&dev->mphy.chandef,
++				       &band->channels[0], NL80211_CHAN_NO_HT);
++		ret = mt7932_set_channel(&dev->phy, MT7932_AIS_BSS);
++	}
++	if (!ret)
++		ret = mt7921_mcu_set_rxfilter(dev, 0, 0, 0);
++	if (!ret)
++		fm->scan_context_active = true;
++	return ret;
++}
++
++static int mt7932_scan_batch(struct mt7932_fullmac *fm)
++{
++	struct cfg80211_scan_request *request = fm->scan_request;
++	struct mt76_connac_hw_scan_req *cmd;
++	unsigned int first = fm->scan_next_channel;
++	unsigned int count, i;
++	int ret;
++
++	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
++	if (!cmd)
++		return -ENOMEM;
++	count = min_t(unsigned int, request->n_channels - first,
++		      ARRAY_SIZE(cmd->channels) + ARRAY_SIZE(cmd->ext_channels));
++	cmd->seq_num = ++fm->scan_seq & MT7932_SCAN_SEQUENCE_MASK;
++	cmd->bss_idx = MT7932_DISCOVERY_BSS;
++	cmd->version = 1;
++	cmd->scan_type = request->n_ssids ? 1 : 0;
++	cmd->ssid_type = request->n_ssids ? BIT(2) : BIT(0);
++	cmd->ssids_num = request->n_ssids;
++	for (i = 0; i < request->n_ssids; i++) {
++		cmd->ssids[i].ssid_len = cpu_to_le32(request->ssids[i].ssid_len);
++		memcpy(cmd->ssids[i].ssid, request->ssids[i].ssid,
++		       request->ssids[i].ssid_len);
++	}
++	cmd->channel_type = 4; /* Specified channels, including each batch. */
++	cmd->channels_num = min_t(unsigned int, count, ARRAY_SIZE(cmd->channels));
++	cmd->ext_channels_num = count - cmd->channels_num;
++	for (i = 0; i < count; i++) {
++		struct ieee80211_channel *ch = request->channels[first + i];
++		struct mt76_connac_mcu_scan_channel *c = i < ARRAY_SIZE(cmd->channels) ?
++			&cmd->channels[i] : &cmd->ext_channels[i - ARRAY_SIZE(cmd->channels)];
++
++		c->band = ch->band == NL80211_BAND_2GHZ ? MT7932_BAND_2GHZ :
++			  ch->band == NL80211_BAND_5GHZ ? MT7932_BAND_5GHZ :
++							MT7932_BAND_6GHZ;
++		c->channel_num = ch->hw_value;
++	}
++	cmd->channel_dwell_time = cpu_to_le16(MT7932_SCAN_DWELL_MS);
++	cmd->channel_min_dwell_time = cpu_to_le16(MT7932_SCAN_MIN_DWELL_MS);
++	cmd->timeout_value = cpu_to_le16(MT7932_SCAN_FW_TIMEOUT_MS);
++	cmd->ies_len = cpu_to_le16(request->ie_len);
++	if (request->ie_len)
++		memcpy(cmd->ies, request->ie, request->ie_len);
++	ether_addr_copy(cmd->bssid, request->bssid);
++	mt792x_mutex_acquire(fm->dev);
++	ret = mt7932_prepare_discovery(fm);
++	if (!ret)
++		ret = mt76_mcu_send_msg(&fm->dev->mt76,
++			MCU_CE_CMD(START_HW_SCAN), cmd, sizeof(*cmd), false);
++	mt792x_mutex_release(fm->dev);
++	kfree(cmd);
++	if (!ret) {
++		fm->scan_next_channel += count;
++		wiphy_delayed_work_queue(fm->wiphy, &fm->scan_timeout,
++					MT7932_SCAN_TIMEOUT);
++	}
++	return ret;
++}
++
++void mt7932_cfg80211_scan_complete(struct mt7932_fullmac *fm, u8 sequence)
++{
++	lockdep_assert_wiphy(fm->wiphy);
++	if (!fm->scan_request || (sequence & MT7932_SCAN_SEQUENCE_MASK) !=
++	    (fm->scan_seq & MT7932_SCAN_SEQUENCE_MASK))
++		return;
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->scan_timeout);
++	if (fm->scan_next_channel == fm->scan_request->n_channels)
++		mt7932_cfg80211_scan_done(fm, false);
++	else if (mt7932_scan_batch(fm))
++		mt7932_cfg80211_scan_done(fm, true);
++}
++
++static int mt7932_cfg_scan(struct wiphy *wiphy,
++			  struct cfg80211_scan_request *request)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++	int ret;
++
++	if (fm->scan_request || fm->connecting || fm->disconnecting)
++		return -EBUSY;
++	if (READ_ONCE(fm->removing) || fm->dev->fw_assert)
++		return -EIO;
++	if (test_bit(MT76_RESET, &fm->dev->mphy.state))
++		return -EBUSY;
++	if (!request->n_channels || request->n_ssids > MT7932_SCAN_MAX_SSIDS ||
++	    request->ie_len > MT76_CONNAC_SCAN_IE_LEN)
++		return -EINVAL;
++	fm->scan_request = request;
++	fm->scan_next_channel = 0;
++	ret = mt7932_scan_batch(fm);
++	if (ret)
++		fm->scan_request = NULL;
++	return ret;
++}
++
++static int mt7932_cfg_connect(struct wiphy *wiphy, struct net_device *netdev,
++			     struct cfg80211_connect_params *sme)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++	struct mt7932_connect_params *params;
++	struct cfg80211_bss *bss;
++	int ret;
++
++	if (fm->connecting || fm->connected || fm->disconnecting || fm->scan_request)
++		return -EBUSY;
++	if (READ_ONCE(fm->removing) || fm->dev->fw_assert)
++		return -EIO;
++	if (test_bit(MT76_RESET, &fm->dev->mphy.state))
++		return -EBUSY;
++	/* Advertise and accept only the firmware security path verified so far. */
++	if (sme->crypto.n_akm_suites != 1 ||
++	    sme->crypto.akm_suites[0] != WLAN_AKM_SUITE_SAE ||
++	    sme->crypto.n_ciphers_pairwise != 1 ||
++	    sme->crypto.ciphers_pairwise[0] != WLAN_CIPHER_SUITE_CCMP ||
++	    sme->crypto.cipher_group != WLAN_CIPHER_SUITE_CCMP ||
++	    sme->mfp != NL80211_MFP_REQUIRED || !sme->crypto.sae_pwd ||
++	    !sme->crypto.sae_pwd_len || sme->crypto.sae_pwd_len > 64)
++		return -EOPNOTSUPP;
++	if (!sme->ssid_len || sme->ssid_len > IEEE80211_MAX_SSID_LEN)
++		return -EINVAL;
++	bss = cfg80211_get_bss(wiphy, sme->channel, sme->bssid,
++			      sme->ssid, sme->ssid_len, IEEE80211_BSS_TYPE_ESS,
++			      IEEE80211_PRIVACY_ON);
++	if (!bss)
++		return -ENOENT;
++	/* Temporary calibration coverage bound; never substitute another
++	 * frequency's DPD coefficients. General coverage is a separate task.
++	 */
++	if (bss->channel->band != NL80211_BAND_6GHZ ||
++	    bss->channel->hw_value != 5) {
++		ret = -EOPNOTSUPP;
++		goto put_bss;
++	}
++	params = kzalloc(sizeof(*params), GFP_KERNEL);
++	if (!params) {
++		ret = -ENOMEM;
++		goto put_bss;
++	}
++	params->ssid_len = sme->ssid_len;
++	memcpy(params->ssid, sme->ssid, sme->ssid_len);
++	params->password_len = sme->crypto.sae_pwd_len;
++	memcpy(params->password, sme->crypto.sae_pwd, params->password_len);
++	params->band = MT7932_BAND_6GHZ;
++	params->channel = bss->channel->hw_value;
++	ether_addr_copy(params->bssid, bss->bssid);
++	fm->connecting = true;
++	ret = mt7932_offload_connect(fm->dev, params);
++	kfree_sensitive(params);
++	if (ret)
++		fm->connecting = false;
++	else
++		wiphy_delayed_work_queue(wiphy, &fm->connect_timeout,
++					MT7932_CONNECT_TIMEOUT);
++put_bss:
++	cfg80211_put_bss(wiphy, bss);
++	return ret;
++}
++
++static int mt7932_cfg_disconnect(struct wiphy *wiphy, struct net_device *netdev,
++				u16 reason)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++	int ret;
++
++	if (READ_ONCE(fm->removing) || fm->dev->fw_assert)
++		return -EIO;
++	if (test_bit(MT76_RESET, &fm->dev->mphy.state) || fm->disconnecting)
++		return -EBUSY;
++	if (!fm->connected && !fm->connecting)
++		return -ENOTCONN;
++	ret = mt7932_offload_disconnect(fm->dev, fm->bssid);
++	if (ret)
++		return ret;
++	fm->disconnecting = true;
++	fm->disconnect_reason = reason;
++	wiphy_delayed_work_cancel(wiphy, &fm->connect_timeout);
++	wiphy_delayed_work_queue(wiphy, &fm->connect_timeout,
++				MT7932_DISCONNECT_TIMEOUT);
++	return 0;
++}
++
++static int mt7932_cfg_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
++				  const u8 *mac, struct station_info *sinfo)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++	const struct rtnl_link_stats64 *stats;
++	struct rtnl_link_stats64 storage;
++
++	if (!fm->connected || !ether_addr_equal(mac, fm->bssid))
++		return -ENOENT;
++	stats = dev_get_stats(fm->netdev, &storage);
++	sinfo->rx_bytes = stats->rx_bytes - fm->station_start_stats.rx_bytes;
++	sinfo->tx_bytes = stats->tx_bytes - fm->station_start_stats.tx_bytes;
++	sinfo->rx_packets = stats->rx_packets - fm->station_start_stats.rx_packets;
++	sinfo->tx_packets = stats->tx_packets - fm->station_start_stats.tx_packets;
++	sinfo->connected_time = (jiffies - fm->connected_at) / HZ;
++	sinfo->inactive_time = jiffies_to_msecs(jiffies - READ_ONCE(fm->last_activity));
++	sinfo->sta_flags.mask = BIT(NL80211_STA_FLAG_AUTHENTICATED) |
++				BIT(NL80211_STA_FLAG_ASSOCIATED) |
++				BIT(NL80211_STA_FLAG_AUTHORIZED);
++	sinfo->sta_flags.set = sinfo->sta_flags.mask;
++	sinfo->filled = BIT_ULL(NL80211_STA_INFO_RX_BYTES64) |
++			BIT_ULL(NL80211_STA_INFO_TX_BYTES64) |
++			BIT_ULL(NL80211_STA_INFO_RX_PACKETS) |
++			BIT_ULL(NL80211_STA_INFO_TX_PACKETS) |
++			BIT_ULL(NL80211_STA_INFO_CONNECTED_TIME) |
++			BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME) |
++			BIT_ULL(NL80211_STA_INFO_STA_FLAGS);
++	if (READ_ONCE(fm->signal_valid)) {
++		sinfo->signal = READ_ONCE(fm->last_signal);
++		sinfo->filled |= BIT_ULL(NL80211_STA_INFO_SIGNAL);
++	}
++	/* No invented rate, retry, ACK-failure or RF measurements. */
++	return 0;
++}
++
++static int mt7932_cfg_dump_station(struct wiphy *wiphy, struct wireless_dev *wdev,
++				   int index, u8 *mac, struct station_info *sinfo)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++
++	if (index || !fm->connected)
++		return -ENOENT;
++	ether_addr_copy(mac, fm->bssid);
++	return mt7932_cfg_get_station(wiphy, wdev, mac, sinfo);
++}
++
++static void mt7932_cfg_regulatory(struct wiphy *wiphy,
++				  struct regulatory_request *request)
++{
++	struct mt7932_fullmac *fm = mt7932_wiphy_priv(wiphy);
++	struct mt792x_dev *dev = fm->dev;
++	int ret;
++
++	memcpy(dev->mt76.alpha2, request->alpha2, sizeof(dev->mt76.alpha2));
++	dev->mt76.region = request->dfs_region;
++	dev->country_ie_env = request->country_ie_env;
++	dev->regd_change = true;
++	if (READ_ONCE(fm->removing) || dev->fw_assert || dev->pm.suspended ||
++	    test_bit(MT76_RESET, &dev->mphy.state))
++		return;
++	/* Preserve the complete domain AND transmit-power/SAR programming
++	 * previously supplied by the mac80211 regulatory notifier.
++	 */
++	ret = mt7921_mcu_regd_update(dev, dev->mt76.alpha2,
++				    dev->country_ie_env);
++	if (ret) {
++		wiphy_err(wiphy, "regulatory %.2s update failed: %d\n",
++			  request->alpha2, ret);
++		return;
++	}
++	wiphy_info(wiphy, "regulatory %.2s region %u applied\n",
++		   request->alpha2, request->dfs_region);
++}
++
++static const struct cfg80211_ops mt7932_cfg80211_ops = {
++	.scan = mt7932_cfg_scan,
++	.abort_scan = mt7932_cfg_abort_scan,
++	.connect = mt7932_cfg_connect,
++	.disconnect = mt7932_cfg_disconnect,
++	.get_station = mt7932_cfg_get_station,
++	.dump_station = mt7932_cfg_dump_station,
++};
++
++int mt7932_cfg80211_register(struct mt7932_fullmac *fm)
++{
++	static const u32 ciphers[] = { WLAN_CIPHER_SUITE_CCMP,
++				       WLAN_CIPHER_SUITE_AES_CMAC };
++	static const u32 akms[] = { WLAN_AKM_SUITE_SAE };
++	struct wiphy *wiphy;
++	int i, ret;
++
++	wiphy = wiphy_new(&mt7932_cfg80211_ops, sizeof(fm));
++	if (!wiphy)
++		return -ENOMEM;
++	fm->wiphy = wiphy;
++	*(struct mt7932_fullmac **)wiphy_priv(wiphy) = fm;
++	set_wiphy_dev(wiphy, fm->dev->mt76.dev);
++	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
++	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
++	wiphy->max_scan_ssids = MT7932_SCAN_MAX_SSIDS;
++	wiphy->max_scan_ie_len = MT76_CONNAC_SCAN_IE_LEN;
++	wiphy->cipher_suites = ciphers;
++	wiphy->n_cipher_suites = ARRAY_SIZE(ciphers);
++	wiphy->akm_suites = akms;
++	wiphy->n_akm_suites = ARRAY_SIZE(akms);
++	wiphy->reg_notifier = mt7932_cfg_regulatory;
++	ether_addr_copy(wiphy->perm_addr, fm->dev->mphy.macaddr);
++	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_SAE_OFFLOAD);
++	for (i = 0; i < NUM_NL80211_BANDS; i++)
++		wiphy->bands[i] = fm->dev->mphy.hw->wiphy->bands[i];
++	wiphy_delayed_work_init(&fm->scan_timeout, mt7932_scan_timeout);
++	wiphy_delayed_work_init(&fm->connect_timeout, mt7932_connect_timeout);
++	ret = wiphy_register(wiphy);
++	if (ret)
++		goto free_wiphy;
++	fm->wdev.wiphy = wiphy;
++	fm->wdev.iftype = NL80211_IFTYPE_STATION;
++	fm->wdev.netdev = fm->netdev;
++	fm->netdev->ieee80211_ptr = &fm->wdev;
++	strscpy(fm->netdev->name, "wlan%d", IFNAMSIZ);
++	ret = register_netdev(fm->netdev);
++	if (!ret) {
++		mt7932_diag_init(fm->dev, wiphy->debugfsdir);
++		return 0;
++	}
++	wiphy_unregister(wiphy);
++free_wiphy:
++	wiphy_free(wiphy);
++	fm->wiphy = NULL;
++	return ret;
++}
++
++void mt7932_cfg80211_unregister(struct mt7932_fullmac *fm)
++{
++	unregister_netdev(fm->netdev);
++	wiphy_lock(fm->wiphy);
++	mt7932_cfg80211_scan_done(fm, true);
++	mt7932_cfg80211_disconnected(fm, WLAN_REASON_DEAUTH_LEAVING);
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->scan_timeout);
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->connect_timeout);
++	wiphy_unlock(fm->wiphy);
++	wiphy_unregister(fm->wiphy);
++	wiphy_free(fm->wiphy);
++}
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_fullmac.c b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_fullmac.c
+new file mode 100644
+index 0000000000000..ec94e75f32617
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_fullmac.c
+@@ -0,0 +1,462 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Native MT7932 Ethernet transport. cfg80211 control is under bring-up. */
++#include <linux/etherdevice.h>
++#include <linux/unaligned.h>
++#include "mt7921.h"
++#include "mt7932_offload.h"
++#include "../mt76_connac2_mac.h"
++
++#include "mt7932_fullmac.h"
++#include "mt7932_mcu.h"
++
++#define MT7932_EVENT_QUEUE_MAX 64
++#define MT7932_TX_RESERVE 8
++
++static void mt7932_fullmac_event_work(struct wiphy *wiphy, struct wiphy_work *work)
++{
++	struct mt7932_fullmac *fm = container_of(work, struct mt7932_fullmac, event_work);
++	struct sk_buff *skb;
++
++	if (READ_ONCE(fm->removing)) {
++		skb_queue_purge(&fm->events);
++		return;
++	}
++	if (xchg(&fm->reset_pending, false)) {
++		mt7932_cfg80211_scan_done(fm, true);
++		mt7932_cfg80211_disconnected(fm, WLAN_REASON_UNSPECIFIED);
++		skb_queue_purge(&fm->events);
++	}
++	while ((skb = skb_dequeue(&fm->events))) {
++		const struct mt76_connac2_mcu_rxd *rxd = (void *)skb->data;
++		const struct mt7932_mlme_event *event = (void *)rxd->tlv;
++		const u8 *p = rxd->tlv;
++		size_t plen = skb->len - sizeof(*rxd);
++		u8 eid = rxd->eid;
++		u32 type, len;
++		int ret = 0;
++
++		if (fm->dev->fw_assert) {
++			mt7932_cfg80211_scan_done(fm, true);
++			mt7932_cfg80211_disconnected(fm, WLAN_REASON_UNSPECIFIED);
++			goto next;
++		}
++		if (eid == MCU_EVENT_SCAN_DONE) {
++			if (plen)
++				mt7932_cfg80211_scan_complete(fm, p[0]);
++			goto next;
++		}
++		if (eid == MT7932_EVENT_PRECAL_REQUEST) {
++			ret = mt7932_precal_request(fm->dev, fm->cal, p, plen);
++			goto result;
++		}
++		if ((eid != MT7932_EVENT_MLME && eid != MT7932_EVENT_MLME_ALT) ||
++		    plen < sizeof(*event) || le32_to_cpu(event->unknown_0))
++			goto next;
++		type = le32_to_cpu(event->type);
++		len = le32_to_cpu(event->len);
++		if (len > plen - sizeof(*event))
++			goto next;
++		p = event->data;
++		switch (type) {
++		case MT7932_MLME_CONNECTING: {
++			const struct mt7932_mlme_connecting *connecting = (void *)p;
++			enum nl80211_band band;
++
++			if (!fm->connecting || len < sizeof(*connecting) ||
++			    !ether_addr_equal(connecting->bssid, fm->bssid) ||
++			    connecting->band < MT7932_BAND_2GHZ ||
++			    connecting->band > MT7932_BAND_6GHZ)
++				break;
++			fm->cal_band = connecting->band;
++			band = connecting->band == MT7932_BAND_2GHZ ? NL80211_BAND_2GHZ :
++			       connecting->band == MT7932_BAND_5GHZ ? NL80211_BAND_5GHZ :
++								     NL80211_BAND_6GHZ;
++			fm->cal_center_khz = ieee80211_channel_to_frequency(
++				connecting->center_channel, band) * 1000;
++			fm->active = true;
++			ret = mt7932_precal_preload(fm->dev, fm->cal, fm->cal_band);
++			break;
++		}
++		case MT7932_MLME_ASSOCIATED: {
++			const struct mt7932_mlme_associated *associated = (void *)p;
++
++			if (!fm->connecting || len < sizeof(*associated) ||
++			    !ether_addr_equal(associated->bssid, fm->bssid))
++				break;
++			if (le32_to_cpu(associated->status) ||
++			    associated->peer_wcid >= MT7932_PEER_WCID_LIMIT) {
++				mt7932_cfg80211_disconnected(fm, WLAN_REASON_UNSPECIFIED);
++				break;
++			}
++			fm->peer_wcid = associated->peer_wcid;
++			break;
++		}
++		case MT7932_MLME_AUTHORIZED: {
++			const struct mt7932_mlme_authorized *authorized = (void *)p;
++
++			if (!fm->connecting || len < sizeof(*authorized) ||
++			    fm->peer_wcid >= MT7932_PEER_WCID_LIMIT ||
++			    !ether_addr_equal(authorized->bssid, fm->bssid))
++				break;
++			if (le32_to_cpu(authorized->status)) {
++				mt7932_cfg80211_disconnected(fm, WLAN_REASON_UNSPECIFIED);
++				break;
++			}
++			ret = mt7932_precal_apply(fm->dev, fm->cal,
++						 fm->cal_band, fm->cal_center_khz);
++			if (!ret) {
++				fm->cal_applied = true;
++				mt7932_cfg80211_connected(fm);
++			}
++			break;
++		}
++		case MT7932_MLME_DISCONNECTED:
++			mt7932_cfg80211_disconnected(fm, WLAN_REASON_UNSPECIFIED);
++			break;
++		}
++result:
++		if (ret) {
++			wiphy_warn(fm->wiphy, "firmware event %#x failed: %d\n", eid, ret);
++			mt7932_cfg80211_disconnected(fm, WLAN_REASON_UNSPECIFIED);
++		}
++next:
++		dev_kfree_skb(skb);
++	}
++}
++
++void mt7932_fullmac_connecting(struct mt792x_dev *dev, const u8 *bssid)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	if (fm) {
++		netif_carrier_off(fm->netdev);
++		WRITE_ONCE(fm->peer_wcid, MT7932_NO_WCID);
++		WRITE_ONCE(fm->cal_applied, false);
++		WRITE_ONCE(fm->cal_band, 0);
++		WRITE_ONCE(fm->cal_center_khz, 0);
++		ether_addr_copy(fm->bssid, bssid);
++		/* Discovery management frames must reach the existing RX path. */
++		WRITE_ONCE(fm->active, false);
++	}
++}
++
++void mt7932_fullmac_reset(struct mt792x_dev *dev)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	if (!fm || READ_ONCE(fm->removing))
++		return;
++	netif_carrier_off(fm->netdev);
++	WRITE_ONCE(fm->active, false);
++	WRITE_ONCE(fm->peer_wcid, MT7932_NO_WCID);
++	WRITE_ONCE(fm->cal_applied, false);
++	WRITE_ONCE(fm->scan_context_active, false);
++	WRITE_ONCE(fm->cal_band, 0);
++	WRITE_ONCE(fm->cal_center_khz, 0);
++	WRITE_ONCE(fm->reset_pending, true);
++	wiphy_work_queue(fm->wiphy, &fm->event_work);
++}
++
++void mt7932_fullmac_reset_prepare(struct mt792x_dev *dev)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	if (!fm || READ_ONCE(fm->removing))
++		return;
++	netif_tx_disable(fm->netdev);
++	mt7932_fullmac_reset(dev);
++}
++
++/* Called with the MCU mutex held after firmware reload. Restore both domain
++ * and the existing conservative SAR/power programming before any new scan or
++ * transmission. The firmware lost RLM state even if Linux kept its chandef.
++ */
++int mt7932_fullmac_reinit(struct mt792x_dev *dev)
++{
++	int ret;
++
++	ret = mt76_connac_mcu_set_channel_domain(&dev->mphy);
++	if (!ret)
++		ret = mt7921_set_tx_sar_pwr(dev->mphy.hw, NULL);
++	if (!ret && dev->mphy.chandef.chan)
++		ret = mt7932_set_channel(&dev->phy, MT7932_AIS_BSS);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt7932_fullmac_reinit);
++
++void mt7932_fullmac_reset_done(struct mt792x_dev *dev, int error)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	if (!fm || READ_ONCE(fm->removing))
++		return;
++	if (error)
++		dev->fw_assert = true;
++	else if (netif_running(fm->netdev))
++		netif_wake_queue(fm->netdev);
++	dev_info(dev->mt76.dev, "MT7932 firmware recovery completed: %d\n", error);
++}
++
++int mt7932_fullmac_preload(struct mt792x_dev *dev, u8 band)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	return fm ? mt7932_precal_preload(dev, fm->cal, band) : -ENODEV;
++}
++
++static int mt7932_native_open(struct net_device *netdev)
++{
++	netif_start_queue(netdev);
++	return 0;
++}
++
++static int mt7932_native_stop(struct net_device *netdev)
++{
++	netif_stop_queue(netdev);
++	return 0;
++}
++
++static netdev_tx_t mt7932_native_tx(struct sk_buff *skb,
++				 struct net_device *netdev)
++{
++	struct mt7932_fullmac *fm = *(void **)netdev_priv(netdev);
++	struct mt76_phy *phy = &fm->dev->mphy;
++	struct mt76_dev *mdev = &fm->dev->mt76;
++	struct mt76_queue *q = phy->q_tx[MT_TXQ_BE];
++	unsigned int bytes = skb->len;
++	int ret;
++
++	if (!netif_carrier_ok(netdev) || skb_linearize(skb)) {
++		netdev->stats.tx_dropped++;
++		dev_kfree_skb_any(skb);
++		return NETDEV_TX_OK;
++	}
++	memset(skb->cb, 0, sizeof(skb->cb));
++	IEEE80211_SKB_CB(skb)->flags = IEEE80211_TX_CTL_HW_80211_ENCAP;
++	skb_set_queue_mapping(skb, 0);
++	spin_lock_bh(&q->lock);
++	if (q->queued >= q->ndesc - MT7932_TX_RESERVE ||
++	    mdev->token_count >= mdev->token_size - MT7932_TX_RESERVE) {
++		spin_unlock_bh(&q->lock);
++		return NETDEV_TX_BUSY;
++	}
++	ret = mdev->queue_ops->tx_queue_skb(phy, q, MT_TXQ_BE, skb, NULL, NULL);
++	if (ret >= 0)
++		mdev->queue_ops->kick(mdev, q);
++	spin_unlock_bh(&q->lock);
++	if (ret >= 0) {
++		netdev->stats.tx_packets++;
++		netdev->stats.tx_bytes += bytes;
++		WRITE_ONCE(fm->last_activity, jiffies);
++	} else {
++		netdev->stats.tx_errors++;
++	}
++	return NETDEV_TX_OK;
++}
++
++static const struct net_device_ops mt7932_native_ops = {
++	.ndo_open = mt7932_native_open,
++	.ndo_stop = mt7932_native_stop,
++	.ndo_start_xmit = mt7932_native_tx,
++	.ndo_validate_addr = eth_validate_addr,
++};
++
++int mt7932_fullmac_init(struct mt792x_dev *dev)
++{
++	struct mt7932_fullmac *fm;
++	struct net_device *netdev;
++	int ret;
++
++	fm = kzalloc(sizeof(*fm), GFP_KERNEL);
++	if (!fm)
++		return -ENOMEM;
++	netdev = alloc_etherdev(sizeof(fm));
++	if (!netdev) {
++		kfree(fm);
++		return -ENOMEM;
++	}
++	fm->dev = dev;
++	fm->netdev = netdev;
++	wiphy_work_init(&fm->event_work, mt7932_fullmac_event_work);
++	skb_queue_head_init(&fm->events);
++	ret = mt7932_precal_load(dev, &fm->cal);
++	if (ret) {
++		free_netdev(netdev);
++		kfree(fm);
++		return ret;
++	}
++	/* Assigned from the firmware association event before authorizing TX. */
++	fm->peer_wcid = MT7932_NO_WCID;
++	*(void **)netdev_priv(netdev) = fm;
++	strscpy(netdev->name, "wlan%d", IFNAMSIZ);
++	netdev->netdev_ops = &mt7932_native_ops;
++	SET_NETDEV_DEV(netdev, dev->mt76.dev);
++	eth_hw_addr_set(netdev, dev->mphy.macaddr);
++	netif_carrier_off(netdev);
++	WRITE_ONCE(dev->fullmac, fm);
++	ret = mt7932_cfg80211_register(fm);
++	if (ret) {
++		WRITE_ONCE(dev->fullmac, NULL);
++		free_netdev(netdev);
++		kfree(fm);
++		return ret;
++	}
++	dev_info(dev->mt76.dev, "MT7932 cfg80211 station interface %s\n",
++		 netdev->name);
++	return 0;
++}
++
++bool mt7932_fullmac_is_tx(struct mt792x_dev *dev, struct sk_buff *skb)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	return fm && skb && skb->dev == fm->netdev;
++}
++EXPORT_SYMBOL_GPL(mt7932_fullmac_is_tx);
++
++void mt7932_fullmac_txwi(struct mt792x_dev *dev, __le32 *txwi,
++			struct sk_buff *skb)
++{
++	struct mt76_wcid wcid = { .idx = dev->fullmac->peer_wcid };
++
++	mt76_connac2_mac_write_txwi(&dev->mt76, txwi, skb, &wcid,
++				  NULL, 0, MT_TXQ_BE, 0);
++	/* Firmware installed the pairwise key; hardware supplies PN and sequence. */
++	txwi[3] |= cpu_to_le32(MT_TXD3_PROTECT_FRAME);
++}
++EXPORT_SYMBOL_GPL(mt7932_fullmac_txwi);
++
++bool mt7932_fullmac_tx_free(struct mt792x_dev *dev, struct mt76_txwi_cache *t)
++{
++	if (!mt7932_fullmac_is_tx(dev, t->skb))
++		return false;
++	mt76_connac_txp_skb_unmap(&dev->mt76, t);
++	dev_consume_skb_any(t->skb);
++	t->skb = NULL;
++	mt76_put_txwi(&dev->mt76, t);
++	return true;
++}
++
++void mt7932_fullmac_quiesce(struct mt792x_dev *dev)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	if (!fm)
++		return;
++	wiphy_lock(fm->wiphy);
++	WRITE_ONCE(fm->removing, true);
++	netif_tx_disable(fm->netdev);
++	wiphy_work_cancel(fm->wiphy, &fm->event_work);
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->scan_timeout);
++	wiphy_delayed_work_cancel(fm->wiphy, &fm->connect_timeout);
++	mt7932_cfg80211_scan_done(fm, true);
++	mt7932_cfg80211_disconnected(fm, WLAN_REASON_DEAUTH_LEAVING);
++	skb_queue_purge(&fm->events);
++	wiphy_unlock(fm->wiphy);
++}
++EXPORT_SYMBOL_GPL(mt7932_fullmac_quiesce);
++
++/* Caller has stopped native TX and quiesced DMA/NAPI. The common token
++ * teardown unmaps each TXP exactly once. Only detach Ethernet SKBs here,
++ * so it cannot send their completions to an unregistered mac80211 device.
++ */
++void mt7932_fullmac_tx_purge(struct mt792x_dev *dev)
++{
++	struct mt76_txwi_cache *t;
++	int id;
++
++	spin_lock_bh(&dev->mt76.token_lock);
++	idr_for_each_entry(&dev->mt76.token, t, id) {
++		if (!mt7932_fullmac_is_tx(dev, t->skb))
++			continue;
++		dev_kfree_skb_any(t->skb);
++		t->skb = NULL;
++	}
++	spin_unlock_bh(&dev->mt76.token_lock);
++}
++EXPORT_SYMBOL_GPL(mt7932_fullmac_tx_purge);
++
++void mt7932_fullmac_remove(struct mt792x_dev *dev)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++
++	if (!fm)
++		return;
++	mt7932_fullmac_quiesce(dev);
++	mt7932_cfg80211_unregister(fm);
++	mt7932_fullmac_tx_purge(dev);
++	mt76_wcid_cleanup(&dev->mt76, &dev->mt76.global_wcid);
++	WRITE_ONCE(dev->fullmac, NULL);
++	synchronize_net();
++	free_netdev(fm->netdev);
++	kfree(fm);
++}
++EXPORT_SYMBOL_GPL(mt7932_fullmac_remove);
++
++void mt7932_fullmac_event(struct mt792x_dev *dev, struct sk_buff *skb)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++	struct sk_buff *copy;
++
++	if (!fm || !fm->wiphy || READ_ONCE(fm->removing) ||
++	    skb->len < sizeof(struct mt76_connac2_mcu_rxd) ||
++	    skb_queue_len(&fm->events) >= MT7932_EVENT_QUEUE_MAX)
++		return;
++	copy = skb_copy(skb, GFP_ATOMIC);
++	if (!copy)
++		return;
++	skb_queue_tail(&fm->events, copy);
++	wiphy_work_queue(fm->wiphy, &fm->event_work);
++}
++
++bool mt7932_fullmac_rx(struct mt792x_dev *dev, struct sk_buff *skb)
++{
++	struct mt7932_fullmac *fm = READ_ONCE(dev->fullmac);
++	struct mt76_rx_status *status = (void *)skb->cb;
++	unsigned int bytes;
++
++	/* Firmware-owned Ethernet goes to the station netdev. Management RX is
++	 * reported through cfg80211, including scans while associated.
++	 */
++	if (!fm)
++		return false;
++	if (!(status->flag & RX_FLAG_8023)) {
++		struct ieee80211_mgmt *mgmt = (void *)skb->data;
++		struct ieee80211_channel *channel;
++		struct cfg80211_bss *bss;
++
++		if (skb->len >= offsetof(struct ieee80211_mgmt, u.beacon.variable) &&
++		    (ieee80211_is_beacon(mgmt->frame_control) ||
++		     ieee80211_is_probe_resp(mgmt->frame_control)) &&
++		    !(status->flag & (RX_FLAG_ONLY_MONITOR | RX_FLAG_FAILED_FCS_CRC))) {
++			channel = ieee80211_get_channel(fm->wiphy, status->freq);
++			if (channel) {
++				bss = cfg80211_inform_bss_frame(fm->wiphy, channel,
++					mgmt, skb->len, status->signal * 100, GFP_ATOMIC);
++				cfg80211_put_bss(fm->wiphy, bss);
++			}
++		}
++		dev_kfree_skb(skb);
++		return true;
++	}
++	if (!READ_ONCE(fm->connected) || skb->len < ETH_HLEN ||
++	    !netif_running(fm->netdev) ||
++	    status->flag & (RX_FLAG_ONLY_MONITOR | RX_FLAG_FAILED_FCS_CRC)) {
++		dev_kfree_skb(skb);
++		return true;
++	}
++	WRITE_ONCE(fm->last_activity, jiffies);
++	if (status->chains && status->signal < 0 && status->signal > S8_MIN) {
++		WRITE_ONCE(fm->last_signal, status->signal);
++		WRITE_ONCE(fm->signal_valid, true);
++	}
++	bytes = skb->len;
++	skb->dev = fm->netdev;
++	memset(skb->cb, 0, sizeof(skb->cb));
++	skb->ip_summed = CHECKSUM_NONE;
++	skb->protocol = eth_type_trans(skb, fm->netdev);
++	fm->netdev->stats.rx_packets++;
++	fm->netdev->stats.rx_bytes += bytes;
++	netif_rx(skb);
++	return true;
++}
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_fullmac.h b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_fullmac.h
+new file mode 100644
+index 0000000000000..0d653906ece50
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_fullmac.h
+@@ -0,0 +1,36 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MT7932_FULLMAC_H
++#define __MT7932_FULLMAC_H
++
++struct mt7932_fullmac {
++	struct mt792x_dev *dev;
++	struct net_device *netdev;
++	struct wiphy *wiphy;
++	struct wireless_dev wdev;
++	struct cfg80211_scan_request *scan_request;
++	unsigned int scan_next_channel;
++	struct wiphy_delayed_work scan_timeout;
++	struct wiphy_delayed_work connect_timeout;
++	bool connecting, connected, disconnecting, active, scan_context_active;
++	bool reset_pending, removing;
++	bool signal_valid;
++	s8 last_signal;
++	unsigned long connected_at, last_activity;
++	struct rtnl_link_stats64 station_start_stats;
++	u16 disconnect_reason;
++	u8 scan_seq, peer_wcid, cal_band;
++	u32 cal_center_khz;
++	bool cal_applied;
++	u8 bssid[ETH_ALEN];
++	struct mt7932_cal_cache *cal;
++	struct sk_buff_head events;
++	struct wiphy_work event_work;
++};
++
++int mt7932_cfg80211_register(struct mt7932_fullmac *fm);
++void mt7932_cfg80211_unregister(struct mt7932_fullmac *fm);
++void mt7932_cfg80211_scan_done(struct mt7932_fullmac *fm, bool aborted);
++void mt7932_cfg80211_scan_complete(struct mt7932_fullmac *fm, u8 sequence);
++void mt7932_cfg80211_connected(struct mt7932_fullmac *fm);
++void mt7932_cfg80211_disconnected(struct mt7932_fullmac *fm, u16 reason);
++#endif
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_mcu.h b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_mcu.h
+new file mode 100644
+index 0000000000000..f19925c927b35
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_mcu.h
+@@ -0,0 +1,373 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MT7932_MCU_H
++#define __MT7932_MCU_H
++
++/* Private, observed MT7932 ABI. Evidence and unresolved fields are in
++ * Documentation/networking/device_drivers/wifi/mt7932-abi.txt. These are legacy
++ * flat command IDs, not CONNAC UNI commands with coincidentally equal IDs.
++ */
++enum mt7932_mcu_command {
++	MT7932_CMD_BASIC_CONFIG = 0x02,
++	MT7932_CMD_ADD_REMOVE_KEY = 0x07,
++	MT7932_CMD_ACTIVATE_BSS = 0x11,
++	MT7932_CMD_SET_BSS = 0x12,
++	MT7932_CMD_SET_STA = 0x13,
++	MT7932_CMD_REMOVE_STA = 0x14,
++	MT7932_CMD_SET_RLM = 0x19,
++	MT7932_CMD_DBDC = 0x28,
++	MT7932_CMD_QUEUE_MANAGEMENT = 0x6b,
++	MT7932_CMD_CUSTOMER_CONFIG = 0x70,
++	MT7932_CMD_RUNTIME_93 = 0x93, /* Meaning not established on this ABI. */
++	MT7932_CMD_PROBE_PRIVACY = 0x9b,
++	MT7932_CMD_BEACON_PARSE = 0xaf,
++	MT7932_CMD_AIS_MAC = 0xb8,
++	MT7932_CMD_CAL_PROFILE = 0xbf,
++	MT7932_CMD_PRECAL = 0xd6,
++	MT7932_CMD_CAL_D7 = 0xd7,
++	MT7932_CMD_RTS = 0xdc,
++	MT7932_CMD_SME_CONNECT = 0x40ea,
++	MT7932_CMD_SME_DISCONNECT = 0x42ea,
++	MT7932_CMD_SME_DHCP_RELEASE = 0x47ea,
++	MT7932_CMD_SME_CONFIG = 0x4eea,
++	MT7932_CMD_SME_RNR = 0x60ea,
++	MT7932_CMD_CAL_EXT_21 = 0x21ed,
++};
++
++enum mt7932_fw_band {
++	MT7932_BAND_2GHZ = 1,
++	MT7932_BAND_5GHZ = 2,
++	MT7932_BAND_6GHZ = 3,
++};
++
++enum mt7932_bss_index {
++	MT7932_AIS_BSS = 0,
++	MT7932_DISCOVERY_BSS = 1,
++};
++
++#define MT7932_NO_WCID			U8_MAX
++/* Retain the existing defensive bound; this is not a decoded table size. */
++#define MT7932_PEER_WCID_LIMIT		48
++#define MT7932_SCAN_SEQUENCE_MASK	GENMASK(6, 0)
++#define MT7932_SCAN_DISABLE_DBDC		BIT(1)
++#define MT7932_SCAN_SPECIFIED_SSIDS	BIT(3)
++#define MT7932_SCAN_DWELL_MS		150
++#define MT7932_SCAN_MIN_DWELL_MS		120
++#define MT7932_SCAN_FW_TIMEOUT_MS		10000
++
++/* MT7932 boot replies are one-based, unlike mt76's generic PATCH_* enum. */
++enum mt7932_patch_sem_status {
++	MT7932_PATCH_SEM_BUSY = 1,
++	MT7932_PATCH_ALREADY_LOADED = 2,
++	MT7932_PATCH_SEM_ACQUIRED = 3,
++};
++
++#define MT7932_PATCH_SEM_REQUEST		2
++#define MT7932_PATCH_WIFI_SECTION		0x100
++#define MT7932_FW_SCATTER_CHUNK		2048
++#define MT7932_FW_MAX_REGIONS		10
++
++/* Private board-calibration replay file. Command descriptors/sequence
++ * numbers are constructed afresh; this records payloads and command policy.
++ */
++#define MT7932_CAL_MAGIC			"MT7932C1"
++#define MT7932_CAL_MAX_FILE_SIZE		SZ_64K
++#define MT7932_CAL_MAX_RECORDS		128
++#define MT7932_CAL_MAX_PAYLOAD		1536
++#define MT7932_CAL_EXT_FRAGMENT		3
++#define MT7932_CAL_EXT_MAX_DATA		SZ_1K
++#define MT7932_CAL_PROFILE_SELECTOR	9 /* Selector semantics unresolved. */
++
++struct mt7932_cal_file_header {
++	u8 magic[8];
++	u8 mac[ETH_ALEN];
++	u8 reserved[2];
++	__le32 count;
++} __packed;
++
++struct mt7932_cal_file_record {
++	u8 cid;
++	u8 ext_cid;
++	u8 set_query;
++	u8 wait_response;
++	__le32 len;
++	u8 data[];
++} __packed;
++
++struct mt7932_cal_ext_fragment {
++	u8 type;
++	u8 reserved;
++	__le16 len;
++	u8 data[];
++} __packed;
++
++struct mt7932_cal_profile_query {
++	u8 unknown_0[3];
++	u8 selector;
++	u8 unknown_4[16];
++} __packed;
++
++struct mt7932_cal_profile_reply {
++	u8 unknown_0[12];
++	u8 cid;
++	u8 unknown_13[7];
++} __packed;
++
++/* Bits/values here belong to MT7932's password-offload ABI, not nl80211
++ * suite selectors or gen4m's separate authentication-mode enum.
++ */
++#define MT7932_SME_AUTH_SAE		BIT(10)
++#define MT7932_SME_CIPHER_CCMP		BIT(4)
++#define MT7932_SME_CONNECT_FLAGS		BIT(16)
++#define MT7932_SME_PASSWORD_FORMAT	10
++#define MT7932_SME_PMF_REQUIRED		2
++#define MT7932_SME_NATIVE_AUTH_POLICY	(BIT(30) | BIT(2))
++/* Units and individual semantics of these observed native policies unknown. */
++#define MT7932_SME_NATIVE_DEADLINE	120
++#define MT7932_SME_NATIVE_OPERATION	8
++#define MT7932_SME_NATIVE_COMPATIBILITY	20
++#define MT7932_SME_NATIVE_PROFILE		0x00020407
++#define MT7932_DISCONNECT_POLICY		8
++#define MT7932_DISCONNECT_PEER_TAG	1
++#define MT7932_DISCONNECT_TRAILER		30
++#define MT7932_POWER_MAX_CHANNELS		8
++#define MT7932_POWER_RATE_ENTRIES		121
++#define MT7932_POWER_WIRE_VERSION		3
++#define MT7932_POWER_WIRE_FORMAT		0x0a /* Individual format bits unknown. */
++/* Existing conservative 10 dBm bring-up ceiling; firmware units are 0.5 dBm. */
++#define MT7932_POWER_CEILING_HALF_DBM	20
++
++struct mt7932_power_channel {
++	u8 channel;
++	s8 rate_limit[MT7932_POWER_RATE_ENTRIES];
++} __packed;
++
++struct mt7932_basic_config {
++	u8 native_80211;
++	u8 assert_path;
++	u8 debug_level;
++	u8 unknown_3;
++	__le16 rx_checksum;
++	__le16 tx_checksum;
++	u8 segmentation;
++	u8 reserved[3];
++	u8 unknown_extension[12];
++} __packed;
++
++/* MT7932 extends the legacy 12-byte config. Preserve the observed extension
++ * while its individual controls remain unresolved. One shared initializer
++ * keeps raw-802.11 startup and Ethernet-offload startup in sync.
++ */
++#define MT7932_BASIC_CONFIG_INITIALIZER(_native) { \
++	.native_80211 = (_native), \
++	.unknown_3 = 3, \
++	.unknown_extension = { 1, 0, 2, 3, 0, 0x20, 0, 0, 2 }, \
++}
++
++/* Privacy bitmap: ordinary IE IDs occupy 256 bits, followed by 64 extension
++ * IDs. The inclusive final-byte index is 39; extension 58 is in that byte.
++ */
++#define MT7932_PRIVACY_ORDINARY_BYTES	(U8_MAX / BITS_PER_BYTE + 1)
++#define MT7932_PRIVACY_EXTENSION_BYTES	8
++struct mt7932_probe_privacy {
++	u8 subcommand;
++	u8 unknown_1[3];
++	u8 last_bitmap_byte;
++	u8 unknown_policy0;
++	u8 unknown_policy1;
++	u8 bitmap[MT7932_PRIVACY_ORDINARY_BYTES + MT7932_PRIVACY_EXTENSION_BYTES];
++	u8 reserved_tail[13];
++} __packed;
++
++/* The native activation command's last byte is 1, although an older public
++ * gen4m structure calls it reserved. Do not infer a new meaning from that.
++ */
++struct mt7932_activate_bss {
++	u8 bss_idx;
++	u8 active;
++	u8 network_type;
++	u8 omac_idx;
++	u8 mac[ETH_ALEN];
++	u8 bmc_wcid;
++	u8 unknown_11;
++} __packed;
++
++struct mt7932_ais_mac {
++	u8 bss_idx;
++	u8 reserved;
++	u8 mac[ETH_ALEN];
++} __packed;
++
++/* Legacy RLM layout, corroborated against gen4m CMD_SET_BSS_RLM_PARAM. */
++struct mt7932_rlm {
++	u8 bss_idx;
++	u8 band;
++	u8 primary_channel;
++	u8 secondary_channel_offset;
++	u8 erp_protection;
++	u8 ht_protection;
++	u8 greenfield_operation;
++	u8 tx_rifs;
++	__le16 ht_operation3;
++	__le16 ht_operation2;
++	u8 ht_operation1;
++	u8 short_preamble;
++	u8 short_slot_time;
++	u8 vht_width;
++	u8 center_channel1;
++	u8 center_channel2;
++	__le16 vht_basic_mcs;
++	u8 tx_nss;
++	u8 rx_nss;
++} __packed;
++
++/* The prefix through ext_channels matches mt76_connac_hw_scan_req, then
++ * MT7932 inserts two
++ * bytes before ext_ssids; named tail fields prevent accidental use of the
++ * generic bssid/random_mac offsets on this wire format.
++ */
++struct mt7932_scan_request {
++	u8 common[offsetof(struct mt76_connac_hw_scan_req, ext_ssids)];
++	u8 unknown_before_ext_ssids[2];
++	struct mt76_connac_mcu_scan_ssid ext_ssids[6];
++	u8 bssid[ETH_ALEN];
++	u8 random_mac[ETH_ALEN];
++	u8 unknown_tail[112];
++} __packed;
++
++enum mt7932_event {
++	MT7932_EVENT_PRECAL_REQUEST = 0xd7,
++	MT7932_EVENT_PRECAL_DONE = 0xd9,
++	MT7932_EVENT_MLME = 0xea,
++	MT7932_EVENT_MLME_ALT = 0xee,
++	MT7932_EVENT_COMMAND_RESULT = 0xfd,
++};
++
++#define MT7932_BOOT_PACKET_TYPE		0xe000
++#define MT7932_ROM_PACKET_TYPE		7
++#define MT7932_RUNTIME_PACKET_TYPE	0x3800
++#define MT7932_BOOT_SUCCESS		1
++/* ROM has no four-byte extended event tail. */
++#define MT7932_BOOT_HEADER_SIZE		offsetof(struct mt76_connac2_mcu_rxd, ext_eid)
++
++struct mt7932_command_result {
++	u8 cid;
++	u8 status;
++	u8 reserved[2];
++} __packed;
++
++struct mt7932_register_result {
++	__le32 address;
++	__le32 value;
++} __packed;
++
++/* Input header produced by mt76_connac_mcu_set_channel_domain. */
++struct mt7932_channel_domain_input {
++	u8 alpha2[4];
++	u8 bw_2g;
++	u8 bw_5g;
++	u8 bw_6g;
++	u8 reserved;
++	u8 n_2ch;
++	u8 n_5ch;
++	u8 n_6ch;
++	u8 reserved2;
++} __packed;
++
++/* Native variant of that header. Preserve observed policy fields without
++ * interpreting them as the generic header's bandwidth bytes.
++ */
++struct mt7932_channel_domain {
++	u8 alpha2[4];
++	__le16 unknown_policy4;
++	u8 unknown_policy6;
++	u8 flags;
++	u8 n_2ch;
++	u8 n_5ch;
++	u8 n_6ch;
++	u8 unknown_fcc_policy;
++} __packed;
++
++struct mt7932_domain_channel {
++	__le16 number;
++	__le16 reserved;
++	__le32 flags;
++} __packed;
++
++#define MT7932_DOMAIN_HAS_DFS_REGION	BIT(0)
++#define MT7932_DOMAIN_HAS_6GHZ		BIT(3)
++#define MT7932_DOMAIN_DFS_REGION		GENMASK(7, 4)
++#define MT7932_CHANNEL_PASSIVE		BIT(8)
++#define MT7932_CHANNEL_DFS		BIT(3)
++
++enum mt7932_mlme_event_type {
++	MT7932_MLME_ASSOCIATED = 0x40,
++	MT7932_MLME_AUTHORIZED = 0x41,
++	MT7932_MLME_DISCONNECTED = 0x44,
++	MT7932_MLME_CONNECTING = 0x4d,
++};
++
++struct mt7932_mlme_event {
++	__le32 unknown_0; /* Only the observed zero-valued envelope is handled. */
++	__le32 type;
++	__le32 len;
++	u8 data[];
++} __packed;
++
++struct mt7932_mlme_connecting {
++	u8 unknown_0[4];
++	u8 bssid[ETH_ALEN];
++	u8 center_channel;
++	u8 unknown_11;
++	u8 band;
++	u8 unknown_13[11];
++} __packed;
++
++struct mt7932_mlme_associated {
++	__le32 status;
++	u8 unknown_4;
++	u8 bssid[ETH_ALEN];
++	u8 unknown_11[10];
++	u8 peer_wcid;
++} __packed;
++
++struct mt7932_mlme_authorized {
++	__le32 status;
++	u8 bssid[ETH_ALEN];
++	u8 unknown_10[10];
++} __packed;
++
++static_assert(sizeof(struct mt7932_activate_bss) == 12);
++static_assert(sizeof(struct mt7932_basic_config) == 24);
++static_assert(sizeof(struct mt7932_power_channel) == 122);
++static_assert(sizeof(struct mt7932_probe_privacy) == 60);
++static_assert(offsetof(struct mt7932_probe_privacy, bitmap) == 7);
++static_assert(offsetof(struct mt7932_basic_config, unknown_extension) == 12);
++static_assert(sizeof(struct mt7932_ais_mac) == 8);
++static_assert(sizeof(struct mt7932_rlm) == 22);
++static_assert(offsetof(struct mt7932_rlm, short_slot_time) == 14);
++static_assert(sizeof(struct mt7932_scan_request) == 1236);
++static_assert(offsetof(struct mt7932_scan_request, ext_ssids) == 0x380);
++static_assert(offsetof(struct mt7932_scan_request, bssid) == 0x458);
++static_assert(offsetof(struct mt7932_scan_request, random_mac) == 0x45e);
++static_assert(sizeof(struct mt7932_mlme_event) == 12);
++static_assert(sizeof(struct mt7932_mlme_connecting) == 24);
++static_assert(offsetof(struct mt7932_mlme_connecting, band) == 12);
++static_assert(sizeof(struct mt7932_mlme_associated) == 22);
++static_assert(offsetof(struct mt7932_mlme_associated, peer_wcid) == 21);
++static_assert(sizeof(struct mt7932_mlme_authorized) == 20);
++static_assert(MT7932_BOOT_HEADER_SIZE == 32);
++static_assert(sizeof(struct mt76_connac2_mcu_rxd) == 36);
++static_assert(offsetof(struct mt76_connac2_mcu_rxd, eid) == 28);
++static_assert(sizeof(struct mt7932_command_result) == 4);
++static_assert(sizeof(struct mt7932_register_result) == 8);
++static_assert(sizeof(struct mt7932_channel_domain_input) == 12);
++static_assert(sizeof(struct mt7932_channel_domain) == 12);
++static_assert(sizeof(struct mt7932_domain_channel) == 8);
++static_assert(sizeof(struct mt7932_cal_file_header) == 20);
++static_assert(sizeof(struct mt7932_cal_file_record) == 8);
++static_assert(sizeof(struct mt7932_cal_ext_fragment) == 4);
++static_assert(sizeof(struct mt7932_cal_profile_query) == 20);
++static_assert(sizeof(struct mt7932_cal_profile_reply) == 20);
++static_assert(offsetof(struct mt7932_cal_profile_reply, cid) == 12);
++
++#endif
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_offload.c b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_offload.c
+new file mode 100644
+index 0000000000000..a702e11267905
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_offload.c
+@@ -0,0 +1,408 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT7932 firmware MLME and opaque, board-specific calibration cache. */
++#include <linux/firmware.h>
++#include <linux/etherdevice.h>
++#include <linux/unaligned.h>
++#include "mt7921.h"
++#include "mt7932_offload.h"
++#include "mt7932_mcu.h"
++
++/* Observed ABI offsets. Padding and the unclassified security buffer remain zero. */
++struct mt7932_connect_command {
++	__le32 auth_suite, pairwise_cipher, operation_deadline;
++	__le32 reserved0, flags, operation;
++	__le32 ssid_len;
++	u8 ssid[IEEE80211_MAX_SSID_LEN];
++	__le32 reserved1, password_len, password_format, reserved2;
++	u8 password[64];
++	u8 reserved3[308];
++	__le32 pmf;
++	__le32 reserved4, security_buffer_len;
++	u8 security_buffer[32], reserved4b[32];
++	__le32 allowed_auth;
++	u8 reserved5[24];
++	__le32 compatibility_policy;
++	u8 reserved5b[252];
++	__le32 candidate_flags;
++	u8 bssid[ETH_ALEN], reserved6[6];
++	u8 band, channel, reserved7[2];
++	u8 candidate_policy[8];
++	__le32 reserved8;
++	u8 candidate_tail_policy[4];
++	u8 reserved9[8];
++	__le32 candidates;
++} __packed;
++
++static_assert(sizeof(struct mt7932_connect_command) == 856);
++static_assert(sizeof(struct mt7932_connect_params) == 106);
++static_assert(offsetof(struct mt7932_connect_command, ssid_len) == 24);
++static_assert(offsetof(struct mt7932_connect_command, ssid) == 28);
++static_assert(offsetof(struct mt7932_connect_command, password_len) == 64);
++static_assert(offsetof(struct mt7932_connect_command, password) == 76);
++static_assert(offsetof(struct mt7932_connect_command, pmf) == 448);
++static_assert(offsetof(struct mt7932_connect_command, security_buffer_len) == 456);
++static_assert(offsetof(struct mt7932_connect_command, security_buffer) == 460);
++static_assert(offsetof(struct mt7932_connect_command, allowed_auth) == 524);
++static_assert(offsetof(struct mt7932_connect_command, bssid) == 812);
++static_assert(offsetof(struct mt7932_connect_command, band) == 824);
++static_assert(offsetof(struct mt7932_connect_command, candidates) == 852);
++
++int mt7932_offload_connect(struct mt792x_dev *dev,
++			   const struct mt7932_connect_params *p)
++{
++	struct mt7932_connect_command *cmd;
++	struct mt7932_ais_mac mac = {};
++	__le32 profile = cpu_to_le32(MT7932_SME_NATIVE_PROFILE);
++	struct mt7932_basic_config basic = MT7932_BASIC_CONFIG_INITIALIZER(0);
++	int ret;
++
++	if (!p->ssid_len || p->ssid_len > sizeof(p->ssid) ||
++	    !p->password_len || p->password_len > sizeof(p->password) ||
++	    !is_valid_ether_addr(p->bssid) || p->band < MT7932_BAND_2GHZ || p->band > MT7932_BAND_6GHZ ||
++	    !p->channel || (p->band == MT7932_BAND_2GHZ && p->channel > 14) ||
++	    (p->band == MT7932_BAND_6GHZ && (p->channel > 233 || (p->channel - 1) % 4)))
++		return -EINVAL;
++	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
++	if (!cmd)
++		return -ENOMEM;
++	/* SAE password offload, CCMP, mandatory PMF; no host-supplied PMK. */
++	cmd->auth_suite = cpu_to_le32(MT7932_SME_AUTH_SAE);
++	cmd->pairwise_cipher = cpu_to_le32(MT7932_SME_CIPHER_CCMP);
++	cmd->operation_deadline = cpu_to_le32(MT7932_SME_NATIVE_DEADLINE);
++	cmd->flags = cpu_to_le32(MT7932_SME_CONNECT_FLAGS);
++	cmd->operation = cpu_to_le32(MT7932_SME_NATIVE_OPERATION);
++	cmd->ssid_len = cpu_to_le32(p->ssid_len);
++	memcpy(cmd->ssid, p->ssid, p->ssid_len);
++	cmd->password_len = cpu_to_le32(p->password_len);
++	/* This field is 10 for the observed password encoding; it is not
++	 * gen4m's AUTH_MODE enum (SAE is 11 in that separate namespace).
++	 */
++	cmd->password_format = cpu_to_le32(MT7932_SME_PASSWORD_FORMAT);
++	memcpy(cmd->password, p->password, p->password_len);
++	cmd->pmf = cpu_to_le32(MT7932_SME_PMF_REQUIRED);
++	/* No cached security value for fresh SAE. Its role in the captured
++	 * request is unclassified. An absent buffer, zero buffer and newly
++	 * derived PSK are being checked independently of radio controls.
++	 */
++	/* Observed firmware authentication policy. Bit 2's meaning is pending
++	 * independent verification; this is not the public gen4m auth enum.
++	 */
++	cmd->allowed_auth = cpu_to_le32(MT7932_SME_NATIVE_AUTH_POLICY);
++	/* Compatibility fields under investigation. These contain public
++	 * policy/PHY information, not any network identity or secret. Keep
++	 * them explicit so individual fields can be tested independently.
++	 */
++	cmd->compatibility_policy = cpu_to_le32(MT7932_SME_NATIVE_COMPATIBILITY);
++	cmd->candidate_policy[0] = 1;
++	cmd->candidate_policy[1] = 2;
++	cmd->candidate_policy[2] = 4;
++	cmd->candidate_policy[4] = 6;
++	cmd->candidate_policy[5] = 7;
++	cmd->candidate_tail_policy[0] = 4;
++	cmd->candidate_tail_policy[1] = 16;
++	cmd->candidate_tail_policy[2] = 18;
++	cmd->candidate_tail_policy[3] = 20;
++	memcpy(cmd->bssid, p->bssid, ETH_ALEN);
++	cmd->band = p->band;
++	cmd->channel = p->channel;
++	cmd->candidates = cpu_to_le32(1);
++
++	mt792x_mutex_acquire(dev);
++	ret = mt7932_start(&dev->phy);
++	if (!ret)
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_BASIC_CONFIG,
++				       &basic, sizeof(basic), false);
++	if (!ret)
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SME_CONFIG,
++				       &profile, sizeof(profile), false);
++	ether_addr_copy(mac.mac, dev->mphy.macaddr);
++	if (!ret)
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_AIS_MAC,
++				       &mac, sizeof(mac), false);
++	if (!ret) {
++		mt7932_fullmac_connecting(dev, p->bssid);
++		ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SME_CONNECT, cmd, sizeof(*cmd), false);
++	}
++	mt792x_mutex_release(dev);
++	kfree_sensitive(cmd);
++	return ret;
++}
++
++/* EA/42 is emitted by the native CoreWLAN disassociate operation.
++ * Preserve the observed policy words until their individual semantics are
++ * established. Construct the peer field from the current connection.
++ */
++struct mt7932_disconnect_command {
++	__le32 policy;
++	__le32 reserved;
++	__le16 peer_tag;
++	__le16 peer_len;
++	struct_group(peer,
++		u8 bss_idx;
++		u8 bssid[ETH_ALEN];
++		u8 padding;
++	);
++	__le32 trailer;
++} __packed;
++
++static_assert(sizeof(struct mt7932_disconnect_command) == 24);
++static_assert(offsetof(struct mt7932_disconnect_command, bssid) == 13);
++
++int mt7932_offload_disconnect(struct mt792x_dev *dev, const u8 *bssid)
++{
++	struct mt7932_disconnect_command cmd = {
++		.policy = cpu_to_le32(MT7932_DISCONNECT_POLICY),
++		.peer_tag = cpu_to_le16(MT7932_DISCONNECT_PEER_TAG),
++		.peer_len = cpu_to_le16(sizeof(cmd.peer)),
++		.trailer = cpu_to_le32(MT7932_DISCONNECT_TRAILER),
++	};
++	int ret;
++
++	if (!is_valid_ether_addr(bssid))
++		return -EINVAL;
++	ether_addr_copy(cmd.bssid, bssid);
++	mt792x_mutex_acquire(dev);
++	ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_SME_DISCONNECT,
++			       &cmd, sizeof(cmd), false);
++	mt792x_mutex_release(dev);
++	return ret;
++}
++
++/* On disk: MT7932P1, MAC[6], LE16 record count, LE32 total size, records.
++ * Each record is calibration metadata followed by opaque RF data. There are
++ * no MCU descriptors, sequence numbers, commands or connection credentials.
++ */
++#define MT7932_PRECAL_MAGIC "MT7932P1"
++#define MT7932_PRECAL_MAX_SIZE (400 * SZ_1K)
++#define MT7932_PRECAL_MAX_RECORDS 128
++#define MT7932_PRECAL_GROUP_CLASS 1
++#define MT7932_PRECAL_CHANNEL_CLASS 2
++#define MT7932_PRECAL_CHANNEL_INFO_CLASS 3
++#define MT7932_PRECAL_GROUP_BYTES 1080
++#define MT7932_PRECAL_CHANNEL_BYTES 604
++#define MT7932_PRECAL_CHANNEL_INFO_BYTES 16
++#define MT7932_PRECAL_GROUP_MASK GENMASK(15, 0)
++#define MT7932_PRECAL_PRELOAD_MASK GENMASK(31, 16)
++#define MT7932_PRECAL_FREQUENCY_MASK GENMASK(23, 0)
++/* Explicit coverage restriction, not a general band-to-calibration map. */
++#define MT7932_PRECAL_QUALIFIED_6GHZ_GROUP 28
++
++struct mt7932_precal_file_header {
++	u8 magic[8];
++	u8 mac[ETH_ALEN];
++	__le16 count;
++	__le32 size;
++} __packed;
++static_assert(sizeof(struct mt7932_precal_file_header) == 20);
++
++struct mt7932_precal_key {
++	__le32 selector;
++	__le32 frequency;
++	__le32 control;
++} __packed;
++
++struct mt7932_precal_request {
++	__le32 unknown_0;
++	struct mt7932_precal_key key;
++} __packed;
++static_assert(sizeof(struct mt7932_precal_request) == 16);
++
++struct mt7932_cal_record {
++	u8 class, operation;
++	__le16 id;
++	__le32 len;
++	union {
++		struct mt7932_precal_key key;
++		struct { __le32 selector, frequency, control; };
++	};
++	u8 data[];
++} __packed;
++static_assert(sizeof(struct mt7932_cal_record) == 20);
++
++struct mt7932_cal_cache {
++	unsigned int count;
++	u8 data[];
++};
++
++int mt7932_precal_load(struct mt792x_dev *dev, struct mt7932_cal_cache **out)
++{
++	struct mt7932_cal_cache *cache;
++	const struct mt7932_precal_file_header *header;
++	const struct firmware *fw;
++	char name[80];
++	size_t pos;
++	u16 count;
++	int i, ret;
++
++	*out = NULL;
++	snprintf(name, sizeof(name), "mediatek/mt7932/precal-%pm.bin", dev->mphy.macaddr);
++	ret = request_firmware(&fw, name, dev->mt76.dev);
++	if (ret)
++		return ret;
++	ret = -EINVAL;
++	header = (const void *)fw->data;
++	if (fw->size < sizeof(*header) || fw->size > MT7932_PRECAL_MAX_SIZE ||
++	    memcmp(header->magic, MT7932_PRECAL_MAGIC, sizeof(header->magic)) ||
++	    !ether_addr_equal(header->mac, dev->mphy.macaddr) ||
++	    le32_to_cpu(header->size) != fw->size)
++		goto out;
++	count = le16_to_cpu(header->count);
++	if (!count || count > MT7932_PRECAL_MAX_RECORDS)
++		goto out;
++	for (i = 0, pos = sizeof(*header); i < count; i++) {
++		const struct mt7932_cal_record *r;
++		u32 len;
++
++		if (fw->size - pos < sizeof(*r))
++			goto out;
++		r = (const void *)(fw->data + pos);
++		len = le32_to_cpu(r->len);
++		if (r->operation || r->class < MT7932_PRECAL_GROUP_CLASS ||
++		    r->class > MT7932_PRECAL_CHANNEL_INFO_CLASS ||
++		    len != (r->class == MT7932_PRECAL_GROUP_CLASS ? MT7932_PRECAL_GROUP_BYTES :
++			    r->class == MT7932_PRECAL_CHANNEL_CLASS ? MT7932_PRECAL_CHANNEL_BYTES :
++								    MT7932_PRECAL_CHANNEL_INFO_BYTES) ||
++		    len > fw->size - pos - sizeof(*r))
++			goto out;
++		pos += sizeof(*r) + len;
++	}
++	if (pos != fw->size)
++		goto out;
++	cache = devm_kzalloc(dev->mt76.dev,
++			     sizeof(*cache) + fw->size - sizeof(*header), GFP_KERNEL);
++	if (!cache) {
++		ret = -ENOMEM;
++		goto out;
++	}
++	cache->count = count;
++	memcpy(cache->data, fw->data + sizeof(*header), fw->size - sizeof(*header));
++	*out = cache;
++	dev_info(dev->mt76.dev, "MT7932 board precal cache loaded (%u records)\n", count);
++	ret = 0;
++out:
++	release_firmware(fw);
++	return ret;
++}
++
++static int mt7932_precal_send(struct mt792x_dev *dev,
++			    const struct mt7932_cal_record *r)
++{
++	struct mt7932_cal_record *req;
++	u32 len = le32_to_cpu(r->len);
++	int ret;
++
++	req = kzalloc(sizeof(*req) + len, GFP_KERNEL);
++	if (!req)
++		return -ENOMEM;
++	req->class = r->class;
++	req->id = r->id;
++	req->len = cpu_to_le32(len);
++	req->selector = r->selector;
++	req->frequency = r->frequency;
++	req->control = r->control;
++	memcpy(req->data, r->data, len);
++	/* Completion is an unsolicited D9, never a sequence-number reply. */
++	ret = mt76_mcu_send_msg(&dev->mt76, MT7932_CMD_PRECAL,
++			       req, sizeof(*req) + len, false);
++	kfree(req);
++	return ret;
++}
++
++int mt7932_precal_preload(struct mt792x_dev *dev, struct mt7932_cal_cache *cache,
++			   u8 band)
++{
++	const struct mt7932_cal_record *r;
++	size_t pos = 0;
++	int i, sent = 0, ret = 0;
++
++	if (!cache)
++		return -ENOENT;
++	mt792x_mutex_acquire(dev);
++	for (i = 0; i < cache->count; i++) {
++		u32 selector;
++
++		r = (const void *)(cache->data + pos);
++		pos += sizeof(*r) + le32_to_cpu(r->len);
++		selector = le32_to_cpu(r->selector);
++		if (band != MT7932_BAND_6GHZ || r->class != MT7932_PRECAL_GROUP_CLASS ||
++		    FIELD_GET(MT7932_PRECAL_GROUP_MASK, selector) !=
++		    MT7932_PRECAL_QUALIFIED_6GHZ_GROUP ||
++		    !(selector & MT7932_PRECAL_PRELOAD_MASK))
++			continue;
++		ret = mt7932_precal_send(dev, r);
++		if (ret)
++			break;
++		sent++;
++	}
++	mt792x_mutex_release(dev);
++	dev_info(dev->mt76.dev, "MT7932 group precal preload band=%u records=%d result=%d\n",
++		 band, sent, ret);
++	return ret ?: (sent ? 0 : -ENOENT);
++}
++
++int mt7932_precal_apply(struct mt792x_dev *dev, struct mt7932_cal_cache *cache,
++			 u8 band, u32 center_khz)
++{
++	const struct mt7932_cal_record *r;
++	size_t pos = 0;
++	int i, sent = 0, ret = 0;
++
++	if (!cache)
++		return -ENOENT;
++	mt792x_mutex_acquire(dev);
++	for (i = 0; i < cache->count; i++) {
++		u32 frequency, group;
++
++		r = (const void *)(cache->data + pos);
++		pos += sizeof(*r) + le32_to_cpu(r->len);
++		frequency = le32_to_cpu(r->frequency) & MT7932_PRECAL_FREQUENCY_MASK;
++		group = FIELD_GET(MT7932_PRECAL_GROUP_MASK, le32_to_cpu(r->selector));
++		/* Preload-marked group records were submitted before connect. */
++		if (r->class == MT7932_PRECAL_GROUP_CLASS &&
++		    (le32_to_cpu(r->selector) & MT7932_PRECAL_PRELOAD_MASK))
++			continue;
++		/* This bank covers the observed 6 GHz group 28 only. Never apply
++		 * another channel's DPD data to an unsupported frequency.
++		 */
++		if (band != MT7932_BAND_6GHZ ||
++		    (r->class == MT7932_PRECAL_GROUP_CLASS ?
++		     group != MT7932_PRECAL_QUALIFIED_6GHZ_GROUP : frequency != center_khz))
++			continue;
++		ret = mt7932_precal_send(dev, r);
++		if (ret)
++			break;
++		sent++;
++	}
++	mt792x_mutex_release(dev);
++	dev_info(dev->mt76.dev, "MT7932 precal apply band=%u center=%u kHz records=%d result=%d\n",
++		 band, center_khz, sent, ret);
++	return ret ?: (sent ? 0 : -ENOENT);
++}
++
++int mt7932_precal_request(struct mt792x_dev *dev, struct mt7932_cal_cache *cache,
++			   const u8 *request, size_t len)
++{
++	const struct mt7932_cal_record *r;
++	size_t pos = 0;
++	int i, ret = -ENOENT;
++
++	if (!cache || len < sizeof(struct mt7932_precal_request))
++		return -EINVAL;
++	/* The D7 key split is still undocumented. Match all three words
++	 * exactly, rather than guessing a frequency or returning a wrong block.
++	 */
++	mt792x_mutex_acquire(dev);
++	for (i = 0; i < cache->count; i++) {
++		r = (const void *)(cache->data + pos);
++		pos += sizeof(*r) + le32_to_cpu(r->len);
++		if (memcmp(&r->key,
++			   &((const struct mt7932_precal_request *)request)->key,
++			   sizeof(r->key)))
++			continue;
++		ret = mt7932_precal_send(dev, r);
++		if (ret)
++			break;
++	}
++	mt792x_mutex_release(dev);
++	return ret;
++}
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_offload.h b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_offload.h
+new file mode 100644
+index 0000000000000..da0514e223ace
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_offload.h
+@@ -0,0 +1,31 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MT7932_OFFLOAD_H
++#define __MT7932_OFFLOAD_H
++
++/* Host configuration, not the firmware's connection command. No cached keys. */
++struct mt7932_connect_params {
++	u8 ssid_len;
++	u8 password_len;
++	u8 band;
++	u8 channel;
++	u8 bssid[ETH_ALEN];
++	u8 ssid[IEEE80211_MAX_SSID_LEN];
++	u8 password[64];
++};
++
++struct mt7932_cal_cache;
++int mt7932_offload_disconnect(struct mt792x_dev *dev, const u8 *bssid);
++
++int mt7932_offload_connect(struct mt792x_dev *dev,
++			   const struct mt7932_connect_params *params);
++int mt7932_precal_load(struct mt792x_dev *dev, struct mt7932_cal_cache **out);
++int mt7932_precal_preload(struct mt792x_dev *dev, struct mt7932_cal_cache *cache,
++			   u8 band);
++int mt7932_precal_apply(struct mt792x_dev *dev, struct mt7932_cal_cache *cache,
++			 u8 band, u32 center_khz);
++int mt7932_precal_request(struct mt792x_dev *dev, struct mt7932_cal_cache *cache,
++			   const u8 *request, size_t len);
++void mt7932_fullmac_connecting(struct mt792x_dev *dev, const u8 *bssid);
++int mt7932_fullmac_preload(struct mt792x_dev *dev, u8 band);
++void mt7932_fullmac_reset(struct mt792x_dev *dev);
++#endif
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_regs.h b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_regs.h
+new file mode 100644
+index 0000000000000..b494690eb72d9
+--- /dev/null
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/mt7932_regs.h
+@@ -0,0 +1,48 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __MT7932_REGS_H
++#define __MT7932_REGS_H
++
++/* All offsets below are PCI BAR0 offsets, not SoC physical addresses. */
++#define MT7932_BAR_SIZE			SZ_1M
++#define MT7932_CHIP_ID			0x7932
++#define MT7932_HW_REV			0xb1000
++#define MT7932_HW_REV_MASK		GENMASK(7, 0)
++#define MT7932_REMAP_WINDOW_SIZE		SZ_64K
++#define MT7932_WF_REMAP_PHYS		0x70000000
++#define MT7932_WF_REMAP_BAR		0x70000
++#define MT7932_CONN_REMAP_PHYS		0x18050000
++#define MT7932_CONN_REMAP_ALIAS		0x7c050000
++#define MT7932_CONN_REMAP_BAR		0x90000
++
++#define MT7932_PCIE_REMAP(_n)		(0xfe24c + 4 * (_n))
++#define MT7932_PCIE_REMAP_TARGET		GENMASK(31, 16)
++/* Low halves are observed remap controls, not decoded address bits. */
++#define MT7932_PCIE_REMAP_WF_CONTROL	0x1846
++#define MT7932_PCIE_REMAP_CONN_CONTROL	0x1848
++#define MT7932_PCIE_REMAP_BOOT		0x18451807
++#define MT7932_PCIE_REMAP_RUNTIME		0x1845184f
++#define MT7932_PCIE_REMAP_SETTLE_US	2
++
++#define MT7932_SECURE_READY		0x40060
++#define MT7932_SECURE_READY_BIT		BIT(0)
++#define MT7932_SECURE_COMPLETE		0x40260
++#define MT7932_SECURE_COMPLETE_BIT	BIT(0)
++
++/* Observed shared-buffer publication sequence. Detailed buffer ownership,
++ * enable-bit meanings and descriptor formats remain unresolved. Keep the
++ * native order; do not describe these as ordinary WFDMA rings.
++ */
++#define MT7932_HOST_DMA_CONTROL0		0x93c28
++#define MT7932_HOST_DMA_CONTROL0_INIT	BIT(0)
++#define MT7932_HOST_DMA_CONTROL1		0x93a38
++#define MT7932_HOST_DMA_CONTROL1_INIT	BIT(1)
++#define MT7932_HOST_DMA_ADDR0		0x93a3c
++#define MT7932_HOST_DMA_ADDR1		0x93a30
++#define MT7932_HOST_DMA_ADDR2		0x93a54
++
++/* PCI configuration space, unlike the BAR0 offsets above. */
++#define MT7932_PCIE_FW_STATE		0x48c
++#define MT7932_PCIE_FW_STATE_MASK		GENMASK(19, 16)
++#define MT7932_PCIE_FW_STATE_READY	2
++
++#endif
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/pci.c b/drivers/net/wireless/mediatek/mt76/mt7921/pci.c
+index 56a914aaa81ea..6de8d486eab0f 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/pci.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/pci.c
+@@ -9,12 +9,15 @@
+ #include <linux/of.h>
+ 
+ #include "mt7921.h"
++#include "mt7932_regs.h"
+ #include "../mt76_connac2_mac.h"
+ #include "../dma.h"
+ #include "mcu.h"
+ #include "regd.h"
+ 
+ static const struct pci_device_id mt7921_pci_device_table[] = {
++	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, MT7932_CHIP_ID),
++		.driver_data = (kernel_ulong_t)MT7932_FIRMWARE_WM },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7961),
+ 		.driver_data = (kernel_ulong_t)MT7921_FIRMWARE_WM },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7922),
+@@ -51,12 +54,22 @@ static void mt7921e_unregister_device(struct mt792x_dev *dev)
+ 		wiphy_rfkill_stop_polling(hw->wiphy);
+ 
+ 	cancel_work_sync(&dev->init_work);
++	if (is_mt7932(&dev->mt76)) {
++		/* Stop accepting recovery requests before quiescing NAPI/DMA. */
++		dev->hw_init_done = false;
++		mt7932_fullmac_quiesce(dev);
++		cancel_work_sync(&dev->reset_work);
++	}
+ 	mt76_unregister_device(&dev->mt76);
+ 	mt76_for_each_q_rx(&dev->mt76, i)
+ 		napi_disable(&dev->mt76.napi[i]);
+ 	cancel_delayed_work_sync(&pm->ps_work);
+ 	cancel_work_sync(&pm->wake_work);
+ 	cancel_work_sync(&dev->reset_work);
++	if (is_mt7932(&dev->mt76)) {
++		mt792x_dma_disable(dev, true);
++		mt7932_fullmac_remove(dev);
++	}
+ 
+ 	mt76_connac2_tx_token_put(&dev->mt76);
+ 	__mt792x_mcu_drv_pmctrl(dev);
+@@ -117,8 +130,19 @@ static u32 __mt7921_reg_addr(struct mt792x_dev *dev, u32 addr)
+ 	};
+ 	int i;
+ 
+-	if (addr < 0x100000)
++	if (addr < SZ_1M)
+ 		return addr;
++	if (is_mt7932(&dev->mt76)) {
++		if (addr >= MT7932_WF_REMAP_PHYS &&
++		    addr - MT7932_WF_REMAP_PHYS < MT7932_REMAP_WINDOW_SIZE)
++			return MT7932_WF_REMAP_BAR + addr - MT7932_WF_REMAP_PHYS;
++		if (addr >= MT7932_CONN_REMAP_PHYS &&
++		    addr - MT7932_CONN_REMAP_PHYS < MT7932_REMAP_WINDOW_SIZE)
++			return MT7932_CONN_REMAP_BAR + addr - MT7932_CONN_REMAP_PHYS;
++		if (addr >= MT7932_CONN_REMAP_ALIAS &&
++		    addr - MT7932_CONN_REMAP_ALIAS < MT7932_REMAP_WINDOW_SIZE)
++			return MT7932_CONN_REMAP_BAR + addr - MT7932_CONN_REMAP_ALIAS;
++	}
+ 
+ 	for (i = 0; i < ARRAY_SIZE(fixed_map); i++) {
+ 		u32 ofs;
+@@ -176,10 +200,10 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
+ 		.mcu_rxdone_ring_size  = MT7921_RX_MCU_RING_SIZE,
+ 		.has_mcu_wa            = true,
+ 	};
+-	bool is_mt7902;
++	bool mt7902_variant;
+ 	int ret;
+ 
+-	is_mt7902 = mt7921_l1_rr(dev, MT_HW_CHIPID) == 0x7902;
++	mt7902_variant = is_mt7902(&dev->mt76);
+ 
+ 	/*
+ 	 * MT7902 special case:
+@@ -187,7 +211,7 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
+ 	 *   - RX Ring0 is larger and shared for event/TX-done
+ 	 *   - MT7902 does not use the MCU_WA ring
+ 	 */
+-	if (is_mt7902) {
++	if (mt7902_variant) {
+ 		layout.mcu_wm_txq           = MT7902_TXQ_MCU_WM;
+ 		layout.mcu_rxdone_ring_size = MT7902_RX_MCU_RING_SIZE;
+ 		layout.has_mcu_wa           = false;
+@@ -223,8 +247,9 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
+ 	/* event from WM before firmware download */
+ 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU],
+ 			       MT7921_RXQ_MCU_WM,
+-			       layout.mcu_rxdone_ring_size,
+-			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
++			       is_mt7932(&dev->mt76) ? 32 : layout.mcu_rxdone_ring_size,
++			       is_mt7932(&dev->mt76) ? 2352 : MT_RX_BUF_SIZE,
++			       MT_RX_EVENT_RING_BASE);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -232,16 +257,41 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
+ 		/* Change mcu queue after firmware download */
+ 		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
+ 				       MT7921_RXQ_MCU_WM,
+-				       MT7921_RX_MCU_WA_RING_SIZE,
+-				       MT_RX_BUF_SIZE, MT_WFDMA0(0x540));
++				       is_mt7932(&dev->mt76) ? 32 : MT7921_RX_MCU_WA_RING_SIZE,
++				       is_mt7932(&dev->mt76) ? 2352 : MT_RX_BUF_SIZE,
++				       MT_WFDMA0(0x540));
+ 		if (ret)
+ 			return ret;
+ 	}
+ 
+ 	/* rx data */
++	if (is_mt7932(&dev->mt76)) {
++		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MAIN_WA],
++				       3, 32, 2352, MT_RX_EVENT_RING_BASE);
++		if (ret)
++			return ret;
++		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND1_WA],
++				       8, 64, 2352, MT_RX_EVENT_RING_BASE);
++		if (ret)
++			return ret;
++		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND1],
++				       7, 512, 2352, MT_RX_EVENT_RING_BASE);
++		if (ret)
++			return ret;
++		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND2],
++				       5, 224, 2352, MT_RX_EVENT_RING_BASE);
++		if (ret)
++			return ret;
++		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_BAND2_WA],
++				       6, 128, 2352, MT_RX_EVENT_RING_BASE);
++		if (ret)
++			return ret;
++	}
+ 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MAIN],
+-			       MT7921_RXQ_BAND0, MT7921_RX_RING_SIZE,
+-			       MT_RX_BUF_SIZE, MT_RX_DATA_RING_BASE);
++			       MT7921_RXQ_BAND0,
++			       is_mt7932(&dev->mt76) ? 512 : MT7921_RX_RING_SIZE,
++			       is_mt7932(&dev->mt76) ? 2352 : MT_RX_BUF_SIZE,
++			       MT_RX_DATA_RING_BASE);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -399,19 +449,50 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
+ 	if (!mt7921_disable_aspm && mt76_pci_aspm_supported(pdev))
+ 		dev->aspm_supported = true;
+ 
+-	ret = mt792xe_mcu_fw_pmctrl(dev);
+-	if (ret)
+-		goto err_free_dev;
+-
+-	ret = __mt792xe_mcu_drv_pmctrl(dev);
+-	if (ret)
+-		goto err_free_dev;
++	/* MT7932's ROM must not be handed to firmware ownership before a
++	 * warm probe. Teardown/recovery leaves it in ROM; only WFSYS reset
++	 * followed by driver-own is valid there. The reset below performs
++	 * that handoff, matching the qualified native warm-reset sequence.
++	 * Keep the existing firmware-own/driver-own pair for other chips.
++	 */
++	if (id->device != MT7932_CHIP_ID) {
++		ret = mt792xe_mcu_fw_pmctrl(dev);
++		if (ret)
++			goto err_free_dev;
++		ret = __mt792xe_mcu_drv_pmctrl(dev);
++		if (ret)
++			goto err_free_dev;
++	}
++	if (id->device == MT7932_CHIP_ID) {
++		mdev->rev = (MT7932_CHIP_ID << 16) |
++			     FIELD_GET(MT7932_HW_REV_MASK, mt76_rr(dev, MT7932_HW_REV));
++		mt76_wr(dev, MT7932_PCIE_REMAP(1),
++			FIELD_PREP(MT7932_PCIE_REMAP_TARGET,
++				   MT7932_WF_REMAP_PHYS >> 16) |
++			MT7932_PCIE_REMAP_WF_CONTROL);
++		udelay(MT7932_PCIE_REMAP_SETTLE_US);
++		mt76_wr(dev, MT7932_PCIE_REMAP(2),
++			FIELD_PREP(MT7932_PCIE_REMAP_TARGET,
++				   MT7932_CONN_REMAP_PHYS >> 16) |
++			MT7932_PCIE_REMAP_CONN_CONTROL);
++		udelay(MT7932_PCIE_REMAP_SETTLE_US);
++		if (FIELD_GET(MT7932_PCIE_REMAP_TARGET,
++			      mt76_rr(dev, MT7932_PCIE_REMAP(1))) !=
++		    MT7932_WF_REMAP_PHYS >> 16 ||
++		    FIELD_GET(MT7932_PCIE_REMAP_TARGET,
++			      mt76_rr(dev, MT7932_PCIE_REMAP(2))) !=
++		    MT7932_CONN_REMAP_PHYS >> 16) {
++			ret = -EIO;
++			goto err_free_dev;
++		}
++	} else {
+ 
+ 	chipid = mt7921_l1_rr(dev, MT_HW_CHIPID);
+ 	if (chipid == 0x7961 && (mt7921_l1_rr(dev, MT_HW_BOUND) & BIT(7)))
+ 		chipid = 0x7920;
+ 	mdev->rev = (chipid << 16) |
+ 		    (mt7921_l1_rr(dev, MT_HW_REV) & 0xff);
++	}
+ 	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
+ 
+ 	ret = mt792x_wfsys_reset(dev);
+@@ -420,7 +501,7 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
+ 
+ 	mt76_wr(dev, irq_map.host_irq_enable, 0);
+ 
+-	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, 0xff);
++	mt76_wr(dev, MT_PCIE_MAC_INT_ENABLE, is_mt7932(mdev) ? 0x1ff : 0xff);
+ 
+ 	ret = devm_request_irq(mdev->dev, pdev->irq, mt792x_irq_handler,
+ 			       IRQF_SHARED, KBUILD_MODNAME, dev);
+@@ -435,6 +516,10 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
+ 	if (ret)
+ 		goto err_free_irq;
+ 
++	/* Finish shared-radio bootstrap before the Bluetooth function probes. */
++	if (is_mt7932(mdev))
++		flush_work(&dev->init_work);
++
+ 	if (of_property_read_bool(dev->mt76.dev->of_node, "wakeup-source"))
+ 		device_init_wakeup(dev->mt76.dev, true);
+ 
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/pci_mac.c b/drivers/net/wireless/mediatek/mt76/mt7921/pci_mac.c
+index 98b3469ac5976..9215ecdbbf5d8 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/pci_mac.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/pci_mac.c
+@@ -23,6 +23,10 @@ int mt7921e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
+ 
+ 	if (!wcid)
+ 		wcid = &dev->mt76.global_wcid;
++	if (is_mt7932(mdev) && !key &&
++	    !(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP) &&
++	    ieee80211_is_mgmt(((struct ieee80211_hdr *)tx_info->skb->data)->frame_control))
++		wcid = &dev->mt76.global_wcid;
+ 
+ 	t = (struct mt76_txwi_cache *)(txwi + mdev->drv->txwi_size);
+ 	t->skb = tx_info->skb;
+@@ -40,9 +44,17 @@ int mt7921e_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
+ 		}
+ 	}
+ 
+-	pid = mt76_tx_status_skb_add(mdev, wcid, tx_info->skb);
+-	mt76_connac2_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, key,
+-				    pid, qid, 0);
++	if (is_mt7932(mdev) && mt7932_fullmac_is_tx(dev, tx_info->skb)) {
++		pid = 0;
++		mt7932_fullmac_txwi(dev, txwi_ptr, tx_info->skb);
++	} else {
++		pid = mt76_tx_status_skb_add(mdev, wcid, tx_info->skb);
++		mt76_connac2_mac_write_txwi(mdev, txwi_ptr, tx_info->skb, wcid, key,
++					    pid, qid, 0);
++	}
++	if (is_mt7932(mdev))
++		dev_info_ratelimited(mdev->dev, "MT7932 TX queue=%u wcid=%u pid=%u token=%u txd=%*ph\n",
++			qid, wcid->idx, pid, id, MT_TXD_SIZE, txwi_ptr);
+ 
+ 	txp = (struct mt76_connac_hw_txp *)(txwi + MT_TXD_SIZE);
+ 	memset(txp, 0, sizeof(struct mt76_connac_hw_txp));
+@@ -68,14 +80,17 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
+ 	wake_up(&dev->mt76.mcu.wait);
+ 	skb_queue_purge(&dev->mt76.mcu.res_q);
+ 
+-	mt76_txq_schedule_all(&dev->mphy);
+-
+-	mt76_worker_disable(&dev->mt76.tx_worker);
++	if (!is_mt7932(&dev->mt76)) {
++		mt76_txq_schedule_all(&dev->mphy);
++		mt76_worker_disable(&dev->mt76.tx_worker);
++	}
+ 	mt76_for_each_q_rx(&dev->mt76, i) {
+ 		napi_disable(&dev->mt76.napi[i]);
+ 	}
+ 	napi_disable(&dev->mt76.tx_napi);
+ 
++	if (is_mt7932(&dev->mt76))
++		mt7932_fullmac_tx_purge(dev);
+ 	mt76_connac2_tx_token_put(&dev->mt76);
+ 	idr_init(&dev->mt76.token);
+ 
+@@ -117,6 +132,8 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
+ 		goto out;
+ 
+ 	err = __mt7921_start(&dev->phy);
++	if (!err && is_mt7932(&dev->mt76))
++		err = mt7932_fullmac_reinit(dev);
+ out:
+ 
+ 	napi_enable(&dev->mt76.tx_napi);
+@@ -124,7 +141,8 @@ int mt7921e_mac_reset(struct mt792x_dev *dev)
+ 	napi_schedule(&dev->mt76.tx_napi);
+ 	local_bh_enable();
+ 
+-	mt76_worker_enable(&dev->mt76.tx_worker);
++	if (!is_mt7932(&dev->mt76))
++		mt76_worker_enable(&dev->mt76.tx_worker);
+ 
+ 	return err;
+ }
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/pci_mcu.c b/drivers/net/wireless/mediatek/mt76/mt7921/pci_mcu.c
+index 8439c849a7a66..53174f50dc1cc 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/pci_mcu.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/pci_mcu.c
+@@ -25,6 +25,8 @@ mt7921_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
+ 	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
+ 	enum mt76_mcuq_id txq = MT_MCUQ_WM;
+ 	int ret;
++	if (is_mt7932(mdev))
++		return mt7932_mcu_send_message(mdev, skb, cmd, seq);
+ 
+ 	ret = mt76_connac2_mcu_fill_message(mdev, skb, cmd, seq);
+ 	if (ret)
+@@ -48,6 +50,8 @@ int mt7921e_mcu_init(struct mt792x_dev *dev)
+ 	int err;
+ 
+ 	dev->mt76.mcu_ops = &mt7921_mcu_ops;
++	if (is_mt7932(&dev->mt76))
++		return mt7921_run_firmware(dev);
+ 
+ 	err = mt7921e_driver_own(dev);
+ 	if (err)
+diff --git a/drivers/net/wireless/mediatek/mt76/mt7921/regd.c b/drivers/net/wireless/mediatek/mt76/mt7921/regd.c
+index fcdeb65cd8ef2..c01cadb270d69 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt7921/regd.c
++++ b/drivers/net/wireless/mediatek/mt76/mt7921/regd.c
+@@ -32,7 +32,8 @@ static void
+ mt7921_regd_channel_update(struct wiphy *wiphy, struct mt792x_dev *dev)
+ {
+ #define IS_UNII_INVALID(idx, sfreq, efreq) \
+-	(!(dev->phy.clc_chan_conf & BIT(idx)) && (cfreq) >= (sfreq) && (cfreq) <= (efreq))
++	(!is_mt7932(&dev->mt76) && !(dev->phy.clc_chan_conf & BIT(idx)) && \
++	 (cfreq) >= (sfreq) && (cfreq) <= (efreq))
+ 	struct ieee80211_supported_band *sband;
+ 	struct mt76_dev *mdev = &dev->mt76;
+ 	struct device_node *np, *band_np;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x.h b/drivers/net/wireless/mediatek/mt76/mt792x.h
+index 9efc251cb745f..57964c475c840 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt792x.h
++++ b/drivers/net/wireless/mediatek/mt76/mt792x.h
+@@ -47,6 +47,8 @@
+ #define MT7920_FIRMWARE_WM	"mediatek/WIFI_RAM_CODE_MT7961_1a.bin"
+ #define MT7921_FIRMWARE_WM	"mediatek/WIFI_RAM_CODE_MT7961_1.bin"
+ #define MT7922_FIRMWARE_WM	"mediatek/WIFI_RAM_CODE_MT7922_1.bin"
++#define MT7932_FIRMWARE_WM	"mediatek/W7932_2.bin"
++#define MT7932_ROM_PATCH		"mediatek/WIFI_MT7932_patch_mcu_1_2_hdr.bin"
+ #define MT7925_FIRMWARE_WM	"mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin"
+ #define MT7927_FIRMWARE_WM	"mediatek/mt7927/WIFI_RAM_CODE_MT6639_2_1.bin"
+ #define MT7928_FIRMWARE_WM	"mediatek/mt7928/WIFI_RAM_CODE_MT7935_1_1.bin"
+@@ -342,6 +344,7 @@ struct mt792x_dev {
+ 	struct ieee80211_vif *nan_vif;
+ 	const struct ieee80211_iface_combination *iface_combinations;
+ 	int n_iface_combinations;
++	struct mt7932_fullmac *fullmac;
+ };
+ 
+ static inline struct mt792x_bss_conf *
+@@ -534,6 +537,8 @@ void mt792x_config_mac_addr_list(struct mt792x_dev *dev);
+ 
+ static inline char *mt792x_ram_name(struct mt792x_dev *dev)
+ {
++	if (is_mt7932(&dev->mt76))
++		return MT7932_FIRMWARE_WM;
+ 	switch (mt76_chip(&dev->mt76)) {
+ 	case 0x7902:
+ 		return MT7902_FIRMWARE_WM;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x_core.c b/drivers/net/wireless/mediatek/mt76/mt792x_core.c
+index 0ad33f74c2285..8d9221a2a1bfb 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt792x_core.c
++++ b/drivers/net/wireless/mediatek/mt76/mt792x_core.c
+@@ -263,8 +263,17 @@ void mt792x_mac_link_bss_remove(struct mt792x_dev *dev,
+ 	link_conf = mt792x_vif_to_bss_conf(vif, mconf->link_id);
+ 
+ 	mt76_connac_free_pending_tx_skbs(&dev->pm, &mlink->wcid);
+-	mt76_connac_mcu_uni_add_dev(&dev->mphy, link_conf, &mconf->mt76,
+-				    &mlink->wcid, false);
++	if (is_mt7932(&dev->mt76)) {
++		u8 deactivate[12] = {
++			[0] = mconf->mt76.idx, [3] = mconf->mt76.omac_idx,
++			[10] = 0xff, [11] = 1,
++		};
++
++		mt76_mcu_send_msg(&dev->mt76, 0x11, deactivate, sizeof(deactivate), false);
++	} else {
++		mt76_connac_mcu_uni_add_dev(&dev->mphy, link_conf, &mconf->mt76,
++					    &mlink->wcid, false);
++	}
+ 
+ 	rcu_assign_pointer(dev->mt76.wcid[idx], NULL);
+ 
+@@ -851,6 +860,15 @@ int mt792x_init_wiphy(struct ieee80211_hw *hw)
+ 	if (dev->pm.enable)
+ 		ieee80211_hw_set(hw, CONNECTION_MONITOR);
+ 
++	if (is_mt7932(&dev->mt76)) {
++		wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
++		wiphy->iface_combinations = NULL;
++		wiphy->n_iface_combinations = 0;
++		__clear_bit(IEEE80211_HW_CONNECTION_MONITOR, hw->flags);
++		__clear_bit(IEEE80211_HW_SUPPORTS_PS, hw->flags);
++		__clear_bit(IEEE80211_HW_SUPPORTS_DYNAMIC_PS, hw->flags);
++		__clear_bit(IEEE80211_HW_WANT_MONITOR_VIF, hw->flags);
++	}
+ 	hw->max_tx_fragments = 4;
+ 
+ 	return 0;
+@@ -932,7 +950,11 @@ mt792x_get_mac80211_ops(struct device *dev,
+ 	if (!ops)
+ 		return NULL;
+ 
+-	*fw_features = mt792x_get_offload_capability(dev, drv_data);
++	/* MT7932 uses the legacy firmware trailer and channel-privilege ABI. */
++	if (!strcmp(drv_data, MT7932_FIRMWARE_WM))
++		*fw_features = MT792x_FW_CAP_CNM;
++	else
++		*fw_features = mt792x_get_offload_capability(dev, drv_data);
+ 
+ 	if (mt792x_needs_cnm_runtime(drv_data))
+ 		*fw_features |= MT792x_FW_CAP_CNM;
+@@ -957,10 +979,16 @@ int mt792x_init_wcid(struct mt792x_dev *dev)
+ {
+ 	int idx;
+ 
+-	/* Beacon and mgmt frames should occupy wcid 0 */
+-	idx = mt76_wcid_alloc(dev->mt76.wcid_mask, MT792x_WTBL_STA - 1);
+-	if (idx)
+-		return -ENOSPC;
++	if (is_mt7932(&dev->mt76)) {
++		/* The 49-entry legacy table reserves its last row for management. */
++		idx = 48;
++		dev->mt76.wcid_mask[idx / 32] |= BIT(idx % 32);
++		dev->mt76.wcid_mask[0] |= BIT(7);
++	} else {
++		idx = mt76_wcid_alloc(dev->mt76.wcid_mask, MT792x_WTBL_STA - 1);
++		if (idx)
++			return -ENOSPC;
++	}
+ 
+ 	dev->mt76.global_wcid.idx = idx;
+ 	dev->mt76.global_wcid.hw_key_idx = -1;
+diff --git a/drivers/net/wireless/mediatek/mt76/mt792x_dma.c b/drivers/net/wireless/mediatek/mt76/mt792x_dma.c
+index e74b95fdc7673..50903d1f73fac 100644
+--- a/drivers/net/wireless/mediatek/mt76/mt792x_dma.c
++++ b/drivers/net/wireless/mediatek/mt76/mt792x_dma.c
+@@ -40,6 +40,8 @@ void mt792x_irq_tasklet(unsigned long data)
+ 	trace_dev_irq(&dev->mt76, intr, dev->mt76.mmio.irqmask);
+ 
+ 	mask |= intr & irq_map->rx.all_complete_mask;
++	if (is_mt7932(&dev->mt76))
++		mask |= intr & (BIT(3) | BIT(19) | BIT(23) | BIT(25) | BIT(31));
+ 	if (intr & dev->irq_map->tx.mcu_complete_mask)
+ 		mask |= dev->irq_map->tx.mcu_complete_mask;
+ 
+@@ -68,6 +70,18 @@ void mt792x_irq_tasklet(unsigned long data)
+ 
+ 	if (intr & irq_map->rx.data_complete_mask)
+ 		napi_schedule(&dev->mt76.napi[MT_RXQ_MAIN]);
++	if (is_mt7932(&dev->mt76)) {
++		if (intr & BIT(3))
++			napi_schedule(&dev->mt76.napi[MT_RXQ_MAIN_WA]);
++		if (intr & BIT(31))
++			napi_schedule(&dev->mt76.napi[MT_RXQ_BAND1_WA]);
++		if (intr & BIT(25))
++			napi_schedule(&dev->mt76.napi[MT_RXQ_BAND1]);
++		if (intr & BIT(23))
++			napi_schedule(&dev->mt76.napi[MT_RXQ_BAND2]);
++		if (intr & BIT(19))
++			napi_schedule(&dev->mt76.napi[MT_RXQ_BAND2_WA]);
++	}
+ }
+ EXPORT_SYMBOL_GPL(mt792x_irq_tasklet);
+ 
+@@ -76,7 +90,17 @@ void mt792x_rx_poll_complete(struct mt76_dev *mdev, enum mt76_rxq_id q)
+ 	struct mt792x_dev *dev = container_of(mdev, struct mt792x_dev, mt76);
+ 	const struct mt792x_irq_map *irq_map = dev->irq_map;
+ 
+-	if (q == MT_RXQ_MAIN)
++	if (is_mt7932(mdev) && q == MT_RXQ_MAIN_WA)
++		mt76_connac_irq_enable(mdev, BIT(3));
++	else if (is_mt7932(mdev) && q == MT_RXQ_BAND1_WA)
++		mt76_connac_irq_enable(mdev, BIT(31));
++	else if (is_mt7932(mdev) && q == MT_RXQ_BAND1)
++		mt76_connac_irq_enable(mdev, BIT(25));
++	else if (is_mt7932(mdev) && q == MT_RXQ_BAND2)
++		mt76_connac_irq_enable(mdev, BIT(23));
++	else if (is_mt7932(mdev) && q == MT_RXQ_BAND2_WA)
++		mt76_connac_irq_enable(mdev, BIT(19));
++	else if (q == MT_RXQ_MAIN)
+ 		mt76_connac_irq_enable(mdev, irq_map->rx.data_complete_mask);
+ 	else if (q == MT_RXQ_MCU_WA)
+ 		mt76_connac_irq_enable(mdev, irq_map->rx.wm2_complete_mask);
+@@ -235,6 +259,26 @@ static void mt7928_wfdma_setup(struct mt792x_dev *dev)
+ 
+ static void mt792x_dma_prefetch(struct mt792x_dev *dev)
+ {
++	if (is_mt7932(&dev->mt76)) {
++		static const u8 rx_rings[] = { 0, 2, 3, 4, 5, 6, 7, 8 };
++		u32 base = 0;
++		int i;
++
++		mt76_clear(dev, MT_WFDMA0_GLO_CFG, BIT(15));
++		for (i = 0; i < ARRAY_SIZE(rx_rings); i++) {
++			u32 depth = rx_rings[i] == 2 ? 8 : 4;
++			mt76_wr(dev, 0xd4680 + 4 * rx_rings[i], PREFETCH(base, depth));
++			base += depth * 16;
++		}
++		for (i = 0; i <= 18; i++) {
++			u32 depth = i == 4 || i == 8 || i == 12 ? 12 : 4;
++			if (i == 15)
++				continue;
++			mt76_wr(dev, 0xd4600 + 4 * i, PREFETCH(base, depth));
++			base += depth * 16;
++		}
++		return;
++	}
+ 	if (is_mt7928(&dev->mt76)) {
+ 		mt7928_dma_prefetch_setup(dev);
+ 	} else if (is_mt7927(&dev->mt76)) {
+@@ -292,7 +336,11 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
+ 	/* configure delay interrupt */
+ 	mt76_wr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0, 0);
+ 
+-	if (is_mt7928(&dev->mt76)) {
++	if (is_mt7932(&dev->mt76)) {
++		mt76_wr(dev, MT_WFDMA0_GLO_CFG, 0x50209040);
++		mt76_wr(dev, 0xd4298, 0xc);
++		mt76_wr(dev, 0xd7038, 0x13);
++	} else if (is_mt7928(&dev->mt76)) {
+ 		mt76_wr(dev, MT_WFDMA0_GLO_CFG,
+ 			MT_WFDMA0_GLO_CFG_TX_WB_DDONE |
+ 			MT_WFDMA0_GLO_CFG_FIFO_LITTLE_ENDIAN |
+@@ -349,6 +397,9 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
+ 	mt76_set(dev, MT_WFDMA_DUMMY_CR, MT_WFDMA_NEED_REINIT);
+ 
+ 	/* enable interrupts for TX/RX rings */
++	if (is_mt7932(&dev->mt76))
++		mt76_connac_irq_enable(&dev->mt76,
++			BIT(3) | BIT(19) | BIT(23) | BIT(25) | BIT(31));
+ 	mt76_connac_irq_enable(&dev->mt76,
+ 			       dev->irq_map->tx.all_complete_mask |
+ 			       dev->irq_map->rx.all_complete_mask |
+@@ -603,6 +654,19 @@ static int mt7927_wfsys_reset(struct mt792x_dev *dev)
+ static int mt792x_wfsys_reset_default(struct mt792x_dev *dev)
+ {
+ 	u32 addr = is_connac2(&dev->mt76) ? 0x18000140 : 0x7c000140;
++	if (is_mt7932(&dev->mt76)) {
++		mt76_wr(dev, 0xfe24c, 0x18457000);
++		udelay(2);
++		mt76_wr(dev, 0x43020, 0);
++		usleep_range(1000, 1500);
++		mt76_wr(dev, 0x42600, 1);
++		msleep(50);
++		mt76_wr(dev, 0x42600, 0);
++		mt76_wr(dev, 0xfe24c, 0x1845184f);
++		if (!mt76_poll_msec(dev, 0xf0140, BIT(4), BIT(4), 300))
++			return -ETIMEDOUT;
++		return __mt792xe_mcu_drv_pmctrl(dev);
++	}
+ 
+ 	mt76_clear(dev, addr, WFSYS_SW_RST_B);
+ 	msleep(50);
+@@ -623,4 +687,3 @@ int mt792x_wfsys_reset(struct mt792x_dev *dev)
+ 	return mt792x_wfsys_reset_default(dev);
+ }
+ EXPORT_SYMBOL_GPL(mt792x_wfsys_reset);
+-

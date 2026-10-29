@@ -1,0 +1,783 @@
+Gravity Linux replacement/090-spi-hid, as merged in 06bf4d7f7562.
+
+diff --git a/drivers/hid/dockchannel-hid/README.m4max-bringup.md b/drivers/hid/dockchannel-hid/README.m4max-bringup.md
+new file mode 100644
+index 0000000000000..ed3cf465baa44
+--- /dev/null
++++ b/drivers/hid/dockchannel-hid/README.m4max-bringup.md
+@@ -0,0 +1,61 @@
++# M4 Max MTP qualification
++
++M4 Max J616c keyboard and trackpad now work with the shared M4 DockChannel
++HID transport. The DT uses the Max's resolved physical resources, rather than
++raw arm-io bus addresses: MTP at `0x514600000`, DART at `0x514800000`, and
++DockChannel IRQ registers at `0x514b14000`. The mailbox IRQ pairs are ordered
++as empty/not-empty, and SID aliases 1/2/3 share canonical translation SID 0.
++
++The transport comes from `niklassheth/linux`, `bits/090-spi-hid` at
++`91544d13c2c7154ed5dde9b8287a0351b979a4f5`. DART SID remapping comes from
++`bits/020-dart` at `f2fefc6b963f059979fff346f90cd2353afb818d`.
++The existing GPU RTKit extensions are retained. No separate Max HID protocol
++implementation was needed.
++
++The trackpad requires `apple/tpmtfw-j616c.bin`. The tested package was generated
++with Asahi's standard multitouch converter from the J616c restore component
++in macOS 26.6.2 build 25G83, after checking its BuildManifest SHA-384 digest.
++Personality `C1FD2,2` matches this board. The Linux firmware file SHA-256 is
++`7eb84312cb4ea74833ce9567ba8c92bc42a0c26c5c34d6bdfaa5cb65abfe4b26`.
++Firmware bytes are kept in the local test artifacts, outside this source tree.
++No Apple binary was disassembled.
++
++## Hardware results
++
++Linux boots all 16 CPUs and opens both real input devices. The operator's
++keyboard sweep produced 77 presses and 77 releases over 76 distinct keycodes,
++with balanced pairs. After adding trackpad firmware, the operator's test
++produced 314 touch reports, activity in slots 0 and 1, contact endings, three
++two-finger sequences and eight click/release pairs. Subsequent keyboard input
++also passes. There are no dropped-input notifications or kernel/DART faults.
++These tests qualify raw input; compositor gesture/scroll policy was not tested.
++Suspend/resume remains outside scope.
++
++Image SHA-256: `8f1fbf5dc66e0a99b93227b9141d3b8a265746ab153b06d6ca7cb525451812cb`.
++The configuration enables DART, DockChannel, RTKit helper, input evdev, Apple
++HID and magicmouse, including the Apple HID LED dependencies.
++
++## Test reproduction
++
++The userspace reader is `tests/mtp-input-watch.c`, built with:
++
++```sh
++aarch64-linux-gnu-gcc -static -Os -Wall -Wextra -Werror \
++  mtp-input-watch.c -o mtp-input-watch
++```
++
++Install it in an initramfs with the board trackpad firmware under
++`/lib/firmware/apple/tpmtfw-j616c.bin`. It reads MTP evdev devices and prints key,
++touch, click and dropped-event records. It does not grab input exclusively.
++
++Bootloader-checkout evidence is indexed by
++`references/m4max-mtp-evidence-20261028.json`. Complete images, initramfs,
++firmware provenance, input logs and monitor source are retained under
++`build/m4max-devices/mtp-boot-v1/`. The successful run is `boot-4`; the earlier
++keyboard-only test is `boot-3`. Earlier failed launches remain retained.
++
++The monitor initializes only the MTP DMA filter, reserves opaque MTP firmware
++segments and places the FDT after the Image header's full memory size,
++including BSS. Production loader integration must preserve firmware memory.
++The test uses all CPUs, spin-table startup and the existing WFxT override.
++Device access remains Max RID 0 only; Neo access is revoked.
+diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+index 5f28b1317a889..b669f3e9f93ea 100644
+--- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
++++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+@@ -12,8 +12,10 @@
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/hid.h>
++#include <linux/mutex.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
++#include <linux/sizes.h>
+ #include <linux/soc/apple/dockchannel.h>
+ #include <linux/string.h>
+ #include <linux/unaligned.h>
+@@ -23,11 +25,14 @@
+ #define COMMAND_TIMEOUT_MS 1000
+ #define START_TIMEOUT_MS 2000
+ 
+-#define MAX_INTERFACES 16
++#define MAX_INTERFACES 32
+ 
+-/* Data + checksum */
+-#define MAX_PKT_SIZE (0xffff + 4)
++/* Complete frame, including the largest aligned body and its checksum. */
++#define MAX_PKT_SIZE (8 + 0xfffc + 4)
++#define DCHID_RING_SIZE SZ_2M
++#define DCHID_RING_HEADER_SIZE 8
+ 
++#define DCHID_CHANNEL_NOTIFY 0x00
+ #define DCHID_CHANNEL_CMD 0x11
+ #define DCHID_CHANNEL_REPORT 0x12
+ 
+@@ -75,6 +80,7 @@ struct dchid_init_hdr {
+ #define INIT_PRODUCT_NAME	7
+ 
+ #define CMD_RESET_INTERFACE 0x40
++#define CMD_REGISTER_RING 0x91
+ #define CMD_SEND_FIRMWARE 0x95
+ #define CMD_ENABLE_INTERFACE 0xb4
+ #define CMD_ACK_GPIO_CMD 0xa1
+@@ -182,6 +188,13 @@ struct dockchannel_hid {
+ 	struct dockchannel *dc;
+ 	struct device_link *helper_link;
+ 
++	struct mutex ring_mutex;
++	bool use_ring;
++	bool ring_registered;
++	int ring_error;
++	void *ring;
++	dma_addr_t ring_dma;
++	u32 ring_read;
+ 	bool id_ready;
+ 	struct dchid_stm_id device_id;
+ 	char serial[64];
+@@ -371,8 +384,59 @@ static int dchid_enable_interface(struct dchid_iface *iface)
+ static int dchid_reset_interface(struct dchid_iface *iface, int state)
+ {
+ 	u8 msg[] = { CMD_RESET_INTERFACE, 1, iface->index, state };
++	u8 msg2[] = { CMD_RESET_INTERFACE, 2, iface->index, state, 0, 0, 0, 0, 0 };
++	int ret;
+ 
+-	return dchid_comm_cmd(iface->dchid, msg, sizeof(msg));
++	if (!iface->dchid->use_ring)
++		return dchid_comm_cmd(iface->dchid, msg, sizeof(msg));
++
++	/*
++	 * T8132 boot capture: state 0 then 2, each with byte 4 equal to 0
++	 * then 1. This is only the observed provisioning sequence, not a
++	 * contract for suspend, wake, or arbitrary interface power changes.
++	 */
++	ret = dchid_comm_cmd(iface->dchid, msg2, sizeof(msg2));
++	if (ret < 0)
++		return ret;
++	msg2[4] = 1;
++	return dchid_comm_cmd(iface->dchid, msg2, sizeof(msg2));
++}
++
++static int dchid_register_ring(struct dockchannel_hid *dchid)
++{
++	struct {
++		u8 cmd;
++		u8 reserved[2];
++		u64 addr;
++		u32 size;
++	} __packed msg = {
++		.cmd = CMD_REGISTER_RING,
++		.addr = dchid->ring_dma,
++		.size = DCHID_RING_SIZE,
++	};
++	/* Observed in both macOS and standalone T8132 bringup before 0x91. */
++	u8 prepare[] = { 0xc1, 0x02 };
++	int ret = 0;
++
++	if (!dchid->use_ring)
++		return 0;
++
++	mutex_lock(&dchid->ring_mutex);
++	ret = dchid->ring_error;
++	if (!dchid->ring_registered) {
++		ret = dchid_comm_cmd(dchid, prepare, sizeof(prepare));
++		if (ret < 0) {
++			mutex_unlock(&dchid->ring_mutex);
++			return ret;
++		}
++		/* The registration ACK itself arrives through the ring. */
++		dma_wmb();
++		WRITE_ONCE(dchid->ring_registered, true);
++		ret = dchid_comm_cmd(dchid, &msg, sizeof(msg));
++		dchid->ring_error = ret;
++	}
++	mutex_unlock(&dchid->ring_mutex);
++	return ret;
+ }
+ 
+ static int dchid_send_firmware(struct dchid_iface *iface, void *firmware, size_t size)
+@@ -458,6 +522,11 @@ static int dchid_request_gpio(struct dchid_iface *iface)
+ {
+ 	char prop_name[MAX_GPIO_NAME + 16];
+ 
++	if (iface->dchid->use_ring) {
++		dev_err_once(iface->dchid->dev, "T8132 SMC reset GPIO operation is not established\n");
++		return -EOPNOTSUPP;
++	}
++
+ 	if (iface->gpio)
+ 		return 0;
+ 
+@@ -491,14 +560,17 @@ static int dchid_start_interface(struct dchid_iface *iface)
+ 	dev_info(iface->dchid->dev, "Starting interface %s\n", iface->name);
+ 
+ 	iface->starting = true;
++	ret = dchid_register_ring(iface->dchid);
++	if (ret < 0)
++		goto err;
+ 
+ 	/* Look to see if we need firmware */
+ 	ret = dchid_get_firmware(iface, &fw, &size);
+ 	if (ret < 0)
+ 		goto err;
+ 
+-	/* If we need a GPIO, make sure we have it. */
+-	if (iface->gpio_id) {
++	/* T8132 startup does not use the older host GPIO reset. */
++	if (!iface->dchid->use_ring && iface->gpio_id) {
+ 		ret = dchid_request_gpio(iface);
+ 		if (ret < 0)
+ 			goto err;
+@@ -851,7 +923,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
+ 			break;
+ 	}
+ 
+-	if (hdr->more_packets)
++	if (hdr->more_packets || (dchid->use_ring && !iface->hid_desc))
+ 		return;
+ 
+ 	/* We need to enable STM first, since it'll give us the device IDs */
+@@ -959,7 +1031,7 @@ static void dchid_packet_work(struct work_struct *ws)
+ 	if (shdr->length + sizeof(*shdr) > work->hdr.length) {
+ 		dev_err(dchid->dev, "Bad sub header length (%hu > %zu)\n",
+ 			shdr->length, work->hdr.length - sizeof(*shdr));
+-		return;
++		goto done;
+ 	}
+ 
+ 	switch (type) {
+@@ -974,6 +1046,7 @@ static void dchid_packet_work(struct work_struct *ws)
+ 		break;
+ 	}
+ 
++done:
+ 	kfree(work);
+ }
+ 
+@@ -1014,76 +1087,157 @@ static void dchid_handle_ack(struct dchid_iface *iface, struct dchid_hdr *hdr, v
+ 
+ 	iface->resp_size = shdr->length;
+ 	iface->out_report = -1;
+-	iface->retcode = shdr->retcode;
++	iface->retcode = hdr->pad >> 8 ? -EIO : shdr->retcode;
+ 	complete(&iface->out_complete);
+ }
+ 
+-static void dchid_handle_packet(void *cookie, size_t avail)
++/* Return the complete frame size, or reject a lost framing boundary. */
++static int dchid_frame_size(const struct dchid_hdr *hdr)
++{
++	size_t length = hdr->length;
++
++	if (hdr->hdr_len != sizeof(*hdr) || !IS_ALIGNED(length, 4))
++		return -EPROTO;
++	return sizeof(*hdr) + length + sizeof(u32);
++}
++
++/*
++ * Both receive transports pass complete frames here. Header bytes 6/7 and
++ * application padding are opaque, checksum-covered data, not required zeroes.
++ */
++static int dchid_dispatch(struct dockchannel_hid *dchid, struct dchid_hdr *hdr,
++			  void *data, bool fifo)
+ {
+-	struct dockchannel_hid *dchid = cookie;
+-	struct dchid_hdr hdr;
+-	struct dchid_work *work;
+ 	struct dchid_iface *iface;
++	struct dchid_work *work;
+ 	u32 checksum;
+ 
+-	if (dockchannel_recv(dchid->dc, &hdr, sizeof(hdr)) != sizeof(hdr)) {
+-		dev_err(dchid->dev, "Read failed (header)\n");
+-		return;
++	checksum = dchid_checksum(hdr, sizeof(*hdr));
++	checksum += dchid_checksum(data, hdr->length + 4);
++	if (checksum != U32_MAX) {
++		dev_err(dchid->dev, "Checksum mismatch (iface %d): 0x%08x\n",
++			hdr->iface, checksum);
++		return 0;
+ 	}
+ 
+-	if (hdr.hdr_len != sizeof(hdr)) {
+-		dev_err(dchid->dev, "Bad header length %d\n", hdr.hdr_len);
+-		goto done;
++	if (dchid->use_ring && hdr->channel == DCHID_CHANNEL_NOTIFY) {
++		/* A FIFO notification has no application subheader or report ID. */
++		return fifo && !hdr->length && hdr->iface == IFACE_COMM;
+ 	}
+ 
+-	if (dockchannel_recv(dchid->dc, dchid->pkt_buf, hdr.length + 4) != (hdr.length + 4)) {
+-		dev_err(dchid->dev, "Read failed (body)\n");
+-		goto done;
++	if (hdr->iface >= MAX_INTERFACES || hdr->length < sizeof(struct dchid_subhdr))
++		return 0;
++	if (((struct dchid_subhdr *)data)->length >
++	    hdr->length - sizeof(struct dchid_subhdr))
++		return 0;
++	iface = dchid->ifaces[hdr->iface];
++	if (!iface) {
++		dev_err(dchid->dev, "Received packet for uninitialized iface %d\n", hdr->iface);
++		return 0;
+ 	}
+ 
+-	checksum = dchid_checksum(&hdr, sizeof(hdr));
+-	checksum += dchid_checksum(dchid->pkt_buf, hdr.length + 4);
+-
+-	if (checksum != 0xffffffff) {
+-		dev_err(dchid->dev, "Checksum mismatch (iface %d): 0x%08x != 0xffffffff\n",
+-			hdr.iface, checksum);
+-		goto done;
++	switch (hdr->channel) {
++	case DCHID_CHANNEL_CMD:
++		dchid_handle_ack(iface, hdr, data);
++		return 0;
++	case DCHID_CHANNEL_REPORT:
++		break;
++	default:
++		dev_warn(dchid->dev, "Unknown channel 0x%x, treating as report...\n",
++			 hdr->channel);
++		break;
+ 	}
+ 
++	work = kzalloc(sizeof(*work) + hdr->length, GFP_KERNEL);
++	if (!work)
++		return 0;
++	work->hdr = *hdr;
++	work->iface = iface;
++	memcpy(work->data, data, hdr->length);
++	INIT_WORK(&work->work, dchid_packet_work);
++	queue_work(iface->wq, &work->work);
++	return 0;
++}
+ 
+-	if (hdr.iface >= MAX_INTERFACES) {
+-		dev_err(dchid->dev, "Bad iface %d\n", hdr.iface);
+-	}
++static void dchid_ring_copy(struct dockchannel_hid *dchid, void *dst,
++			    u32 offset, size_t length)
++{
++	size_t first = min_t(size_t, length,
++			     DCHID_RING_SIZE - DCHID_RING_HEADER_SIZE - offset);
++	void *data = dchid->ring + DCHID_RING_HEADER_SIZE;
+ 
+-	iface = dchid->ifaces[hdr.iface];
++	memcpy(dst, data + offset, first);
++	memcpy(dst + first, data, length - first);
++}
+ 
+-	if (!iface) {
+-		dev_err(dchid->dev, "Received packet for uninitialized iface %d\n", hdr.iface);
+-		goto done;
++static int dchid_drain_ring(struct dockchannel_hid *dchid)
++{
++	const u32 capacity = DCHID_RING_SIZE - DCHID_RING_HEADER_SIZE;
++	u32 *indices = dchid->ring;
++	u32 producer, consumer, available;
++	int size;
++
++	if (!READ_ONCE(dchid->ring_registered))
++		return -EPROTO;
++
++	while (1) {
++		producer = READ_ONCE(indices[0]);
++		consumer = READ_ONCE(indices[1]);
++		if (producer >= capacity || consumer != dchid->ring_read ||
++		    !IS_ALIGNED(producer, 4))
++			return -EPROTO;
++		/* Read only the bytes published by this producer snapshot. */
++		dma_rmb();
++		available = producer >= consumer ? producer - consumer :
++			    capacity - consumer + producer;
++		if (available < sizeof(struct dchid_hdr))
++			return 0;
++		dchid_ring_copy(dchid, dchid->pkt_buf, consumer,
++				sizeof(struct dchid_hdr));
++		size = dchid_frame_size((void *)dchid->pkt_buf);
++		if (size < 0)
++			return size;
++		if (available < size)
++			return 0;
++		dchid_ring_copy(dchid, dchid->pkt_buf, consumer, size);
++		dchid_dispatch(dchid, (void *)dchid->pkt_buf,
++			       dchid->pkt_buf + sizeof(struct dchid_hdr), false);
++		consumer += size;
++		if (consumer >= capacity)
++			consumer -= capacity;
++		dchid->ring_read = consumer;
++		/* All frame reads must complete before the producer can reuse it. */
++		mb();
++		WRITE_ONCE(indices[1], consumer);
++		cond_resched();
+ 	}
++	return 0;
++}
+ 
+-	switch (hdr.channel) {
+-		case DCHID_CHANNEL_CMD:
+-			dchid_handle_ack(iface, &hdr, dchid->pkt_buf);
+-			goto done;
+-		case DCHID_CHANNEL_REPORT:
+-			break;
+-		default:
+-			dev_warn(dchid->dev, "Unknown channel 0x%x, treating as report...\n",
+-				 hdr.channel);
+-			break;
+-	}
++static void dchid_handle_packet(void *cookie, size_t avail)
++{
++	struct dockchannel_hid *dchid = cookie;
++	struct dchid_hdr hdr;
++	int ret;
+ 
+-	work = kzalloc(sizeof(*work) + hdr.length, GFP_KERNEL);
+-	if (!work)
++	if (dockchannel_recv(dchid->dc, &hdr, sizeof(hdr)) != sizeof(hdr)) {
++		dev_err(dchid->dev, "Read failed (header)\n");
+ 		return;
++	}
++	if (hdr.hdr_len != sizeof(hdr)) {
++		dev_err(dchid->dev, "Bad header length %d\n", hdr.hdr_len);
++		goto done;
++	}
++	if (dockchannel_recv(dchid->dc, dchid->pkt_buf, hdr.length + 4) != hdr.length + 4) {
++		dev_err(dchid->dev, "Read failed (body)\n");
++		goto done;
++	}
+ 
+-	work->hdr = hdr;
+-	work->iface = iface;
+-	memcpy(work->data, dchid->pkt_buf, hdr.length);
+-	INIT_WORK(&work->work, dchid_packet_work);
+-
+-	queue_work(iface->wq, &work->work);
++	if (dchid_dispatch(dchid, &hdr, dchid->pkt_buf, true)) {
++		ret = dchid_drain_ring(dchid);
++		if (ret < 0)
++			dev_err(dchid->dev, "Receive ring failed: %d\n", ret);
++	}
+ 
+ done:
+ 	dockchannel_await(dchid->dc, dchid_handle_packet, dchid, sizeof(struct dchid_hdr));
+@@ -1091,10 +1245,10 @@ static void dchid_handle_packet(void *cookie, size_t avail)
+ 
+ static int dockchannel_hid_probe(struct platform_device *pdev)
+ {
++	struct fwnode_handle *stm;
+ 	struct device *dev = &pdev->dev;
+ 	struct dockchannel_hid *dchid;
+ 	struct device_node *child, *helper;
+-	struct fwnode_handle *stm;
+ 	struct platform_device *helper_pdev;
+ 	struct property *prop;
+ 	int ret;
+@@ -1109,9 +1263,18 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	dchid->dev = dev;
++	/* Retain the generic STM-less setup used by the shared platform tree. */
+ 	stm = device_get_named_child_node(dev, "stm");
+ 	dchid->id_ready = !stm || !fwnode_device_is_available(stm);
+ 	fwnode_handle_put(stm);
++	mutex_init(&dchid->ring_mutex);
++	dchid->use_ring = of_device_is_compatible(dev->of_node, "apple,t8132-dockchannel-hid") ||
++			  of_device_is_compatible(dev->of_node, "apple,t8140-dockchannel-hid");
++	/* Neo has no STM interface from which to obtain common HID IDs. */
++	if (of_device_is_compatible(dev->of_node, "apple,t8140-dockchannel-hid")) {
++		dchid->device_id.vendor_id = HOST_VENDOR_ID_APPLE;
++		dchid->id_ready = true;
++	}
+ 
+ 	/*
+ 	 * First make sure all the GPIOs are available, in cased we need to defer.
+@@ -1174,7 +1337,14 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
+ 	if (IS_ERR_OR_NULL(dchid->dc)) {
+ 		return PTR_ERR(dchid->dc);
+ 	}
+-	dchid->new_iface_wq = alloc_ordered_workqueue("dchid-new", 0);
++	if (dchid->use_ring) {
++		dchid->ring = dmam_alloc_coherent(dev, DCHID_RING_SIZE, &dchid->ring_dma,
++						  GFP_KERNEL);
++		if (!dchid->ring)
++			return -ENOMEM;
++		memset(dchid->ring, 0, DCHID_RING_SIZE);
++	}
++	dchid->new_iface_wq = alloc_workqueue("dchid-new", WQ_MEM_RECLAIM | WQ_PERCPU, 0);
+ 	if (!dchid->new_iface_wq)
+ 		return -ENOMEM;
+ 
+@@ -1196,6 +1366,8 @@ static void dockchannel_hid_remove(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id dockchannel_hid_of_match[] = {
++	{ .compatible = "apple,t8132-dockchannel-hid" },
++	{ .compatible = "apple,t8140-dockchannel-hid" },
+ 	{ .compatible = "apple,dockchannel-hid" },
+ 	{},
+ };
+diff --git a/drivers/hid/dockchannel-hid/tests/mtp-input-watch.c b/drivers/hid/dockchannel-hid/tests/mtp-input-watch.c
+new file mode 100644
+index 0000000000000..502b76eeb604d
+--- /dev/null
++++ b/drivers/hid/dockchannel-hid/tests/mtp-input-watch.c
+@@ -0,0 +1,106 @@
++#include <errno.h>
++#include <fcntl.h>
++#include <linux/input.h>
++#include <poll.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#define MAX_INPUTS 32
++struct input {
++	char path[64], name[256];
++	int keyboard, trackpad, changed, slot, tracking, x, y, pressure;
++};
++static const char *key_name(unsigned code)
++{
++	switch (code) {
++	case KEY_ESC: return "ESC";
++	case KEY_ENTER: return "ENTER";
++	case KEY_SPACE: return "SPACE";
++	case KEY_LEFTSHIFT: return "LEFTSHIFT";
++	case KEY_RIGHTSHIFT: return "RIGHTSHIFT";
++	case KEY_LEFTCTRL: return "LEFTCTRL";
++	case KEY_LEFTALT: return "LEFTALT";
++	case BTN_LEFT: return "BTN_LEFT";
++	case BTN_RIGHT: return "BTN_RIGHT";
++	case BTN_TOUCH: return "BTN_TOUCH";
++	case BTN_TOOL_FINGER: return "BTN_TOOL_FINGER";
++	default: return "KEY";
++	}
++}
++static int bit(const unsigned char *bits, unsigned n)
++{
++	return (bits[n / 8] >> (n % 8)) & 1;
++}
++int main(void)
++{
++	struct pollfd fds[MAX_INPUTS];
++	struct input inputs[MAX_INPUTS] = {0};
++	int count = 0, keyboards = 0, trackpads = 0;
++	setvbuf(stdout, NULL, _IOLBF, 0);
++	for (int index = 0; index < 64 && count < MAX_INPUTS; index++) {
++		char path[64], name[256] = {0};
++		unsigned char keys[(KEY_MAX + 8) / 8] = {0};
++		unsigned char abs[(ABS_MAX + 8) / 8] = {0};
++		snprintf(path, sizeof(path), "/dev/input/event%d", index);
++		int fd = open(path, O_RDONLY | O_NONBLOCK);
++		if (fd < 0) continue;
++		if (ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name) < 0 ||
++		    !strstr(name, "MTP")) { close(fd); continue; }
++		if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keys)), keys) < 0 ||
++		    ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abs)), abs) < 0) {
++			perror("EVIOCGBIT"); close(fd); continue;
++		}
++		struct input *in = &inputs[count];
++		strcpy(in->path, path); strcpy(in->name, name);
++		in->keyboard = bit(keys, KEY_A);
++		in->trackpad = bit(abs, ABS_MT_POSITION_X) || bit(abs, ABS_X);
++		in->tracking = -1;
++		keyboards += in->keyboard; trackpads += in->trackpad;
++		fds[count] = (struct pollfd){ .fd = fd, .events = POLLIN };
++		printf("MTP_INPUT_DEVICE path=%s name=\"%s\" keyboard=%d trackpad=%d\n",
++		       path, name, in->keyboard, in->trackpad);
++		count++;
++	}
++	printf("MTP_INPUT_READY keyboards=%d trackpads=%d devices=%d\n", keyboards, trackpads, count);
++	if (!count) return 2;
++	for (;;) {
++		if (poll(fds, count, -1) < 0) { if (errno == EINTR) continue; perror("poll"); return 1; }
++		for (int i = 0; i < count; i++) {
++			if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
++				printf("MTP_INPUT_DISCONNECTED path=%s\n", inputs[i].path); return 1;
++			}
++			if (!(fds[i].revents & POLLIN)) continue;
++			struct input_event events[64];
++			ssize_t length = read(fds[i].fd, events, sizeof(events));
++			if (length < 0) { if (errno == EAGAIN) continue; perror("read"); return 1; }
++			if (!length || length % sizeof(events[0])) return 1;
++			struct input *in = &inputs[i];
++			for (size_t j = 0; j < (size_t)length / sizeof(events[0]); j++) {
++				struct input_event *ev = &events[j];
++				if (ev->type == EV_KEY)
++					printf("MTP_KEY path=%s code=%u name=%s value=%d\n", in->path, ev->code, key_name(ev->code), ev->value);
++				if (ev->type == EV_ABS) {
++					in->changed = 1;
++					switch (ev->code) {
++					case ABS_MT_SLOT: in->slot = ev->value; break;
++					case ABS_MT_TRACKING_ID: in->tracking = ev->value; break;
++					case ABS_X: case ABS_MT_POSITION_X: in->x = ev->value; break;
++					case ABS_Y: case ABS_MT_POSITION_Y: in->y = ev->value; break;
++					case ABS_PRESSURE: case ABS_MT_PRESSURE: in->pressure = ev->value; break;
++					}
++				}
++				if (ev->type == EV_REL)
++					printf("MTP_REL path=%s code=%u value=%d\n", in->path, ev->code, ev->value);
++				if (ev->type == EV_SYN && ev->code == SYN_DROPPED)
++					printf("MTP_INPUT_DROPPED path=%s\n", in->path);
++				if (ev->type == EV_SYN && ev->code == SYN_REPORT && in->changed) {
++					printf("MTP_TOUCH path=%s slot=%d tracking=%d x=%d y=%d pressure=%d\n",
++					       in->path, in->slot, in->tracking, in->x, in->y, in->pressure);
++					in->changed = 0;
++				}
++			}
++		}
++	}
++}
+diff --git a/drivers/hid/hid-magicmouse.c b/drivers/hid/hid-magicmouse.c
+index f2683800bca24..6f4bc60b48a98 100644
+--- a/drivers/hid/hid-magicmouse.c
++++ b/drivers/hid/hid-magicmouse.c
+@@ -15,7 +15,9 @@
+ #include <linux/hid.h>
+ #include <linux/input/mt.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/slab.h>
++#include <linux/unaligned.h>
+ #include <linux/workqueue.h>
+ 
+ #include "hid-ids.h"
+@@ -158,6 +160,7 @@ struct magicmouse_sc {
+ 	struct input_dev *input;
+ 	unsigned long quirks;
+ 	bool query_dimensions;
++	bool neo_mtp;
+ 
+ 	int ntouches;
+ 	int scroll_accel;
+@@ -762,6 +765,83 @@ static void report_finger_data(struct input_dev *input, int slot,
+ 	input_report_abs(input, ABS_MT_POSITION_Y, pos->y);
+ }
+ 
++static int magicmouse_raw_event_neo_mtp(struct hid_device *hdev,
++		struct hid_report *report, u8 *data, int size)
++{
++	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
++	struct input_dev *input = msc->input;
++	u32 seen = 0;
++	unsigned int count, offset, length, stride, i;
++
++	if (size < 1 || data[0] != MTP_REPORT_ID)
++		return 0;
++	/* Neo's 0x75 report declares both the header and contact payload sizes. */
++	if (size < 32 || data[2] < 32 || data[10] & BIT(7))
++		return 1;
++	count = data[22];
++	offset = data[2] + get_unaligned_le16(data + 14);
++	length = get_unaligned_le16(data + 16);
++	if (count > 32 || offset > size || length > size - offset)
++		return 1;
++	if (!count) {
++		if (length)
++			return 1;
++		stride = 0;
++	} else {
++		if (length % count)
++			return 1;
++		stride = length / count;
++		if (stride < 20 || stride > 30 || stride % 2)
++			return 1;
++	}
++	/* Validate the complete array before changing slot or button state. */
++	for (i = 0; i < count; i++) {
++		const u8 *finger = data + offset + i * stride;
++
++		if (!finger[0] || finger[0] >= 32 || finger[1] > 7 ||
++		    seen & BIT(finger[0]))
++			return 1;
++		seen |= BIT(finger[0]);
++	}
++	for (i = 0; i < count; i++) {
++		const u8 *finger = data + offset + i * stride;
++		int slot = input_mt_get_slot_by_key(input, finger[0]);
++		int orientation = J314_TP_MAX_FINGER_ORIENTATION -
++				  (s16)get_unaligned_le16(finger + 16);
++		bool down = finger[1] == 3 || finger[1] == 4;
++
++		if (slot < 0)
++			continue;
++		input_mt_slot(input, slot);
++		input_mt_report_slot_state(input, MT_TOOL_FINGER, down);
++		if (!down)
++			continue;
++		input_report_abs(input, ABS_MT_POSITION_X,
++				 (s16)get_unaligned_le16(finger + 4));
++		input_report_abs(input, ABS_MT_POSITION_Y,
++				 -(s16)get_unaligned_le16(finger + 6));
++		/* The wire ellipse carries radii; input reports axis diameters. */
++		input_report_abs(input, ABS_MT_TOUCH_MAJOR,
++				 get_unaligned_le16(finger + 12) * 2);
++		input_report_abs(input, ABS_MT_TOUCH_MINOR,
++				 get_unaligned_le16(finger + 14) * 2);
++		input_report_abs(input, ABS_MT_WIDTH_MAJOR,
++				 get_unaligned_le16(finger + 12) * 2);
++		input_report_abs(input, ABS_MT_WIDTH_MINOR,
++				 get_unaligned_le16(finger + 14) * 2);
++		/* Fold the ellipse axis into +/- pi/2, measured from vertical. */
++		if (orientation > J314_TP_MAX_FINGER_ORIENTATION)
++			orientation -= 2 * J314_TP_MAX_FINGER_ORIENTATION;
++		else if (orientation < -J314_TP_MAX_FINGER_ORIENTATION)
++			orientation += 2 * J314_TP_MAX_FINGER_ORIENTATION;
++		input_report_abs(input, ABS_MT_ORIENTATION, orientation);
++	}
++	input_mt_sync_frame(input);
++	input_report_key(input, BTN_LEFT, data[23] & 1);
++	input_sync(input);
++	return 1;
++}
++
+ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
+ 		struct hid_report *report, u8 *data, int size)
+ {
+@@ -775,6 +855,9 @@ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
+ 	const size_t touch_sz = sizeof(struct tp_finger);
+ 	u8 map_contacs[MAX_CONTACTS];
+ 
++	if (msc->neo_mtp)
++		return magicmouse_raw_event_neo_mtp(hdev, report, data, size);
++
+ 	// hid_warn(hdev, "%s\n", __func__);
+ 	// print_hex_dump_debug("appleft ev: ", DUMP_PREFIX_OFFSET, 16, 1, data,
+ 	// 		     size, false);
+@@ -1080,14 +1163,16 @@ static int magicmouse_setup_input_mtp(struct input_dev *input,
+ 	 * inverse of the reported Y.
+ 	 */
+ 
+-	input_set_abs_params(input, ABS_MT_PRESSURE, 0, 6000, 0, 0);
++	if (!msc->neo_mtp)
++		input_set_abs_params(input, ABS_MT_PRESSURE, 0, 6000, 0, 0);
+ 
+ 	/*
+ 	 * This makes libinput recognize this as a PressurePad and
+ 	 * stop trying to use pressure for touch size. Pressure unit
+ 	 * seems to be ~grams on these touchpads.
+ 	 */
+-	input_abs_set_res(input, ABS_MT_PRESSURE, 1);
++	if (!msc->neo_mtp)
++		input_abs_set_res(input, ABS_MT_PRESSURE, 1);
+ 
+ 	/* finger orientation */
+ 	input_set_abs_params(input, ABS_MT_ORIENTATION, -J314_TP_MAX_FINGER_ORIENTATION,
+@@ -1115,7 +1200,7 @@ static int magicmouse_setup_input_mtp(struct input_dev *input,
+ 	 */
+ 	__clear_bit(EV_REP, input->evbit);
+ 
+-	error = input_mt_init_slots(input, MAX_CONTACTS, mt_flags);
++	error = input_mt_init_slots(input, msc->neo_mtp ? 32 : MAX_CONTACTS, mt_flags);
+ 	if (error)
+ 		return error;
+ 
+@@ -1329,6 +1414,9 @@ static int magicmouse_probe(struct hid_device *hdev,
+ 	// internal trackpad use a data format use input ops to avoid
+ 	// conflicts with the report ID.
+ 	if (id->bus == BUS_HOST) {
++		msc->neo_mtp = hdev->dev.parent &&
++			of_device_is_compatible(hdev->dev.parent->of_node,
++						"apple,t8140-dockchannel-hid");
+ 		msc->input_ops.raw_event = magicmouse_raw_event_mtp;
+ 		msc->input_ops.setup_input = magicmouse_setup_input_mtp;
+ 	} else if (id->bus == BUS_SPI) {
+diff --git a/drivers/soc/apple/dockchannel.c b/drivers/soc/apple/dockchannel.c
+index 3557b1e4e0558..1a40a9e08f29b 100644
+--- a/drivers/soc/apple/dockchannel.c
++++ b/drivers/soc/apple/dockchannel.c
+@@ -348,7 +348,7 @@ static int dockchannel_probe(struct platform_device *pdev)
+ 	writel_relaxed(0, dcc->irq_base + IRQ_MASK);
+ 	writel_relaxed(~0, dcc->irq_base + IRQ_FLAG);
+ 
+-	dcc->domain = irq_domain_add_linear(dev->of_node, DOCKCHANNEL_MAX_IRQ,
++	dcc->domain = irq_domain_create_linear(of_fwnode_handle(dev->of_node), DOCKCHANNEL_MAX_IRQ,
+ 					    &dockchannel_irq_domain_ops, dcc);
+ 	if (!dcc->domain)
+ 		return -ENOMEM;

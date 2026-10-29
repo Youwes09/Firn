@@ -1,7 +1,7 @@
-From bb281e1268557542b59ddf266ec1aff2b9e9237f Mon Sep 17 00:00:00 2001
+From b99abccda6a4b503485958ccd0aaeec4c8ec1a17 Mon Sep 17 00:00:00 2001
 From: KB2UKA <kb2uka80@gmail.com>
 Date: Mon, 26 Oct 2026 08:42:00 -0500
-Subject: [PATCH 3/5] irqchip/apple-aic: Leave the EL2 FIQ sources alone on
+Subject: [PATCH 19/26] irqchip/apple-aic: Leave the EL2 FIQ sources alone on
  t8132
 
 On t8132 (M4), a kernel running at EL2 hangs in irqchip init, before it
@@ -22,7 +22,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 27 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/irqchip/irq-apple-aic.c b/drivers/irqchip/irq-apple-aic.c
-index 4a3141d9f914..0f5625cf517f 100644
+index 4a3141d9f9141..0f5625cf517f3 100644
 --- a/drivers/irqchip/irq-apple-aic.c
 +++ b/drivers/irqchip/irq-apple-aic.c
 @@ -260,6 +260,12 @@ struct aic_info {

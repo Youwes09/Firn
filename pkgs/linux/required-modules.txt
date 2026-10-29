@@ -40,7 +40,6 @@ netconsole
 nf_conntrack
 nf_defrag_ipv4
 nf_defrag_ipv6
-nfnetlink
 nf_tables
 nft_compat
 nls_cp437

@@ -8,7 +8,7 @@ let
   sleep = cfg.systemd.sleep.settings.Sleep;
 
   rules = {
-    "kernel is this repository's source build" = kernel.modDirVersion == "7.1.13-firn";
+    "kernel is this repository's source build" = kernel.modDirVersion == "7.3.0-firn";
     "the kernel builds no GPU or speaker codec driver" =
       lib.all
         (

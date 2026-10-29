@@ -1,0 +1,1284 @@
+Gravity Linux replacement/115-pmp, as merged in bb8748775107.
+
+diff --git a/Documentation/devicetree/bindings/power/apple,pmp-report.yaml b/Documentation/devicetree/bindings/power/apple,pmp-report.yaml
+new file mode 100644
+index 0000000000000..ecebac9c6282d
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/apple,pmp-report.yaml
+@@ -0,0 +1,129 @@
++# SPDX-License-Identifier: GPL-2.0-only
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/apple,pmp-report.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Apple Power Management Processor power-state reports
++
++maintainers:
++  - Cody Ho <codyho@stanford.edu>
++
++description: |
++  The application processor reports power-domain transitions to PMP through
++  a shared register aperture. Each child represents one reported domain.
++  Some firmware device records describe notifications without an
++  acknowledgement guarantee; their observed state must not be polled as a
++  prerequisite to starting the device.
++
++properties:
++  compatible:
++    oneOf:
++      - enum:
++          - apple,t6000-pmp-v2-report
++          - apple,t6020-pmp-v2-report
++          - apple,t6030-pmp-v2-report
++          - apple,t6041-pmp-v2-report
++          - apple,t8112-pmp-v2-report
++          - apple,t8122-pmp-v2-report
++          - apple,t8140-pmp-v2-report
++      - items:
++          - const: apple,t6031-pmp-v2-report
++          - const: apple,t6020-pmp-v2-report
++
++  reg:
++    maxItems: 1
++
++  power-domains:
++    maxItems: 1
++
++  "#address-cells":
++    const: 1
++
++  "#size-cells":
++    const: 0
++
++  apple,pmp:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: |
++      PMP controller providing the firmware device table. The bootloader
++      transfers the version-1 table in apple,tunable-soc-device and its
++      little-endian version in apple,tunable-ptd-driver-version. Records are
++      124 bytes; the little-endian flags word at byte 8 has bit 1 set for
++      records that require an acknowledgement. When this reference is
++      present, child reg values are device-table record indices, and only
++      records carrying that flag are polled. Without the reference, existing
++      platform report numbering and acknowledgement behaviour are retained.
++      A disabled controller without firmware metadata also retains the
++      existing ready-bit check, allowing operation without PMP firmware.
++
++patternProperties:
++  "^report@[0-9a-f]+$":
++    type: object
++    allOf:
++      - $ref: power-domain.yaml#
++    properties:
++      compatible:
++        oneOf:
++          - const: apple,t6000-pmp-v2-report-entry
++          - items:
++              - enum:
++                  - apple,t6020-pmp-v2-report-entry
++                  - apple,t6030-pmp-v2-report-entry
++                  - apple,t6031-pmp-v2-report-entry
++                  - apple,t8112-pmp-v2-report-entry
++                  - apple,t8122-pmp-v2-report-entry
++              - const: apple,t6000-pmp-v2-report-entry
++
++      reg:
++        maxItems: 1
++
++      label: true
++
++      "#power-domain-cells":
++        const: 0
++
++      power-domains: true
++
++      apple,always-on:
++        type: boolean
++        description: Keep the reported domain enabled.
++
++    required:
++      - compatible
++      - reg
++      - label
++      - "#power-domain-cells"
++
++    additionalProperties: false
++
++required:
++  - compatible
++  - reg
++  - "#address-cells"
++  - "#size-cells"
++
++additionalProperties: false
++
++examples:
++  - |
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        pmp-report@3003c0000 {
++            compatible = "apple,t8140-pmp-v2-report";
++            reg = <0x3 0x003c0000 0x0 0x30000>;
++            apple,pmp = <&pmp>;
++            #address-cells = <1>;
++            #size-cells = <0>;
++
++            report@b {
++                compatible = "apple,t6000-pmp-v2-report-entry";
++                reg = <11>;
++                label = "pmp-isp";
++                #power-domain-cells = <0>;
++                power-domains = <&ps_isp_sys>;
++            };
++        };
++    };
+diff --git a/drivers/pmdomain/apple/pmgr-pwrstate.c b/drivers/pmdomain/apple/pmgr-pwrstate.c
+index a92db8cf88bb9..5cd0d999a53c1 100644
+--- a/drivers/pmdomain/apple/pmgr-pwrstate.c
++++ b/drivers/pmdomain/apple/pmgr-pwrstate.c
+@@ -48,6 +48,7 @@ struct apple_pmgr_ps {
+ 	bool force_disable;
+ 	bool force_reset;
+ 	bool externally_clocked;
++	bool no_auto_enable;
+ };
+ 
+ #define genpd_to_apple_pmgr_ps(_genpd) container_of(_genpd, struct apple_pmgr_ps, genpd)
+@@ -59,6 +60,9 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
+ 	struct apple_pmgr_ps *ps = genpd_to_apple_pmgr_ps(genpd);
+ 	u32 reg, cur;
+ 
++	if (ps->no_auto_enable)
++		auto_enable = false;
++
+ 	ret = regmap_read(ps->regmap, ps->offset, &reg);
+ 	if (ret < 0)
+ 		return ret;
+@@ -279,6 +283,7 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
+ 
+ 	if (of_property_read_bool(node, "apple,externally-clocked"))
+ 		ps->externally_clocked = true;
++	ps->no_auto_enable = of_property_read_bool(node, "apple,no-auto-enable");
+ 
+ 	active = apple_pmgr_ps_is_active(ps);
+ 	if (of_property_read_bool(node, "apple,always-on")) {
+@@ -295,7 +300,7 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
+ 	/* Turn on auto-PM if the domain is already on */
+ 	if (active)
+ 		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
+-				   APPLE_PMGR_AUTO_ENABLE);
++				   ps->no_auto_enable ? 0 : APPLE_PMGR_AUTO_ENABLE);
+ 
+ 	ret = pm_genpd_init(&ps->genpd, NULL, !active);
+ 	if (ret < 0) {
+diff --git a/drivers/pmdomain/apple/pmp-report.c b/drivers/pmdomain/apple/pmp-report.c
+index 39a10a0b61515..9aaea56556cad 100644
+--- a/drivers/pmdomain/apple/pmp-report.c
++++ b/drivers/pmdomain/apple/pmp-report.c
+@@ -5,6 +5,7 @@
+  * Copyright The Asahi Linux Contributors
+  */
+ 
++#include <linux/bitops.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -12,23 +13,170 @@
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++#include <linux/jiffies.h>
++#include <linux/soc/apple/pmp-report.h>
+ 
+ #define PMP_REPORT_READY 0x1
++#define PMP_READY_WAIT_MS 120000
++
++/* PTD driver version 1 soc-device records, transferred unchanged from ADT. */
++#define PMP_SOC_DEVICE_SIZE 0x7c
++#define PMP_SOC_DEVICE_FLAGS_OFFSET 8
++#define PMP_SOC_DEVICE_ACK BIT(1)
+ 
+ struct apple_pmp_report_offsets {
+ 	u32 tgt_read;
+ 	u32 tgt_write;
+ 	u32 actual;
+ 	u32 status;
++	bool finalize_after_ready;
++	bool has_event_config;
+ };
+ 
+ struct apple_pmp_report {
+ 	struct device *dev;
+ 	const struct apple_pmp_report_offsets *offsets;
+ 	void __iomem *base;
++	void __iomem *event_config;
++	struct delayed_work finalize_work;
++	unsigned long probed;
+ 	spinlock_t lock;
++	u64 valid_mask;
++	u64 ack_mask;
+ };
+ 
++static int apple_pmp_report_read_device_flags(struct apple_pmp_report *rep)
++{
++	struct device *dev = rep->dev;
++	struct device_node *pmp;
++	const u8 *table, *version;
++	unsigned int count, i;
++	int len, ret = 0;
++
++	/* Preserve the established behaviour of trees without this metadata. */
++	rep->valid_mask = ~0ULL;
++	rep->ack_mask = ~0ULL;
++	if (!of_property_present(dev->of_node, "apple,pmp"))
++		return 0;
++
++	pmp = of_parse_phandle(dev->of_node, "apple,pmp", 0);
++	if (!pmp)
++		return dev_err_probe(dev, -EINVAL, "invalid PMP reference\n");
++	/* A boot without optional PMP firmware still uses the ready-bit check. */
++	if (!of_device_is_available(pmp) &&
++	    !of_property_present(pmp, "apple,tunable-soc-device"))
++		goto out;
++
++	version = of_get_property(pmp, "apple,tunable-ptd-driver-version", &len);
++	if (!version || len != sizeof(u32) || get_unaligned_le32(version) != 1) {
++		ret = dev_err_probe(dev, -EINVAL, "unsupported PMP device table version\n");
++		goto out;
++	}
++
++	table = of_get_property(pmp, "apple,tunable-soc-device", &len);
++	if (!table || len <= 0 || len % PMP_SOC_DEVICE_SIZE ||
++	    len / PMP_SOC_DEVICE_SIZE > 64) {
++		ret = dev_err_probe(dev, -EINVAL, "invalid PMP device table\n");
++		goto out;
++	}
++
++	count = len / PMP_SOC_DEVICE_SIZE;
++	rep->valid_mask = GENMASK_ULL(count - 1, 0);
++	rep->ack_mask = 0;
++	for (i = 0; i < count; i++) {
++		u32 flags = get_unaligned_le32(table + i * PMP_SOC_DEVICE_SIZE +
++					     PMP_SOC_DEVICE_FLAGS_OFFSET);
++
++		if (flags & PMP_SOC_DEVICE_ACK)
++			rep->ack_mask |= BIT_ULL(i);
++	}
++
++	dev_dbg(dev, "%u PMP records, acknowledgement mask %#llx\n", count, rep->ack_mask);
++out:
++	of_node_put(pmp);
++	return ret;
++}
++int apple_pmp_report_wait_ready(struct device *dev, unsigned long timeout_us)
++{
++	struct apple_pmp_report *rep = dev_get_drvdata(dev);
++	u64 status;
++
++	if (!rep)
++		return -EPROBE_DEFER;
++	return readq_poll_timeout(rep->base + rep->offsets->status, status,
++				 status & PMP_REPORT_READY, 1000, timeout_us);
++}
++EXPORT_SYMBOL_GPL(apple_pmp_report_wait_ready);
++
++static void apple_pmp_report_finalize_work(struct work_struct *work)
++{
++	struct apple_pmp_report *rep =
++		container_of(to_delayed_work(work), struct apple_pmp_report,
++			     finalize_work);
++	u64 actual, status, target;
++	unsigned long flags;
++	int ret;
++
++	status = readq(rep->base + rep->offsets->status);
++	if (!(status & PMP_REPORT_READY)) {
++		/* PMP may never start (apple_pmp.enable=0): stop polling. */
++		if (time_after(jiffies, rep->probed + msecs_to_jiffies(PMP_READY_WAIT_MS))) {
++			dev_warn(rep->dev,
++				 "PMP not ready after %u ms; not finalizing (expected with apple_pmp.enable=0)\n",
++				 PMP_READY_WAIT_MS);
++			return;
++		}
++		schedule_delayed_work(&rep->finalize_work, msecs_to_jiffies(1));
++		return;
++	}
++
++	/* Native T8132 stages event channel 5 before asking PMP to enable its
++	 * post-ready report bit.  The other three channels are enabled only
++	 * after PMP acknowledges the request. */
++	if (rep->event_config)
++		writel(readl(rep->event_config + 0x20) | BIT(2),
++		       rep->event_config + 0x20);
++
++	spin_lock_irqsave(&rep->lock, flags);
++	target = readq(rep->base + rep->offsets->tgt_read) | BIT_ULL(12);
++	writeq(target, rep->base + rep->offsets->tgt_write);
++	spin_unlock_irqrestore(&rep->lock, flags);
++
++	ret = readq_poll_timeout(rep->base + rep->offsets->actual, actual,
++				 actual & BIT_ULL(12), 10, 500000);
++	dev_info(rep->dev,
++		 "post-ready enable bit 12: target=%#llx actual=%#llx ret=%d\n",
++		 target, actual, ret);
++	if (ret)
++		return;
++
++	if (rep->event_config) {
++		writel(readl(rep->event_config + 0x00) | BIT(2),
++		       rep->event_config + 0x00);
++		writel(readl(rep->event_config + 0x04) | BIT(2),
++		       rep->event_config + 0x04);
++		writel(readl(rep->event_config + 0x08) | BIT(2),
++		       rep->event_config + 0x08);
++	}
++
++	/* Native 26.6 drops the boot-time bit 18 vote after bit 12 is live. */
++	spin_lock_irqsave(&rep->lock, flags);
++	target = readq(rep->base + rep->offsets->tgt_read) & ~BIT_ULL(18);
++	writeq(target, rep->base + rep->offsets->tgt_write);
++	spin_unlock_irqrestore(&rep->lock, flags);
++
++	ret = readq_poll_timeout(rep->base + rep->offsets->actual, actual,
++				 !(actual & BIT_ULL(18)), 10, 500000);
++	dev_info(rep->dev,
++		 "post-ready disable bit 18: target=%#llx actual=%#llx ret=%d\n",
++		 target, actual, ret);
++	if (rep->event_config)
++		writel(readl(rep->event_config + 0x20) & ~BIT(2),
++		       rep->event_config + 0x20);
++}
++
+ static int apple_pmp_report_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -42,18 +190,49 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
+ 
+ 	spin_lock_init(&rep->lock);
+ 	rep->dev = dev;
++	rep->probed = jiffies;
+ 	rep->base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(rep->base))
+ 		return PTR_ERR(rep->base);
+ 	rep->offsets = of_device_get_match_data(dev);
++	if (rep->offsets->has_event_config) {
++		rep->event_config = devm_platform_ioremap_resource_byname(pdev, "event-config");
++		if (IS_ERR(rep->event_config))
++			return PTR_ERR(rep->event_config);
++	}
++	ret = apple_pmp_report_read_device_flags(rep);
++	if (ret)
++		return ret;
+ 	dev_set_drvdata(dev, rep);
+ 	ret = of_platform_populate(np, NULL, NULL, dev);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to create child devices\n");
+ 
++	if (rep->offsets->finalize_after_ready) {
++		INIT_DELAYED_WORK(&rep->finalize_work, apple_pmp_report_finalize_work);
++		schedule_delayed_work(&rep->finalize_work, 0);
++	}
++
+ 	return 0;
+ }
+ 
++static void apple_pmp_report_remove(struct platform_device *pdev)
++{
++	struct apple_pmp_report *rep = platform_get_drvdata(pdev);
++
++	if (rep->offsets->finalize_after_ready)
++		cancel_delayed_work_sync(&rep->finalize_work);
++	of_platform_depopulate(&pdev->dev);
++}
++
++/* J700 native ptd-range request/ack/status data, not a new PMP protocol. */
++static const struct apple_pmp_report_offsets apple_pmp_offsets_t8140 = {
++	.tgt_read = 0x1880,
++	.tgt_write = 0x10c40,
++	.actual = 0x18c0,
++	.status = 0x10,
++};
++
+ static const struct apple_pmp_report_offsets apple_pmp_offsets_t600x = {
+ 	.tgt_read = 0xf80,
+ 	.tgt_write = 0x107c0,
+@@ -89,7 +268,29 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t8122 = {
+ 	.status = 0x10,
+ };
+ 
++/* Native T6041 report accesses: the read bank expands each PTD entry
++ * to 16 bytes, while the update bank uses 8 bytes per entry.
++ */
++static const struct apple_pmp_report_offsets apple_pmp_offsets_t6041 = {
++	.tgt_read = 0x1e00,
++	.tgt_write = 0x10f00,
++	.actual = 0x1e80,
++	.status = 0x10,
++};
++
++static const struct apple_pmp_report_offsets apple_pmp_offsets_t8132 = {
++	.tgt_read = 0x1880,
++	.tgt_write = 0x10c40,
++	.actual = 0x1900,
++	.status = 0x10,
++	.finalize_after_ready = true,
++	.has_event_config = true,
++};
++
+ static const struct of_device_id apple_pmp_report_of_match[] = {
++	{ .compatible = "apple,t8132-pmp-v2-report", .data = &apple_pmp_offsets_t8132 },
++	{ .compatible = "apple,t8140-pmp-v2-report", .data = &apple_pmp_offsets_t8140 },
++	{ .compatible = "apple,t6041-pmp-v2-report", .data = &apple_pmp_offsets_t6041 },
+ 	{ .compatible = "apple,t6000-pmp-v2-report", .data = &apple_pmp_offsets_t600x },
+ 	{ .compatible = "apple,t6020-pmp-v2-report", .data = &apple_pmp_offsets_t602x },
+ 	{ .compatible = "apple,t6030-pmp-v2-report", .data = &apple_pmp_offsets_t6030 },
+@@ -100,6 +301,7 @@ static const struct of_device_id apple_pmp_report_of_match[] = {
+ 
+ static struct platform_driver apple_pmp_report_driver = {
+ 	.probe = apple_pmp_report_probe,
++	.remove = apple_pmp_report_remove,
+ 	.driver = {
+ 		.name = "apple-pmp-report",
+ 		.of_match_table = apple_pmp_report_of_match,
+@@ -119,7 +321,7 @@ static int apple_pmp_report_set_state(struct generic_pm_domain *genpd, bool enab
+ {
+ 	struct apple_pmp_report_entry *ent = genpd_to_apple_pmp_report_entry(genpd);
+ 	struct apple_pmp_report *rep = dev_get_drvdata(ent->dev->parent);
+-	u64 bit_val = 1 << ent->id;
++	u64 bit_val = BIT_ULL(ent->id);
+ 	u64 val;
+ 	unsigned long flags;
+ 
+@@ -130,6 +332,9 @@ static int apple_pmp_report_set_state(struct generic_pm_domain *genpd, bool enab
+ 		val |= bit_val;
+ 	writeq(val, rep->base + rep->offsets->tgt_write);
+ 	spin_unlock_irqrestore(&rep->lock, flags);
++	/* A notification-only record does not promise an acknowledgement. */
++	if (!(rep->ack_mask & bit_val))
++		return 0;
+ 	val = readq(rep->base + rep->offsets->status);
+ 	if ((val & PMP_REPORT_READY) == 0)
+ 		return 0;
+@@ -156,40 +361,57 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
+ 	struct device *dev = &pdev->dev;
+ 	struct device_node *node = dev->of_node;
+ 	struct apple_pmp_report_entry *ent;
++	struct apple_pmp_report *rep = dev_get_drvdata(dev->parent);
+ 	int ret;
+ 	const char *name;
+ 	struct of_phandle_iterator it;
++	bool always_on, boot_on;
+ 
+ 	ent = devm_kzalloc(dev, sizeof(*ent), GFP_KERNEL);
+ 	if (!ent)
+ 		return -ENOMEM;
+ 
+ 	ent->dev = dev;
++	/* All report accesses use MMIO, a spinlock and atomic polling. This
++	 * domain can therefore parent the IRQ-safe PMGR power-state domains.
++	 */
++	ent->genpd.flags |= GENPD_FLAG_IRQ_SAFE;
+ 
+ 	ret = of_property_read_u32(node, "reg", &ent->id);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "missing reg property\n");
++	if (ent->id >= 64 || !(rep->valid_mask & BIT_ULL(ent->id)))
++		return dev_err_probe(dev, -EINVAL, "report index outside PMP device table\n");
+ 
+ 	ret = of_property_read_string(node, "label", &name);
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "missing label property\n");
+ 
+-	if (of_property_read_bool(node, "apple,always-on")) {
+-		ent->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
+-		apple_pmp_report_set_state(&ent->genpd, true);
+-	}
++	always_on = of_property_read_bool(node, "apple,always-on");
++	if (always_on)
++		ent->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP | GENPD_FLAG_ALWAYS_ON;
++	/* Parent report domains must start on before adding powered children. */
++	boot_on = always_on || of_property_read_bool(node, "apple,boot-on");
+ 
+ 	ent->genpd.name = name;
+ 	ent->genpd.power_on = apple_pmp_report_entry_power_on;
+ 	ent->genpd.power_off = apple_pmp_report_entry_power_off;
+ 
+-	ret = pm_genpd_init(&ent->genpd, NULL, true);
++	ret = pm_genpd_init(&ent->genpd, NULL, !boot_on);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "pm_genpd_init failed\n");
+ 
++	if (boot_on) {
++		ret = apple_pmp_report_set_state(&ent->genpd, true);
++		if (ret)
++			goto err_remove_genpd;
++	}
++
+ 	ret = of_genpd_add_provider_simple(node, &ent->genpd);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "of_genpd_add_provider_simple failed\n");
++	if (ret) {
++		dev_err_probe(dev, ret, "of_genpd_add_provider_simple failed\n");
++		goto err_remove_genpd;
++	}
+ 
+ 	of_for_each_phandle(&it, ret, node, "power-domains", "#power-domain-cells", -1) {
+ 		struct of_phandle_args parent, child;
+@@ -216,6 +438,7 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
+ 	return 0;
+ err_remove:
+ 	of_genpd_del_provider(node);
++err_remove_genpd:
+ 	pm_genpd_remove(&ent->genpd);
+ 	return ret;
+ }
+diff --git a/drivers/soc/apple/pmp.rs b/drivers/soc/apple/pmp.rs
+index 7924881a2046b..cf1df1e2a4c23 100644
+--- a/drivers/soc/apple/pmp.rs
++++ b/drivers/soc/apple/pmp.rs
+@@ -8,22 +8,23 @@
+ use core::mem;
+ 
+ use kernel::{
+-    bindings,
+     device::{
+         self,
+         Core, //
+     },
+     dma::{
+         Coherent,
+-        CoherentBox, //
++        CoherentBox,
++        Device,
++        DmaMask, //
+     },
+     io::{
+-        io_project,
++        mem::DevresIoMem,
+         Io,
+         IoBase,
+         IoSysMap,
+-        Mmio,
+-        Region, //
++        Region,
++        SysMem, //
+     },
+     kvec,
+     module_platform_driver,
+@@ -31,10 +32,7 @@
+     of,
+     platform,
+     prelude::*,
+-    soc::apple::rtkit::{
+-        self,
+-        ASC_CPU_CONTROL, //
+-    },
++    soc::apple::rtkit,
+     str::CString,
+     sync::{
+         aref::ARef,
+@@ -48,10 +46,11 @@
+     types::ForeignOwnable, //
+ };
+ 
+-const PMP_MMIO_SIZE: usize = 0x80000;
+ const ASC_MMIO_SIZE: usize = 0x4000;
+ const BOOTARGS_OFFSET: usize = 0x22c;
+ const BOOTARGS_SIZE: usize = 0x230;
++const CPU_CONTROL: usize = 0x44;
++const CPU_RUN: u32 = 0x1 << 4;
+ const PMP_ENDPOINT: u8 = 0x20;
+ const OPC_GET_IOVA_TABLE: u64 = 0x10;
+ const OPC_MALLOC: u64 = 0x12;
+@@ -59,6 +58,7 @@
+ const OPC_SET_BUF: u64 = 0x30;
+ const OPC_REGISTER_IOREG: u64 = 0x32;
+ const OPC_SET_IOREG: u64 = 0x34;
++const OPC_ADVERTISE_DONE: u64 = 0x36;
+ const OPC_ACK_MASK: u64 = 0x1;
+ const OPC_SHIFT: u32 = 48;
+ const MALLOC_SIZE_MASK: u64 = 0xFFFFFF;
+@@ -92,8 +92,21 @@ struct PmpState {
+     allocs: KVec<PmpAllocation>,
+     value_buf: Option<u64>,
+     ioreg_entries: KVec<u32>,
++    ioreg_advertisements: usize,
++}
++
++struct PmpHwConfig {
++    advertise_reply_index: bool,
+ }
+ 
++const PMP_HW_T6000: PmpHwConfig = PmpHwConfig {
++    advertise_reply_index: true,
++};
++
++const PMP_HW_T8132: PmpHwConfig = PmpHwConfig {
++    advertise_reply_index: false,
++};
++
+ impl PmpState {
+     fn new() -> Result<PmpState> {
+         Ok(PmpState {
+@@ -101,6 +114,7 @@ fn new() -> Result<PmpState> {
+             allocs: KVec::with_capacity(10, GFP_KERNEL)?,
+             value_buf: None,
+             ioreg_entries: KVec::with_capacity(340, GFP_KERNEL)?,
++            ioreg_advertisements: 0,
+         })
+     }
+     fn find_alloc(&self, addr: u64) -> Option<usize> {
+@@ -122,6 +136,9 @@ fn get_buf(&mut self, addr: u64) -> Option<&mut Coherent<[u8]>> {
+ #[pin_data]
+ struct PmpData {
+     dev: ARef<device::Device>,
++    advertise_reply_index: bool,
++    pmp_mmio: DevresIoMem,
++    asc_mmio: DevresIoMem<ASC_MMIO_SIZE>,
+     #[pin]
+     rtkit: Mutex<Option<rtkit::RtKit<PmpData>>>,
+     #[pin]
+@@ -129,11 +146,20 @@ struct PmpData {
+ }
+ 
+ impl PmpData {
+-    fn new(dev: &platform::Device<Core<'_>>) -> Result<Arc<PmpData>> {
++    fn new(dev: &platform::Device<Core<'_>>, cfg: &'static PmpHwConfig) -> Result<Arc<PmpData>> {
++        let pmp_req = dev.io_request_by_name(c"pmp").ok_or(EINVAL)?;
++        // T6041 places boot arguments beyond the older 512 KiB window.
++        // Map the firmware resource supplied by the board's device tree.
++        let pmp_mmio = pmp_req.iomap()?.into_devres()?;
++        let asc_req = dev.io_request_by_name(c"asc").ok_or(EINVAL)?;
++        let asc_mmio = asc_req.iomap_sized::<ASC_MMIO_SIZE>()?.into_devres()?;
+         Arc::pin_init(
+             try_pin_init!(
+                 PmpData {
+                     dev: dev.as_ref().into(),
++                    advertise_reply_index: cfg.advertise_reply_index,
++                    pmp_mmio,
++                    asc_mmio,
+                     rtkit <- new_mutex!(None),
+                     state <- new_mutex!(PmpState::new()?)
+                 }
+@@ -141,24 +167,31 @@ fn new(dev: &platform::Device<Core<'_>>) -> Result<Arc<PmpData>> {
+             GFP_KERNEL,
+         )
+     }
++    fn start_cpu(&self) -> Result<()> {
++        let asc = self.asc_mmio.try_access().ok_or(ENODEV)?;
++        let io = asc.as_view().relaxed();
++        let val = io.read32(CPU_CONTROL);
++        io.write32(val | CPU_RUN, CPU_CONTROL);
++        Ok(())
++    }
+     fn start(&self) -> Result<()> {
+         let mut guard = self.rtkit.lock();
+         let mut rtk = guard.as_mut().as_pin_mut().unwrap();
+         rtk.as_mut().wake()?;
+         rtk.start_endpoint(PMP_ENDPOINT)
+     }
+-    fn patch_bootargs(
+-        &self,
+-        pmp_mmio: &Mmio<'_, Region<PMP_MMIO_SIZE>>,
+-        patches: &[(u32, u32)],
+-    ) -> Result<()> {
+-        let io = pmp_mmio.as_view().relaxed();
+-        let offset = io.read32(BOOTARGS_OFFSET) as usize;
+-        let size = io.read32(BOOTARGS_SIZE) as usize;
++    fn patch_bootargs(&self, patches: &[(u32, u32)]) -> Result<()> {
++        let pmp = self.pmp_mmio.try_access().ok_or(ENODEV)?;
++        let io = pmp.as_view().relaxed();
++        let offset = io.try_read32(BOOTARGS_OFFSET)? as usize;
++        let size = io.try_read32(BOOTARGS_SIZE)? as usize;
++        if offset.checked_add(size).ok_or(EINVAL)? > io.size() {
++            return Err(EINVAL);
++        }
+         let mut arg_bytes = kvec![0u8; size]?;
+-        let pmp_io_array: Mmio<'_, [u8; PMP_MMIO_SIZE]> = pmp_mmio.try_cast()?;
+-        let bootargs = io_project!(pmp_io_array, [try: offset .. offset+size]);
+-        bootargs.copy_to_slice(&mut arg_bytes);
++        for (i, b) in arg_bytes.iter_mut().enumerate() {
++            *b = io.try_read8(offset + i)?;
++        }
+         let mut idx = 0;
+         while idx < size {
+             let key = u32::from_le_bytes(arg_bytes[idx..idx + 4].try_into().unwrap());
+@@ -173,7 +206,9 @@ fn patch_bootargs(
+             }
+             idx += size;
+         }
+-        bootargs.copy_from_slice(&arg_bytes);
++        for (i, b) in arg_bytes.iter().enumerate() {
++            io.try_write8(*b, offset + i)?;
++        }
+         Ok(())
+     }
+     fn get_iova_table(&self) -> Result<u64> {
+@@ -196,22 +231,17 @@ fn get_iova_table(&self) -> Result<u64> {
+         let bound_dev = unsafe { self.dev.as_bound() };
+         let mut table = CoherentBox::<[IovaTableEntry]>::zeroed_slice(bound_dev, 170, GFP_KERNEL)?;
+ 
+-        let domain = unsafe { bindings::iommu_get_domain_for_dev(self.dev.as_raw()) };
+         for i in 0..n_entries {
+             let host_addr = ranges[i * 2];
+             let size = ranges[i * 2 + 1];
+             unsafe {
+-                let err = bindings::iommu_map(
+-                    domain,
++                kernel::iommu::map_device_mmio(
++                    bound_dev,
+                     pio_base as usize,
+                     host_addr,
+                     size as usize,
+-                    (bindings::IOMMU_READ | bindings::IOMMU_WRITE | bindings::IOMMU_MMIO) as i32,
+-                    bindings::GFP_KERNEL,
+-                );
+-                if err != 0 {
+-                    return Err(Error::from_errno(err));
+-                }
++                    GFP_KERNEL,
++                )?;
+             }
+             table[i] = IovaTableEntry {
+                 _host_addr: host_addr,
+@@ -221,7 +251,7 @@ fn get_iova_table(&self) -> Result<u64> {
+             pio_base += PIO_GRANULARITY;
+         }
+         let table: Coherent<[IovaTableEntry]> = table.into();
+-        let msg = (OPC_GET_IOVA_TABLE | OPC_ACK_MASK) << OPC_SHIFT | table.dma_handle();
++        let msg = (OPC_GET_IOVA_TABLE | OPC_ACK_MASK) << OPC_SHIFT | table.dma_address();
+         state.iova_table = Some(table);
+         Ok(msg)
+     }
+@@ -230,7 +260,7 @@ fn malloc(&self, size: u64) -> Result<u64> {
+         let bound_dev = unsafe { self.dev.as_bound() };
+         let iomem = Coherent::<u8>::zeroed_slice(bound_dev, size as usize, GFP_KERNEL)?;
+         let mut state = self.state.lock();
+-        let addr = iomem.dma_handle();
++        let addr = iomem.dma_address();
+         let msg = (OPC_MALLOC | OPC_ACK_MASK) << OPC_SHIFT | addr;
+         state.allocs.push(
+             PmpAllocation {
+@@ -272,34 +302,85 @@ fn set_buf(&self, addr: u64) -> Result<u64> {
+             dev_err!(self.dev, "Buffer too small");
+             return Err(EIO);
+         }
+-        let ptr = unsafe { *(ptr_buf.as_ptr() as *const u64) };
++        // SAFETY: The buffer holds at least eight bytes, checked above.
++        let ptr = unsafe { core::ptr::read_unaligned(ptr_buf.as_ptr().cast::<u64>()) };
+         state.value_buf = Some(ptr);
+         let msg = (OPC_SET_BUF | OPC_ACK_MASK) << OPC_SHIFT;
+         Ok(msg)
+     }
+     fn register_ioreg(&self, addr: u64) -> Result<u64> {
+         let mut state = self.state.lock();
++        let advertisement_index = state.ioreg_advertisements;
+         let msg_buf = if let Some(s) = state.get_buf(addr) {
+             s
+         } else {
+             dev_err!(self.dev, "Unable to find buffer");
+             return Err(EIO);
+         };
+-        if msg_buf.size() < 0x44 {
++        if msg_buf.size() < 0x4c {
+             dev_err!(self.dev, "Buffer too small");
+             return Err(EIO);
+         }
++        let mut name_vec = KVec::with_capacity(0x31, GFP_KERNEL)?;
++        name_vec
++            .extend_from_slice(unsafe { &msg_buf.as_ref()[0..0x30] }, GFP_KERNEL)
++            .unwrap();
++        name_vec.push(0, GFP_KERNEL).unwrap();
++        let name_str = CStr::from_bytes_until_nul(&name_vec).unwrap();
++
++        let display_monitor = name_str == c"dcs-monitor"
++            || name_str == c"disp-monitor"
++            || name_str == c"dispext0-monitor"
++            || name_str == c"dispext1-monitor";
++
+         // SAFETY: TODO
+         let mut size = u32::from_le_bytes(unsafe {
+             <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x40..0x44]).unwrap()
+         });
+-        if size == 0 {
+-            let mut name_vec = KVec::with_capacity(0x31, GFP_KERNEL)?;
+-            name_vec
+-                .extend_from_slice(unsafe { &msg_buf.as_ref()[0..0x30] }, GFP_KERNEL)
+-                .unwrap();
+-            name_vec.push(0, GFP_KERNEL).unwrap();
+-            let name_str = CStr::from_bytes_until_nul(&name_vec).unwrap();
++        let wire_index = u32::from_le_bytes(unsafe {
++            <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x48..0x4c]).unwrap()
++        });
++        if verbose() {
++            dev_info!(
++                self.dev,
++                "PMP descriptor {} wire_index={:#x} {:?}: words30={:#010x} words34={:#010x} words38={:#010x} words3c={:#010x} size={:#x}",
++                advertisement_index,
++                wire_index,
++                name_str,
++                u32::from_le_bytes(unsafe {
++                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x30..0x34]).unwrap()
++                }),
++                u32::from_le_bytes(unsafe {
++                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x34..0x38]).unwrap()
++                }),
++                u32::from_le_bytes(unsafe {
++                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x38..0x3c]).unwrap()
++                }),
++                u32::from_le_bytes(unsafe {
++                    <&[u8] as TryInto<[u8; 4]>>::try_into(&msg_buf.as_ref()[0x3c..0x40]).unwrap()
++                }),
++                size
++            );
++        }
++        if display_monitor && size == mem::size_of::<u32>() as u32 {
++            /* The monitor descriptors carry their initial value through the
++             * shared value buffer.  Native T8132 publishes all four display
++             * monitor properties as one; a zero-filled host buffer silently
++             * disables that PMP policy even though the descriptor is
++             * acknowledged with the correct size. */
++            let val_buf_addr = state.value_buf.ok_or(EIO)?;
++            let val_buf = state.get_buf(val_buf_addr).ok_or(EIO)?;
++            if val_buf.size() < mem::size_of::<u32>() {
++                return Err(EINVAL);
++            }
++            unsafe {
++                val_buf.as_mut()[..mem::size_of::<u32>()]
++                    .copy_from_slice(&1u32.to_le_bytes());
++            }
++            if verbose() {
++                dev_info!(self.dev, "initialized PMP monitor {:?} to 1", name_str);
++            }
++        } else if size == 0 {
+             let name_str = CString::try_from_fmt(fmt!("apple,tunable-{name_str}"))?;
+             let node = self.dev.fwnode().ok_or(EIO)?;
+             if state.value_buf.is_none() {
+@@ -315,6 +396,10 @@ fn register_ioreg(&self, addr: u64) -> Result<u64> {
+             };
+             if node.property_present(&name_str) {
+                 let len = node.property_count_elem::<u8>(&name_str)?;
++                if len > val_buf.size() {
++                    dev_err!(self.dev, "tunable {:?} does not fit the value buffer", name_str);
++                    return Err(EINVAL);
++                }
+                 let data = node
+                     .property_read_array_vec::<u8>(&name_str, len)?
+                     .required_by(&self.dev)?;
+@@ -322,25 +407,67 @@ fn register_ioreg(&self, addr: u64) -> Result<u64> {
+                     val_buf.as_mut()[0..len].copy_from_slice(&data);
+                 }
+                 size = len as u32;
+-            } else {
++            } else if verbose() {
+                 dev_info!(self.dev, "unknown property {:?}", name_str);
+             }
+         }
+-        state.ioreg_entries.push(size, GFP_KERNEL)?;
+-        let index = state.ioreg_entries.len() as u64;
+-        let msg = (OPC_REGISTER_IOREG | OPC_ACK_MASK) << OPC_SHIFT | (index << 32) | size as u64;
++        if self.advertise_reply_index {
++            state.ioreg_entries.push(size, GFP_KERNEL)?;
++        } else {
++            /* T8132 carries the SetIOReg lookup key in the descriptor at
++             * offset 0x48.  Aggregate descriptors reuse keys and do not
++             * consume one monotonically, so arrival order is not an index.
++             * Keep the most recently advertised size for each wire key. */
++            let index = wire_index as usize;
++            if state.ioreg_entries.len() <= index {
++                state.ioreg_entries.resize(index + 1, 0, GFP_KERNEL)?;
++            }
++            state.ioreg_entries[index] = size;
++        }
++        state.ioreg_advertisements += 1;
++        /* The older firmware ABI returns the number of advertised entries in
++         * bits 47:32.  T8132/26.6 instead returns zero in this field for every
++         * descriptor; the descriptor itself carries its SetIOReg index. */
++        let reply_index = if self.advertise_reply_index {
++            state.ioreg_entries.len() as u64
++        } else {
++            0
++        };
++        let msg =
++            (OPC_REGISTER_IOREG | OPC_ACK_MASK) << OPC_SHIFT | (reply_index << 32) | size as u64;
+         Ok(msg)
+     }
+     fn set_ioreg(&self, index: u64) -> Result<u64> {
+-        let len = *self
+-            .state
+-            .lock()
++        let state = self.state.lock();
++        let len = *state
+             .ioreg_entries
+             .get(index as usize)
+             .ok_or(EIO)? as u64;
++        if verbose() {
++            dev_info!(
++                self.dev,
++                "PMP SetIOReg index={:#x} size={:#x} entries={}",
++                index,
++                len,
++                state.ioreg_advertisements
++            );
++        }
+         let msg = (OPC_SET_IOREG | OPC_ACK_MASK) << OPC_SHIFT | len;
+         Ok(msg)
+     }
++    fn advertise_done(&self, count: u64) -> u64 {
++        let state = self.state.lock();
++        if verbose() {
++            dev_info!(
++                self.dev,
++                "PMP AdvertiseDone count={:#x} advertisements={} wire_entries={} ack=8",
++                count,
++                state.ioreg_advertisements,
++                state.ioreg_entries.len()
++            );
++        }
++        ((OPC_ADVERTISE_DONE | OPC_ACK_MASK) << OPC_SHIFT) | 8
++    }
+     fn recv_message(&self, msg: u64) -> Result<()> {
+         let opc = (msg >> OPC_SHIFT) & 0xFF;
+         let reply = match opc {
+@@ -350,6 +477,10 @@ fn recv_message(&self, msg: u64) -> Result<()> {
+             OPC_SET_BUF => self.set_buf(msg & MSG_IOVA_MASK)?,
+             OPC_REGISTER_IOREG => self.register_ioreg(msg & MSG_IOVA_MASK)?,
+             OPC_SET_IOREG => self.set_ioreg(msg & SET_IOREG_INDEX_MASK)?,
++            // The low bits contain the number of properties advertised in
++            // this batch.  Current firmware expects a fixed value of 8 in
++            // the acknowledgement, rather than the count echoed back.
++            OPC_ADVERTISE_DONE => self.advertise_done(msg & MSG_IOVA_MASK),
+             _ => {
+                 dev_err!(self.dev, "Got unknown message {}", msg);
+                 return Err(EIO);
+@@ -365,20 +496,37 @@ fn recv_message(&self, msg: u64) -> Result<()> {
+ unsafe impl Send for PmpData {}
+ unsafe impl Sync for PmpData {}
+ 
+-struct NoBuffer;
+-impl rtkit::Buffer for NoBuffer {
++struct PmpRtkitBuffer(Coherent<[u8]>);
++
++impl rtkit::Buffer for PmpRtkitBuffer {
+     fn iova(&self) -> Result<usize> {
+-        unreachable!()
++        Ok(self.0.dma_address() as usize)
+     }
+     fn buf(&mut self) -> Result<IoSysMap<'_, Region>> {
+-        unreachable!()
++        let region =
++            Region::ptr_try_from_raw_parts_mut(self.0.as_mut_ptr().cast::<u8>(), self.0.size())?;
++        // SAFETY: The coherent allocation owns `size()` writable bytes at
++        // `as_mut_ptr()` and outlives the returned borrowed mapping.
++        Ok(IoSysMap::Sys(unsafe { SysMem::new(region) }))
+     }
+ }
+ 
+ #[vtable]
+ impl rtkit::Operations for PmpData {
+     type Data = Arc<PmpData>;
+-    type Buffer = NoBuffer;
++    type Buffer = PmpRtkitBuffer;
++
++    fn shmem_alloc(
++        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
++        size: usize,
++    ) -> Result<Self::Buffer> {
++        // SAFETY: The PMP platform device remains bound for the lifetime of
++        // `data` and therefore for the coherent allocation returned here.
++        let bound_dev = unsafe { data.dev.as_bound() };
++        Ok(PmpRtkitBuffer(Coherent::<u8>::zeroed_slice(
++            bound_dev, size, GFP_KERNEL,
++        )?))
++    }
+ 
+     fn recv_message(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _ep: u8, msg: u64) {
+         let ret = data.recv_message(msg);
+@@ -397,29 +545,42 @@ fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _crashlog: Option
+ 
+ kernel::of_device_table!(
+     OF_TABLE,
+-    MODULE_OF_TABLE,
+-    (),
+-    [(of::DeviceId::new(c"apple,t6000-pmp-v2"), ())]
++    <PmpDriver as platform::Driver>::IdInfo,
++    [
++        (of::DeviceId::new(c"apple,t8132-pmp-v2"), &PMP_HW_T8132),
++        (of::DeviceId::new(c"apple,t6041-pmp-v2"), &PMP_HW_T8132),
++        (of::DeviceId::new(c"apple,t6000-pmp-v2"), &PMP_HW_T6000),
++    ]
+ );
+ 
++/// Whether to log PMP's start-up handshake (apple_pmp.verbose=1).
++fn verbose() -> bool {
++    crate::module_parameters::verbose.value() != 0
++}
++
+ impl platform::Driver for PmpDriver {
+-    type IdInfo = ();
++    type IdInfo = &'static PmpHwConfig;
+     type Data<'bound> = PmpDriver;
+ 
+     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
+ 
+     fn probe<'bound>(
+         pdev: &'bound platform::Device<Core<'_>>,
+-        _info: Option<&'bound Self::IdInfo>,
++        info: Option<&'bound Self::IdInfo>,
+     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
++        let cfg = info.ok_or(ENODEV)?;
++        // apple_pmp.enable=0 leaves PMP stopped: the system runs as without
++        // PMP (its report votes are written but nothing acts on them).
++        if crate::module_parameters::enable.value() == 0 {
++            dev_info!(pdev.as_ref(), "PMP disabled (apple_pmp.enable=0)\n");
++            return Err(ENODEV);
++        }
++        // PMP DART IOVAs live in the 0x100_00000000 aperture on T8132, so
++        // the default 32-bit coherent DMA mask cannot satisfy RTKit's shared
++        // memory requests.
++        unsafe { pdev.dma_set_mask_and_coherent(DmaMask::new::<42>())? };
+         let dev: ARef<device::Device> = pdev.as_ref().into();
+-        let pmp_req = pdev.io_request_by_name(c"pmp").ok_or(EINVAL)?;
+-        let pmp_mmio = pmp_req.iomap_sized::<PMP_MMIO_SIZE>()?;
+-        let pmp_mmio = pmp_mmio.as_view();
+-        let asc_req = pdev.io_request_by_name(c"asc").ok_or(EINVAL)?;
+-        let asc_mmio = asc_req.iomap_sized::<ASC_MMIO_SIZE>()?;
+-        let asc_mmio = asc_mmio.as_view().relaxed();
+-        let data = PmpData::new(pdev)?;
++        let data = PmpData::new(pdev, cfg)?;
+         let node = dev.fwnode().ok_or(EIO)?;
+         let dvid = node
+             .property_read(c"apple,dram-vendor-id")
+@@ -427,7 +588,6 @@ fn probe<'bound>(
+         let bdid = node.property_read(c"apple,board-id").required_by(&dev)?;
+         match node.property_read(c"apple,dram-capacity").optional() {
+             Some(dcap) => data.patch_bootargs(
+-                &pmp_mmio,
+                 &[
+                     (from_fourcc(b"BDID"), bdid),
+                     (from_fourcc(b"DCAP"), dcap),
+@@ -435,13 +595,12 @@ fn probe<'bound>(
+                 ],
+             )?,
+             None => data.patch_bootargs(
+-                &pmp_mmio,
+                 &[(from_fourcc(b"BDID"), bdid), (from_fourcc(b"DVID"), dvid)],
+             )?,
+         };
+         let rtkit = rtkit::RtKit::<PmpData>::new(&dev, None, 0, data.clone())?;
+         data.rtkit.lock().as_mut().set(Some(rtkit));
+-        asc_mmio.update(ASC_CPU_CONTROL, |r| r.with_const_cpu_run::<1>());
++        data.start_cpu()?;
+         data.start()?;
+         Ok(PmpDriver(data))
+     }
+@@ -452,4 +611,14 @@ fn probe<'bound>(
+     name: "apple_pmp",
+     description: "Apple Power Management Processor",
+     license: "Dual MIT/GPL",
++    params: {
++        enable: u32 {
++            default: 1,
++            description: "1 (default) starts PMP; 0 leaves it stopped, as on kernels without PMP",
++        },
++        verbose: u32 {
++            default: 0,
++            description: "1 logs every descriptor of PMP's start-up handshake",
++        },
++    },
+ }
+diff --git a/drivers/soc/apple/rtkit-internal.h b/drivers/soc/apple/rtkit-internal.h
+index ff9d4eddae941..babd777fef28b 100644
+--- a/drivers/soc/apple/rtkit-internal.h
++++ b/drivers/soc/apple/rtkit-internal.h
+@@ -25,6 +25,9 @@
+ struct apple_rtkit {
+ 	void *cookie;
+ 	const struct apple_rtkit_ops *ops;
++	/* Compatibility for clients configuring boot policy per instance. */
++	unsigned int compat_quirks;
++	bool skip_boot_ap_power;
+ 	struct device *dev;
+ 
+ 	struct apple_mbox *mbox;
+diff --git a/drivers/soc/apple/rtkit.c b/drivers/soc/apple/rtkit.c
+index cef7d107e952e..699ad652e1974 100644
+--- a/drivers/soc/apple/rtkit.c
++++ b/drivers/soc/apple/rtkit.c
+@@ -88,7 +88,7 @@ struct apple_rtkit_rx_work {
+ static bool apple_rtkit_has_quirk(struct apple_rtkit *rtk,
+ 				 enum apple_rtkit_quirks quirk)
+ {
+-	return rtk->ops->quirks & quirk;
++	return (rtk->ops->quirks | rtk->compat_quirks) & quirk;
+ }
+ 
+ bool apple_rtkit_is_running(struct apple_rtkit *rtk)
+@@ -834,6 +834,114 @@ static int apple_rtkit_set_ap_power_state(struct apple_rtkit *rtk,
+ 	return 0;
+ }
+ 
++void apple_rtkit_set_boot_ap_power(struct apple_rtkit *rtk, bool enable)
++{
++	rtk->skip_boot_ap_power = !enable;
++}
++EXPORT_SYMBOL_GPL(apple_rtkit_set_boot_ap_power);
++
++void apple_rtkit_set_early_crashlog(struct apple_rtkit *rtk)
++{
++	rtk->compat_quirks |= APPLE_RTKIT_QUIRK_EARLY_CRASHLOG;
++	reinit_completion(&rtk->crashlog_completion);
++}
++EXPORT_SYMBOL_GPL(apple_rtkit_set_early_crashlog);
++
++int apple_rtkit_adopt_running(struct apple_rtkit *rtk, const u8 *endpoints,
++			      size_t n_endpoints)
++{
++	size_t i;
++
++	if (!rtk || (!endpoints && n_endpoints) || rtk->crashed)
++		return -EINVAL;
++
++	bitmap_zero(rtk->endpoints, APPLE_RTKIT_MAX_ENDPOINTS);
++	set_bit(APPLE_RTKIT_EP_MGMT, rtk->endpoints);
++	for (i = 0; i < n_endpoints; i++)
++		set_bit(endpoints[i], rtk->endpoints);
++
++	/* The bootloader already negotiated the current protocol and left both
++	 * halves of the link live. No HELLO, endpoint map, INIT, or AP-power
++	 * message may be replayed into that session. */
++	rtk->version = APPLE_RTKIT_MAX_SUPPORTED_VERSION;
++	rtk->boot_result = 0;
++	rtk->iop_power_state = APPLE_RTKIT_PWR_STATE_ON;
++	rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_ON;
++	complete_all(&rtk->epmap_completion);
++	complete_all(&rtk->iop_pwr_ack_completion);
++	complete_all(&rtk->ap_pwr_ack_completion);
++
++	dev_info(rtk->dev, "RTKit: adopted running bootloader session\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(apple_rtkit_adopt_running);
++
++int apple_rtkit_reuse_syslog_buffer(struct apple_rtkit *rtk, dma_addr_t iova,
++				    size_t size, size_t n_entries,
++				    size_t msg_size)
++{
++	int ret;
++
++	if (!rtk || !iova || !size || !n_entries || !msg_size)
++		return -EINVAL;
++	if (rtk->syslog_buffer.size || rtk->syslog_msg_buffer)
++		return -EBUSY;
++	if (!rtk->ops->shmem_setup)
++		return -EOPNOTSUPP;
++
++	rtk->syslog_buffer.iova = iova;
++	rtk->syslog_buffer.size = size;
++	ret = rtk->ops->shmem_setup(rtk->cookie, &rtk->syslog_buffer);
++	if (ret)
++		goto clear_buffer;
++
++	rtk->syslog_msg_buffer = kzalloc(msg_size, GFP_KERNEL);
++	if (!rtk->syslog_msg_buffer) {
++		ret = -ENOMEM;
++		goto destroy_buffer;
++	}
++
++	rtk->syslog_n_entries = n_entries;
++	rtk->syslog_msg_size = msg_size;
++	dev_info(rtk->dev,
++		 "RTKit: reused syslog buffer at %pad: entries: %zd, msg_size: %zd\n",
++		 &rtk->syslog_buffer.iova, n_entries, msg_size);
++	return 0;
++
++destroy_buffer:
++	rtk->ops->shmem_destroy(rtk->cookie, &rtk->syslog_buffer);
++clear_buffer:
++	rtk->syslog_buffer = (struct apple_rtkit_shmem){};
++	return ret;
++}
++EXPORT_SYMBOL_GPL(apple_rtkit_reuse_syslog_buffer);
++
++int apple_rtkit_reuse_crashlog_buffer(struct apple_rtkit *rtk,
++				      dma_addr_t iova, size_t size)
++{
++	int ret;
++
++	if (!rtk || !iova || !size)
++		return -EINVAL;
++	if (rtk->crashlog_buffer.size)
++		return -EBUSY;
++	if (!rtk->ops->shmem_setup)
++		return -EOPNOTSUPP;
++
++	rtk->crashlog_buffer.iova = iova;
++	rtk->crashlog_buffer.size = size;
++	ret = rtk->ops->shmem_setup(rtk->cookie, &rtk->crashlog_buffer);
++	if (ret) {
++		rtk->crashlog_buffer = (struct apple_rtkit_shmem){};
++		return ret;
++	}
++
++	dev_info(rtk->dev, "RTKit: reused crashlog buffer at %pad\n",
++		 &rtk->crashlog_buffer.iova);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(apple_rtkit_reuse_crashlog_buffer);
++
+ static int apple_rtkit_set_iop_power_state(struct apple_rtkit *rtk,
+ 					   unsigned int state)
+ {
+@@ -891,6 +999,11 @@ int apple_rtkit_boot(struct apple_rtkit *rtk)
+ 		}
+ 	}
+ 
++	if (rtk->skip_boot_ap_power) {
++		rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_ON;
++		return 0;
++	}
++
+ 	ret = apple_rtkit_set_ap_power_state(rtk, APPLE_RTKIT_PWR_STATE_ON);
+ 	if (ret)
+ 		dev_err(rtk->dev,
+diff --git a/include/linux/soc/apple/pmp-report.h b/include/linux/soc/apple/pmp-report.h
+new file mode 100644
+index 0000000000000..8318d8f50d06d
+--- /dev/null
++++ b/include/linux/soc/apple/pmp-report.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
++#ifndef _LINUX_SOC_APPLE_PMP_REPORT_H
++#define _LINUX_SOC_APPLE_PMP_REPORT_H
++
++struct device;
++int apple_pmp_report_wait_ready(struct device *dev, unsigned long timeout_us);
++
++#endif
+diff --git a/include/linux/soc/apple/rtkit.h b/include/linux/soc/apple/rtkit.h
+index 6d034b4b8ff87..0bcbf69a156f9 100644
+--- a/include/linux/soc/apple/rtkit.h
++++ b/include/linux/soc/apple/rtkit.h
+@@ -128,6 +128,17 @@ void apple_rtkit_free(struct apple_rtkit *rtk);
+  */
+ int apple_rtkit_reinit(struct apple_rtkit *rtk);
+ 
++/* Per-instance compatibility APIs retained for the original M4 PMP clients. */
++void apple_rtkit_set_boot_ap_power(struct apple_rtkit *rtk, bool enable);
++void apple_rtkit_set_early_crashlog(struct apple_rtkit *rtk);
++int apple_rtkit_adopt_running(struct apple_rtkit *rtk, const u8 *endpoints,
++			      size_t n_endpoints);
++int apple_rtkit_reuse_syslog_buffer(struct apple_rtkit *rtk, dma_addr_t iova,
++				    size_t size, size_t n_entries,
++				    size_t msg_size);
++int apple_rtkit_reuse_crashlog_buffer(struct apple_rtkit *rtk,
++				      dma_addr_t iova, size_t size);
++
+ /*
+  * Handle RTKit's boot process. Should be called after the CPU of the
+  * co-processor has been started.
