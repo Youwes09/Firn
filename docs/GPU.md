@@ -55,13 +55,12 @@ shim". It runs on the Air, but:
   warning prints, and benchmark, qualification and tracing code;
 - it changes the UAPI (`include/uapi/drm/asahi_drm.h`), which its Mesa
   fork follows;
-- it is very likely LLM-assisted, so every line it informs is read and
-  understood, not copied.
+- it is very likely LLM-assisted, so every line taken from it is read and
+  understood first.
 
-It is used as a reference for the G16 hardware and firmware behaviour, and
-as a known-working baseline to test against. Code here is written fresh in
-Asahi's structure; facts taken from the reference are credited in the
-commit messages.
+It is the reference for the G16 hardware and firmware behaviour, and the
+known-working baseline to test against. Its parts are brought into Asahi's
+structure rather than kept as a parallel driver, credited in each commit.
 
 ## Milestones
 
@@ -92,14 +91,10 @@ and are tested on the J713 where they can be.
 
 ## Rules for this work
 
-- Asahi's structure first: a change that needs a parallel copy of an
-  existing module is redesigned instead.
-- No Apple code: no firmware or macOS disassembly. Structures and
-  sequences come from the reference, from observing the hardware, and from
-  the firmware's own reports.
+- Asahi's structure first, so Asahi updates keep merging: a change that
+  needs a parallel copy of an existing module is redesigned instead.
+- Working code from Asahi, Omarchy-M4-Native and Gravity Linux may be
+  imported. It keeps its author and licence, as a separate patch.
+- Hardware values are recorded from the J713, never guessed.
 - Patches are small and each says what it changes and why. Origin of every
   non-obvious fact is credited.
-- Asahi does not accept LLM-assisted contributions
-  (<https://asahilinux.org/llm-policy/>). This work is LLM-assisted and says
-  so; it is written to their standard so that a human could re-implement it
-  from the documentation if they wanted it upstream.
