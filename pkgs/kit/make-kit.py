@@ -84,7 +84,7 @@ def main():
         'partitions': [
             {'name': 'EFI', 'type': 'EFI', 'size': '524288000B', 'format': 'fat',
              'copy_firmware': True, 'copy_installer_data': True},
-            {'name': 'Root', 'type': '0fc63daf-8483-4772-8e79-3d69d8477de4', 'size': f'{root_bytes}B',
+            {'name': 'Root', 'type': 'Linux', 'size': f'{root_bytes}B',
              'expand': True, 'image': 'root.ext4'},
         ],
         'payloads': {'bootargs': bootargs, **{
