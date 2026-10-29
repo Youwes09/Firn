@@ -1,0 +1,33 @@
+From a47c871fbfc27bc52ccad61f452f0d5f69db9671 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 01:41:41 -0500
+Subject: [PATCH] kboot: Reserve the MTP firmware for Linux
+
+iBoot leaves the MTP's DART unlocked, so Linux resets it at probe and
+the MTP can no longer reach its firmware: RTKit times out waiting for
+the endpoint map. Pass the ADT's segment ranges through the mtp alias
+as reserved memory with IOMMU addresses, as is done for the ISP.
+---
+ src/kboot.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/src/kboot.c b/src/kboot.c
+index 7b8585b..0b28d16 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -2845,6 +2845,12 @@ int kboot_prepare_dt(void *fdt)
+         return -1;
+     if (dt_reserve_asc_firmware("/arm-io/isp", "/arm-io/isp0", "isp", false, isp_iova_base()))
+         return -1;
++    /*
++     * The MTP's DART is left unlocked, so Linux resets it and loses iBoot's
++     * mappings of the MTP firmware. Hand them over as reserved memory.
++     */
++    if (dt_reserve_asc_firmware("/arm-io/mtp", NULL, "mtp", false, 0))
++        return -1;
+     if (dt_set_isp_fwdata())
+         return -1;
+     if (dt_set_pmgr())
+-- 
+2.54.0
+
