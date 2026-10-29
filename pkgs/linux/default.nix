@@ -9,9 +9,11 @@
   kernelPatches ? [ ],
   randstructSeed ? "",
   features ? { },
+  # The M4 GPU and speaker codecs stay off until they are ported.
+  configfile ? ./j713.config,
 }:
 (linuxKernel.manualConfig {
-  inherit randstructSeed features;
+  inherit randstructSeed features configfile;
   version = "7.1.9";
   # Must match CONFIG_LOCALVERSION.
   modDirVersion = "7.1.9-firn";
@@ -30,8 +32,6 @@
     }) (lib.attrNames (builtins.readDir ./patches/topics))
     ++ kernelPatches;
 
-  # The M4 GPU and speaker codecs stay off until they are ported.
-  configfile = ./j713.config;
   allowImportFromDerivation = true;
 
   stdenv = llvmPackages_21.stdenv;
