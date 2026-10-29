@@ -5,11 +5,10 @@ unofficial.
 
 Everything that runs on the Air is built from source here:
 
-- the kernel: Asahi Linux's `asahi-7.1.9-1` with a series of J713 patches,
-  which also carries the devicetree;
-- m1n1 stage 1 and stage 2: upstream m1n1 with one patch each;
-- the macOS-side installer: upstream asahi-installer with patches for the M4
-  and macOS 26.
+- the kernel: Gravity Linux's `gravity-m4` (7.1.13) with the J713 patches
+  it lacks;
+- m1n1 stage 1 and stage 2: upstream m1n1 with Firn's patches;
+- the macOS-side installer: Gravity Linux's installer with the J713 added.
 
 The installer runs under python.org's Python for macOS and Homebrew's libffi,
 both pinned by hash, as Asahi Linux's own installer does.

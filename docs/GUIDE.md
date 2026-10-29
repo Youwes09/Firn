@@ -34,7 +34,7 @@ faster than the speed Apple's firmware starts it at.
 1. **Back up.** Plug in an external drive and run a full Time Machine backup
    (System Settings > General > Time Machine). When it finishes, open Time
    Machine and restore one test file somewhere, to prove the backup works.
-2. **Check macOS.** Apple menu > About This Mac: it must be **26.5.1 or newer**.
+2. **Check macOS.** Apple menu > About This Mac: it must be **26.5 or newer**.
    Do not start a macOS update during this process.
 3. **Check your account.** You need your macOS password, and your user must be
    an administrator (System Settings > Users & Groups shows "Admin"). If you set
@@ -169,7 +169,7 @@ less ~/report-1.txt
 Check in the report:
 
 - `failed units` is empty;
-- `uname` shows `7.1.9-firn`;
+- `uname` shows `7.1.13-firn`;
 - CPU frequency tops out at 1800 MHz (P cores) and 900 MHz (E cores);
 - every speaker and headphone driver is `not loaded`;
 - temperatures at idle are well below 80 C;
