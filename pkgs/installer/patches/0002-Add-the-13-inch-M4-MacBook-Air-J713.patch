@@ -1,0 +1,145 @@
+From d400df99a6b03cb0d917f4835ce8beb404d333b8 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 28 Oct 2026 21:51:14 -0500
+Subject: [PATCH 2/2] Add the 13-inch M4 MacBook Air (J713)
+
+Accept the J713 on the same macOS 26.6.2 restore image as the J773g.
+
+Its Wi-Fi and Bluetooth modules (garden) come from two vendors, so it
+collects every module's firmware by board name, for the kernel to pick
+the matching one, instead of the J773g's single-module profile. Its
+radio calibration reaches Linux through the ADT, and like the J773g it
+has no camera or ambient light sensor support yet.
+---
+ gravity_firmware/open_firmware.py |  1 +
+ src/install.sh                    |  2 +-
+ src/main.py                       | 11 +++++++----
+ src/stub.py                       | 22 +++++++++++++++-------
+ 4 files changed, 24 insertions(+), 12 deletions(-)
+
+diff --git a/gravity_firmware/open_firmware.py b/gravity_firmware/open_firmware.py
+index 03d45ef..1b8ba75 100644
+--- a/gravity_firmware/open_firmware.py
++++ b/gravity_firmware/open_firmware.py
+@@ -10,6 +10,7 @@ from .core import FWFile
+ # provenance is unambiguous.
+ MACHINE_FILES = {
+     # AVD is not part of the first M4 release. No bundled open firmware needed.
++    "j713": (),
+     "j773g": (),
+ }
+ 
+diff --git a/src/install.sh b/src/install.sh
+index 481932c..b7055a7 100755
+--- a/src/install.sh
++++ b/src/install.sh
+@@ -38,7 +38,7 @@ fi
+ if ! arch -arm64 ls >/dev/null 2>/dev/null; then
+     echo
+     echo "Looks like this is an Intel Mac!"
+-    echo "Sorry, Gravity Linux only supports the M4 Mac mini."
++    echo "Sorry, Gravity Linux only supports the M4 Mac mini and 13-inch MacBook Air."
+     echo "May we interest you in https://t2linux.org/ instead?"
+     exit 1
+ fi
+diff --git a/src/main.py b/src/main.py
+index c1b5523..52c2d3e 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -36,11 +36,14 @@ class Device:
+     expert_only: bool
+ 
+ CHIP_MIN_VER = {0x8132: "26.6.2"}  # T8132, M4
+-DEVICES = {"j773gap": Device("26.6.2", False)}  # Mac mini (M4, 2024)
++DEVICES = {
++    "j713ap": Device("26.6.2", False),  # MacBook Air (13-inch, M4, 2025)
++    "j773gap": Device("26.6.2", False),  # Mac mini (M4, 2024)
++}
+ 
+ IPSW_VERSIONS = [
+-    # Keep this entry current with an Apple-signed restore image for Mac16,10.
+-    IPSW("26.6.2", "26.5", "0", "0", False, ["j773gap"],
++    # Keep this entry current with an Apple-signed restore image for Mac16,10 and Mac16,12.
++    IPSW("26.6.2", "26.5", "0", "0", False, ["j713ap", "j773gap"],
+          "https://updates.cdn-apple.com/2026SummerFCS/fullrestores/140-75212/A2A24B94-1FC1-45A3-93F7-C51B02AF1F4D/UniversalMac_26.6.2_25G83_Restore.ipsw"),
+ ]
+ 
+@@ -891,7 +894,7 @@ class InstallerMain:
+         self.device = DEVICES.get(self.sysinfo.device_class, None)
+         if not self.chip_min_ver or not self.device or (self.device.expert_only and not self.expert):
+             p_error("This device is not supported yet!")
+-            p_error("Gravity Linux supports only the M4 Mac mini (j773gap).")
++            p_error("Gravity Linux supports only the M4 Mac mini and 13-inch MacBook Air.")
+             print()
+             p_error("   https://gravitylinux.org/docs/hardware")
+             print()
+diff --git a/src/stub.py b/src/stub.py
+index 9dc607c..a0d554a 100644
+--- a/src/stub.py
++++ b/src/stub.py
+@@ -13,6 +13,14 @@ from gravity_firmware.als import AlsFWCollection, FACTORY_DIR
+ from gravity_firmware.open_firmware import OpenFirmwareCollection
+ from util import *
+ 
++# The M4 boards. Only the J773g narrows its radio firmware to one module; the
++# J713 ships modules from two vendors, so it collects every module by board
++# name and the kernel picks the matching one.
++M4_MACHINES = ("j713", "j773g")
++
++def radio_profile(machine):
++    return machine if machine == "j773g" else None
++
+ class StubInstaller(PackageInstaller):
+     def __init__(self, sysinfo, dutil, osinfo):
+         super().__init__()
+@@ -72,9 +80,9 @@ class StubInstaller(PackageInstaller):
+                     raise ValueError(f"Unexpected recovery version: {version}")
+                 wifi = self.recovery_wifi_source(mount)
+                 # These collectors fail if the required M4 profile is incomplete.
+-                list(WiFiFWCollection(wifi, machine=machine).files())
++                list(WiFiFWCollection(wifi, machine=radio_profile(machine)).files())
+                 list(BluetoothFWCollection(str(mount / "usr/share/firmware/bluetooth"),
+-                                           machine=machine).files())
++                                           machine=radio_profile(machine)).files())
+         except BaseException:
+             image.close()
+             raise
+@@ -519,17 +527,17 @@ class StubInstaller(PackageInstaller):
+             wifi_source = self.recovery_wifi_source(recovery)
+ 
+             logging.info(f"Collecting WiFi firmware from {wifi_source}")
+-            col = WiFiFWCollection(wifi_source, machine=machine)
++            col = WiFiFWCollection(wifi_source, machine=radio_profile(machine))
+             pkg.add_files(sorted(col.files()))
+             logging.info("Collecting Bluetooth firmware")
+             col = BluetoothFWCollection(
+-                str(recovery / "usr/share/firmware/bluetooth"), machine=machine
++                str(recovery / "usr/share/firmware/bluetooth"), machine=radio_profile(machine)
+             )
+             pkg.add_files(sorted(col.files()))
+             logging.info("Collecting Multitouch firmware")
+             col = MultitouchFWCollection("fud_firmware/")
+             pkg.add_files(sorted(col.files()))
+-            if machine != "j773g":
++            if machine not in M4_MACHINES:
+                 logging.info("Collecting ISP firmware")
+                 col = ISPFWCollection(str(recovery / "usr/sbin"))
+                 pkg.add_files(sorted(col.files()))
+@@ -537,7 +545,7 @@ class StubInstaller(PackageInstaller):
+             col = KernelFWCollection(kernel_path)
+             pkg.add_files(sorted(col.files()))
+             als_files = []
+-            if machine != "j773g":
++            if machine not in M4_MACHINES:
+                 logging.info("Collecting ALS firmware")
+                 col = AlsFWCollection()
+                 als_files = sorted(col.files())
+@@ -560,7 +568,7 @@ class StubInstaller(PackageInstaller):
+                     archive.add(recovery / "usr/share/firmware", arcname="firmware")
+                     archive.add(wifi_source, arcname="apple_bcmwlan_firmware")
+                     archive.add(os.path.join(tmpdir, "apple"), arcname="apple")
+-                    if machine != "j773g":
++                    if machine not in M4_MACHINES:
+                         archive.add(recovery / "usr/sbin/appleh13camerad",
+                                     arcname="appleh13camerad")
+                         archive.add(FACTORY_DIR, arcname=os.path.basename(FACTORY_DIR))

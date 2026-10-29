@@ -45,8 +45,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
     mkdir -p package/bin package/boot
     cp -r src/* package/
-    rm package/asahi_firmware
-    cp -r asahi_firmware package/
+    rm package/gravity_firmware
+    cp -r gravity_firmware package/
     install -m444 ${m1n1Stage1}/lib/m1n1/m1n1.bin package/boot/m1n1.bin
 
     for size in 16 32 128 256 512; do
@@ -70,8 +70,8 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     echo firn-${finalAttrs.version} > package/version.tag
 
     mkdir notices
-    install -m444 LICENSE notices/asahi-installer.txt
-    install -m444 ${m1n1Stage1.src}/LICENSE notices/m1n1.txt
+    install -m444 LICENSE notices/gravity-installer.txt
+    cat ${m1n1Stage1.src}/LICENSE.GPL2 ${m1n1Stage1.src}/LICENSE.MIT > notices/m1n1.txt
     cp -r ${m1n1Stage1.src}/3rdparty_licenses notices/m1n1-3rdparty
     install -m444 $framework/Versions/Current/lib/python3.13/LICENSE.txt notices/python.txt
     install -m444 libffi/3.5.2/LICENSE notices/libffi.txt

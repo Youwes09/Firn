@@ -4,12 +4,12 @@
   fetchFromGitHub,
 }:
 applyPatches {
-  name = "asahi-installer-firn";
+  name = "gravity-installer-firn";
   src = fetchFromGitHub {
-    owner = "AsahiLinux";
-    repo = "asahi-installer";
-    rev = "e93743d52178b3e26e428fa05174ef549abf30cb";
-    hash = "sha256-KTl4GsCz/PdrzWmR/y12N1Lmw1f7Auzh2EYwcTjuCo0=";
+    owner = "GravityLinux";
+    repo = "installer";
+    rev = "6420623289fe7544cb8589b658355e57f0290fcc";
+    hash = "sha256-YWT3AWa9hNVJKnSYwvWh0NkmX5/8nF8E0pOSR7TC/A8=";
   };
   patches = lib.filesystem.listFilesRecursive ./patches;
 }

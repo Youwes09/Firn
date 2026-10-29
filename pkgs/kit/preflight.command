@@ -30,10 +30,7 @@ if [[ "$model" == Mac16,12 ]]; then ok "model $model (13-inch M4 Air, J713)"
 else bad "model $model is not Mac16,12"; fi
 
 macos=$(/usr/bin/sw_vers -productVersion)
-if version_ge "$macos" 26.5.1; then ok "macOS $macos (26.5.1 or newer)"; else bad "macOS $macos is older than 26.5.1"; fi
-if ! version_ge 26.6.2 "$macos"; then
-  note "macOS $macos is newer than the macOS 26.5.1 to 26.6.2 that J713 installs have run from"
-fi
+if version_ge "$macos" 26.5; then ok "macOS $macos (26.5 or newer)"; else bad "macOS $macos is older than 26.5"; fi
 firmware=$(/usr/sbin/system_profiler SPHardwareDataType 2>/dev/null | awk -F': ' '/System Firmware Version/{print $2}')
 ok "system firmware $firmware"
 
