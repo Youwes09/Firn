@@ -1,0 +1,28 @@
+From ef2b47e8fa479666c7f908e3c99fd1a0aa647690 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 09:35:17 -0500
+Subject: [PATCH 26/26] wifi: brcmfmac: Allow 30 seconds for an escan
+
+The BCM4388 takes about 10.7 seconds to scan 5 GHz and the 60 6 GHz
+channels while disconnected, so the 10 second escan timer aborted every
+such scan from iwd and left the station unable to find its network.
+Allow 30 seconds.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
+index 0dac9a440e98b..4910fb4481be5 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
+@@ -47,7 +47,7 @@
+  * problematic on some systems and should be avoided.
+  */
+ #define BRCMF_ESCAN_BUF_SIZE		65000
+-#define BRCMF_ESCAN_TIMER_INTERVAL_MS	10000	/* E-Scan timeout */
++#define BRCMF_ESCAN_TIMER_INTERVAL_MS	30000	/* E-Scan timeout */
+ 
+ #define WL_ESCAN_ACTION_START		1
+ #define WL_ESCAN_ACTION_CONTINUE	2

@@ -1,0 +1,30 @@
+From 4b1fa26aa4b0789dfbbfe7ec51c808ad6482bec8 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 09:05:12 -0500
+Subject: [PATCH 24/26] mfd: macsmc: Hold the lock while reading key info
+
+apple_smc_get_key_info() dropped the mutex after the command and only
+then copied the reply out of the shared buffer, so a concurrent command
+could overwrite it first. Keep the lock until the copy is done.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/mfd/macsmc.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/mfd/macsmc.c b/drivers/mfd/macsmc.c
+index 31540f67ddbd8..d397c86d7475f 100644
+--- a/drivers/mfd/macsmc.c
++++ b/drivers/mfd/macsmc.c
+@@ -211,7 +211,10 @@ int apple_smc_get_key_info(struct apple_smc *smc, smc_key key, struct apple_smc_
+ 	u8 key_info[6];
+ 	int ret;
+ 
+-	ret = apple_smc_cmd(smc, SMC_MSG_GET_KEY_INFO, key, 0, 0, NULL);
++	/* Hold the lock until the reply is copied out of the shared buffer. */
++	guard(mutex)(&smc->mutex);
++
++	ret = apple_smc_cmd_locked(smc, SMC_MSG_GET_KEY_INFO, key, 0, 0, NULL);
+ 	if (ret >= 0 && info) {
+ 		memcpy_fromio(key_info, smc->shmem.iomem, sizeof(key_info));
+ 		info->size = key_info[0];
