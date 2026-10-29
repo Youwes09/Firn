@@ -1,4 +1,9 @@
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.hardware.firn;
 in
@@ -10,6 +15,13 @@ in
       mkdir -p /lib
       ln -sfn /run/vendorfw /lib/firmware
     '';
+
+    # USB-C Ethernet adapters with an RTL8153 load a firmware patch.
+    hardware.firmware = [
+      (pkgs.runCommand "rtl8153-firmware" { } ''
+        install -Dm444 -t $out/lib/firmware/rtl_nic ${pkgs.linux-firmware}/lib/firmware/rtl_nic/rtl8153*.fw
+      '')
+    ];
 
     hardware.wirelessRegulatoryDatabase = cfg.wifiRegion != null;
     boot.extraModprobeConfig = lib.mkIf (cfg.wifiRegion != null) ''
