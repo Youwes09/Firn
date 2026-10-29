@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 7f29fd1914bcf26254ab5445a167e548aed0670d Mon Sep 17 00:00:00 2001
 From: KB2UKA <kb2uka80@gmail.com>
 Date: Mon, 26 Oct 2026 08:36:21 -0500
-Subject: [PATCH 15/41] wifi: brcmfmac: Add BCM4388 revision 6 (C2) firmware
+Subject: [PATCH 2/5] wifi: brcmfmac: Add BCM4388 revision 6 (C2) firmware
  mapping
 
 The 13-inch MacBook Air (M4, J713) carries a BCM4388 at chip revision
@@ -20,7 +20,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 2 insertions(+)
 
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
-index 4421df016..2e6176b3a 100644
+index 4421df0160b6..2e6176b3a87e 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
 +++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
 @@ -73,6 +73,7 @@ BRCMF_FW_CLM_DEF(4378B3, "brcmfmac4378b3-pcie");

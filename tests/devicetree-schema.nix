@@ -26,21 +26,22 @@ let
     "apple,sio.yaml"
     "apple,spmi-nvmem.yaml"
   ];
-  # Asahi downstream drivers without bindings, and a pre-existing apple,pcie.yaml warning.
+  # Gravity's downstream drivers without bindings.
   expected = pkgs.writeText "expected-warnings" ''
-    Documentation/devicetree/bindings/pci/apple,pcie.yaml: ^pci@: Missing additionalProperties/unevaluatedProperties constraint
-    /soc/aop@390c00000/als: failed to match any schema with compatible: ['apple,t8132-aop-als', 'apple,aop-als']
-    /soc/aop@390c00000/audio: failed to match any schema with compatible: ['apple,t8132-aop-audio', 'apple,t6030-aop-audio']
-    /soc/aop@390c00000: failed to match any schema with compatible: ['apple,t8132-aop', 'apple,t6020-aop']
-    /soc/fifo@394b14000/input@8000: failed to match any schema with compatible: ['apple,t8132-dockchannel-hid', 'apple,dockchannel-hid']
+    /soc/audio-controller: failed to match any schema with compatible: ['apple,t8132-dpaudio', 'apple,dpaudio']
+    /soc/dcp@286e00000: failed to match any schema with compatible: ['apple,t8132-dcpext', 'apple,dcpext']
+    /soc/dcp@30ae00000: failed to match any schema with compatible: ['apple,t8132-dcp', 'apple,dcp']
+    /soc/dcp@48ae00000: failed to match any schema with compatible: ['apple,t8132-dcpext', 'apple,dcpext']
+    /soc/display-subsystem: failed to match any schema with compatible: ['apple,display-subsystem']
+    /soc/fifo@394b14000/input@0: failed to match any schema with compatible: ['apple,t8132-dockchannel-hid', 'apple,dockchannel-hid']
     /soc/fifo@394b14000: failed to match any schema with compatible: ['apple,t8132-dockchannel', 'apple,dockchannel']
     /soc/gpu@302600000: failed to match any schema with compatible: ['apple,agx-t8132']
     /soc/mtp@394600000: failed to match any schema with compatible: ['apple,t8132-mtp', 'apple,t8132-rtk-helper-asc4', 'apple,mtp', 'apple,rtk-helper-asc4']
-    /soc/mux@40304c000: failed to match any schema with compatible: ['apple,t8132-display-crossbar', 'apple,t8112-display-crossbar']
-    /soc/mux@40b04c000: failed to match any schema with compatible: ['apple,t8132-display-crossbar', 'apple,t8112-display-crossbar']
+    /soc/phy@39a700000: failed to match any schema with compatible: ['apple,t8122-dptx-phy', 'apple,dptx-phy']
     /soc/phy@403000000: failed to match any schema with compatible: ['apple,t8132-atcphy', 'apple,t8122-atcphy']
     /soc/phy@40b000000: failed to match any schema with compatible: ['apple,t8132-atcphy', 'apple,t8122-atcphy']
-    /soc/sep@3aa600000: failed to match any schema with compatible: ['apple,t8132-sep', 'apple,sep']
+    /soc/phy@413000000: failed to match any schema with compatible: ['apple,t8132-atcphy', 'apple,t8122-atcphy']
+    /soc/phy@41b000000: failed to match any schema with compatible: ['apple,t8132-atcphy', 'apple,t8122-atcphy']
   '';
 in
 pkgs.runCommandCC "firn-devicetree-schema"

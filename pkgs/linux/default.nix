@@ -14,15 +14,15 @@
 }:
 (linuxKernel.manualConfig {
   inherit randstructSeed features configfile;
-  version = "7.1.9";
+  version = "7.1.13";
   # Must match CONFIG_LOCALVERSION.
-  modDirVersion = "7.1.9-firn";
+  modDirVersion = "7.1.13-firn";
 
   src = fetchFromGitHub {
-    owner = "AsahiLinux";
+    owner = "GravityLinux";
     repo = "linux";
-    tag = "asahi-7.1.9-1";
-    hash = "sha256-5XxxWLbd7TN6qblIOwCzyk1zujbCAs06bXFwCxlzoX0=";
+    rev = "4fc326f6c25ccceb7515e2635c22e01fde5d3bac";
+    hash = "sha256-DxH3lrWAutnskHuP+6Q7NRHupPYBip68Poq4pjsV/yM=";
   };
 
   kernelPatches =
