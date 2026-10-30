@@ -19,10 +19,10 @@ Keyboard, trackpad, NVMe, Wi-Fi, Bluetooth, hinge-side USB-C and the
 simpledrm console. Set `hardware.firn.wifiRegion` (for example `"US"`)
 for 5 GHz Wi-Fi.
 
-Not supported: speakers, headphones, GPU, CPU idle states,
-clocks above iBoot's handover, backlight control, the front USB-C port,
-suspend. Closing the lid powers off. Sustained writes of several GB can crash
-the storage controller; see [docs/ISSUES.md](docs/ISSUES.md).
+Not supported: speakers, headphones, GPU, CPU idle states, CPU clocks above
+the heat caps, backlight control, the front USB-C port, suspend. Closing the
+lid powers off. Sustained writes of several GB can crash the storage
+controller; see [docs/ISSUES.md](docs/ISSUES.md).
 
 ## Layout
 
