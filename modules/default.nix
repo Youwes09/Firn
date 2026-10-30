@@ -6,6 +6,7 @@
     ./firmware.nix
     ./power.nix
     ./image.nix
+    ./link.nix
   ];
 
   options.hardware.firn = {

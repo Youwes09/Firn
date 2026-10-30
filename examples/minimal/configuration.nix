@@ -5,6 +5,7 @@
 
   hardware.firn.enable = true;
   hardware.firn.wifiRegion = "US";
+  hardware.firn.link = true;
 
   nix.settings.experimental-features = [
     "nix-command"
