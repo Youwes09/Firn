@@ -8,6 +8,8 @@ in
     # Nothing throttles the M4's CPUs yet: at full clock the die passes 100 C
     # within seconds. These caps hold it near 74 C under load.
     boot.kernelModules = [ "apple_soc_cpufreq" ];
+    # Lets the Wi-Fi and Bluetooth link enter L1.2 when idle.
+    boot.kernelParams = [ "pcie_aspm.policy=powersupersave" ];
     systemd.services.firn-cpu-cap = {
       description = "Cap the CPU clocks";
       wantedBy = [ "sysinit.target" ];
