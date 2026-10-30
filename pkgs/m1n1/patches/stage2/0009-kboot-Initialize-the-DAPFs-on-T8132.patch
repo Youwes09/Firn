@@ -1,0 +1,34 @@
+From 0657ab3282a564abdbeb69ac2a67ec77e9a8ea89 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 01:35:12 -0500
+Subject: [PATCH] kboot: Initialize the DAPFs on T8132
+
+DAPF init was skipped on T8132 because it raised an SError. With each
+DAPF found from the ADT and its device powered, the full set
+initializes.
+
+Without the MTP's DAPF, its DART reports a SID exception as soon as the
+MTP starts and RTKit never gets a HELLO, so the keyboard and trackpad
+stay dead.
+
+Assisted-By: LLM
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ src/kboot.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/src/kboot.c b/src/kboot.c
+index ee623d6..bbd6503 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -2907,9 +2907,7 @@ int kboot_boot(void *kernel)
+ 
+     usb_init();
+     pcie_init();
+-    /* HACK: DAPF init raises an SError on T8132. */
+-    if (chip_id != T8132)
+-        dapf_init_all();
++    dapf_init_all();
+ 
+     printf("Setting SMP mode to WFE...\n");
+     smp_set_wfe_mode(true);

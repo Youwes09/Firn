@@ -1,8 +1,7 @@
-From abc1255bfb8d189b98c57b0e98425c2f79163e0a Mon Sep 17 00:00:00 2001
+From 7978f07ee067cda7012dfb14cb80e03ad574db51 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Wed, 28 Oct 2026 23:35:56 -0500
-Subject: [PATCH 2/2] kboot_gpu: Boot without the GPU when the T8132 handoff
- fails
+Subject: [PATCH] kboot_gpu: Boot without the GPU when the T8132 handoff fails
 
 The T8132 handoff accepts only the J773g's performance tables: eleven
 voltage steps, where the J713 has ten. A mismatch failed the whole boot

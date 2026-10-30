@@ -1,4 +1,4 @@
-From a47c871fbfc27bc52ccad61f452f0d5f69db9671 Mon Sep 17 00:00:00 2001
+From feff2414f4fcab6c7ddf60ab387b2932ceaed9f7 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 01:41:41 -0500
 Subject: [PATCH] kboot: Reserve the MTP firmware for Linux
@@ -28,6 +28,3 @@ index 7b8585b..0b28d16 100644
      if (dt_set_isp_fwdata())
          return -1;
      if (dt_set_pmgr())
--- 
-2.54.0
-

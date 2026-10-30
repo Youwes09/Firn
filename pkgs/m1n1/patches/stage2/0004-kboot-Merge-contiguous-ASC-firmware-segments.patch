@@ -1,4 +1,4 @@
-From 673d86af550dabe18d2a83ddc951691e09b16392 Mon Sep 17 00:00:00 2001
+From de45d4b977637ad362a96d8b48d308c372767f95 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 11:33:43 -0500
 Subject: [PATCH] kboot: Merge contiguous ASC firmware segments
@@ -11,7 +11,7 @@ segments contiguous in both physical and IOVA space as one region.
  1 file changed, 13 insertions(+), 4 deletions(-)
 
 diff --git a/src/kboot.c b/src/kboot.c
-index 2a3e5a4..deb1b63 100644
+index 0b28d16..ee623d6 100644
 --- a/src/kboot.c
 +++ b/src/kboot.c
 @@ -1796,18 +1796,27 @@ static int dt_reserve_asc_firmware(const char *adt_path, const char *adt_path_al
@@ -46,6 +46,3 @@ index 2a3e5a4..deb1b63 100644
          if (mem_node < 0)
              return ret;
          uint32_t mem_phandle = fdt_get_phandle(dt, mem_node);
--- 
-2.54.0
-
