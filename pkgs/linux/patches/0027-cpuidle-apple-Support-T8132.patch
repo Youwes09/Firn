@@ -1,0 +1,94 @@
+From 640da1e31783b19f9fccc8cfa59fcf4f62be4eb6 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 21:44:20 -0500
+Subject: [PATCH] cpuidle: apple: Support T8132
+
+iBoot locks the T8132 power-down control on: every wfi powers the core
+down and loses its general registers, and writing the control raises an
+SError. Enter the power-down state through a wfi that saves the
+callee-saved registers and leaves the control alone. The WFI state can
+only spin under idle=nop, so lower the power-down target residency to
+100us.
+
+On the J713 the idle CPU rail drops from 1314 mW to 28 mW.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/cpuidle/cpuidle-apple.c | 49 +++++++++++++++++++++++++++++++--
+ 1 file changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/cpuidle/cpuidle-apple.c b/drivers/cpuidle/cpuidle-apple.c
+index 3d2b804df8a2d..fa9ee4f94976f 100644
+--- a/drivers/cpuidle/cpuidle-apple.c
++++ b/drivers/cpuidle/cpuidle-apple.c
+@@ -57,7 +57,45 @@ asm(
+ 	".popsection\n"
+ );
+ 
++/*
++ * T8132: iBoot locks the power-down control on, so every wfi powers the core
++ * down and loses its registers. Writing the control raises an SError.
++ */
++asm(
++	".pushsection .cpuidle.text, \"ax\"\n"
++	".type apple_cpu_t8132_wfi, @function\n"
++	"apple_cpu_t8132_wfi:\n"
++		"str x30, [sp, #-16]!\n"
++		"stp x28, x29, [sp, #-16]!\n"
++		"stp x26, x27, [sp, #-16]!\n"
++		"stp x24, x25, [sp, #-16]!\n"
++		"stp x22, x23, [sp, #-16]!\n"
++		"stp x20, x21, [sp, #-16]!\n"
++		"stp x18, x19, [sp, #-16]!\n"
++
++	"1:\n"
++		"dsb sy\n"
++		"wfi\n"
++
++		"mrs x0, ISR_EL1\n"
++		"cbz x0, 1b\n"
++
++		"ldp x18, x19, [sp], #16\n"
++		"ldp x20, x21, [sp], #16\n"
++		"ldp x22, x23, [sp], #16\n"
++		"ldp x24, x25, [sp], #16\n"
++		"ldp x26, x27, [sp], #16\n"
++		"ldp x28, x29, [sp], #16\n"
++		"ldr x30, [sp], #16\n"
++
++		"ret\n"
++	".popsection\n"
++);
++
+ void apple_cpu_deep_wfi(void);
++void apple_cpu_t8132_wfi(void);
++
++static bool apple_wfi_powers_down;
+ 
+ static __cpuidle int apple_enter_wfi(struct cpuidle_device *dev, struct cpuidle_driver *drv, int index)
+ {
+@@ -79,7 +117,10 @@ static __cpuidle int apple_enter_idle(struct cpuidle_device *dev, struct cpuidle
+ 
+ 	switch(index) {
+ 	case STATE_PWRDOWN:
+-		apple_cpu_deep_wfi();
++		if (apple_wfi_powers_down)
++			apple_cpu_t8132_wfi();
++		else
++			apple_cpu_deep_wfi();
+ 		break;
+ 	default:
+ 		WARN_ON(1);
+@@ -146,7 +187,11 @@ static int __init apple_cpuidle_init(void)
+ 	if (!of_machine_is_compatible("apple,arm-platform"))
+ 		return 0;
+ 
+-	if (!(of_machine_is_compatible("apple,t8103") ||
++	if (of_machine_is_compatible("apple,t8132")) {
++		/* The WFI state can only spin (idle=nop), so power down early. */
++		apple_wfi_powers_down = true;
++		apple_idle_driver.states[STATE_PWRDOWN].target_residency = 100;
++	} else if (!(of_machine_is_compatible("apple,t8103") ||
+ 	      of_machine_is_compatible("apple,t8112") ||
+ 	      of_machine_is_compatible("apple,t8122") ||
+ 	      of_machine_is_compatible("apple,t6000") ||
