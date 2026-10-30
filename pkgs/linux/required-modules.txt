@@ -1,6 +1,7 @@
 # Loaded on the Air, plus hardware it may plug in. Checked by checks.kernel-modules.
 8021q
 apple_soc_cpufreq
+appledrm
 apple_wdt
 bluetooth
 bnep
@@ -46,6 +47,7 @@ nls_cp437
 nls_iso8859_1
 nls_utf8
 nvme_apple
+phy_apple_dptx
 pmp
 pwm_apple
 r8152
