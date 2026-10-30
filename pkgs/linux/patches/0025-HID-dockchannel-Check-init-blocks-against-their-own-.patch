@@ -1,8 +1,7 @@
 From 1720192c78a6a3c318609681d902c803bd38a2f4 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 09:05:18 -0500
-Subject: [PATCH 25/26] HID: dockchannel: Check init blocks against their own
- length
+Subject: [PATCH] HID: dockchannel: Check init blocks against their own length
 
 A GPIO request was checked against the rest of the packet rather than
 its block, and an empty product-name block read the byte before it.

@@ -24,4 +24,4 @@ for merge in $(git -C "$src" rev-list --reverse --first-parent --merges "$base..
 	} > "$out/$file"
 done
 last=$(git -C "$src" rev-list -1 --first-parent --merges "$base..$branch")
-git -C "$src" format-patch -q --no-signature --start-number $((n + 1)) -o "$out" "$last..$branch"
+git -C "$src" format-patch -q -N --no-signature --start-number $((n + 1)) -o "$out" "$last..$branch"

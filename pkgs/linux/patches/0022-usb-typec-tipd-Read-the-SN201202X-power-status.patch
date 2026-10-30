@@ -1,7 +1,7 @@
 From ab52f2dab66eb4900e5901efabe09ccdead7dccc Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 08:30:08 -0500
-Subject: [PATCH 22/26] usb: typec: tipd: Read the SN201202X power status
+Subject: [PATCH] usb: typec: tipd: Read the SN201202X power status
 
 tipd_init() calls read_power_status() whenever a plug is present at
 probe, but the SN201202X variant never set it, so booting an M4 with a

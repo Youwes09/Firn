@@ -1,7 +1,7 @@
 From ef2b47e8fa479666c7f908e3c99fd1a0aa647690 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 09:35:17 -0500
-Subject: [PATCH 26/26] wifi: brcmfmac: Allow 30 seconds for an escan
+Subject: [PATCH] wifi: brcmfmac: Allow 30 seconds for an escan
 
 The BCM4388 takes about 10.7 seconds to scan 5 GHz and the 60 6 GHz
 channels while disconnected, so the 10 second escan timer aborted every

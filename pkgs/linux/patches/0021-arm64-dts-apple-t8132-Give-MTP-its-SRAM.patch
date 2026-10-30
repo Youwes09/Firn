@@ -1,7 +1,7 @@
 From 9f038af2153065bbbcafe3ca1a2444c95400b9cf Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 01:01:57 -0500
-Subject: [PATCH 21/26] arm64: dts: apple: t8132: Give MTP its SRAM
+Subject: [PATCH] arm64: dts: apple: t8132: Give MTP its SRAM
 
 MTP's RTKit firmware asks for its buffers inside the helper's SRAM, the
 second register range of the ADT's mtp node (0x194050000, 0x4000). With

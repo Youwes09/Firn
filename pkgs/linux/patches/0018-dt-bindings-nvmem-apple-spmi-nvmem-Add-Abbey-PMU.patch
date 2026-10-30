@@ -1,7 +1,7 @@
 From d9d3eb110ad1671e9c217de27ae088449006ce6e Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Mon, 26 Oct 2026 12:34:24 -0500
-Subject: [PATCH 18/26] dt-bindings: nvmem: apple,spmi-nvmem: Add Abbey PMU
+Subject: [PATCH] dt-bindings: nvmem: apple,spmi-nvmem: Add Abbey PMU
 
 The t8132 (M4) MacBook Air has an Abbey PMU on SPMI, with the same NVMEM
 interface as Maverick, Sera and Stowe.

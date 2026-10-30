@@ -1,8 +1,7 @@
 From 90582e01bd5cf047cc6c7587a0ffbe79b5d32b35 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 09:02:03 -0500
-Subject: [PATCH 23/26] HID: dockchannel: Drive the T8132 AFE reset through the
- SMC
+Subject: [PATCH] HID: dockchannel: Drive the T8132 AFE reset through the SMC
 
 On T8132 the multi-touch AFE reset is an SMC board function (gP<pin>),
 not a host GPIO, so the driver refused the firmware's reset request and

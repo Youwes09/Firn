@@ -1,8 +1,7 @@
 From b99abccda6a4b503485958ccd0aaeec4c8ec1a17 Mon Sep 17 00:00:00 2001
 From: KB2UKA <kb2uka80@gmail.com>
 Date: Mon, 26 Oct 2026 08:42:00 -0500
-Subject: [PATCH 19/26] irqchip/apple-aic: Leave the EL2 FIQ sources alone on
- t8132
+Subject: [PATCH] irqchip/apple-aic: Leave the EL2 FIQ sources alone on t8132
 
 On t8132 (M4), a kernel running at EL2 hangs in irqchip init, before it
 can print anything, when AIC writes SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2 or
