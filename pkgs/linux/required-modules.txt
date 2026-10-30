@@ -46,6 +46,7 @@ nls_cp437
 nls_iso8859_1
 nls_utf8
 nvme_apple
+pmp
 pwm_apple
 r8152
 rfkill
