@@ -1,0 +1,75 @@
+From 31ed947c8eaafb1a24925cd416b912e373a32f71 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sat, 31 Oct 2026 10:45:07 -0500
+Subject: [PATCH] kboot: Move the initrd off the CTRR range
+
+With a boot.bin as large as Firn's, iBoot's CTRR range on T8132 falls
+inside the payload, on the initrd. Linux reserves the initrd before it
+reads the memory reservations, frees all of it once unpacked, and the
+first write to a protected page faults. On the J713 that is PID 1 in the
+initrd, which hangs the boot.
+
+Copy the initrd to the heap when it overlaps the range.
+
+Assisted-By: LLM
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ src/kboot.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/kboot.c b/src/kboot.c
+index bbd6503..b84776d 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -11,6 +11,7 @@
+ #include "display.h"
+ #include "exception.h"
+ #include "firmware.h"
++#include "heapblock.h"
+ #include "iodev.h"
+ #include "isp.h"
+ #include "kboot_atc.h"
+@@ -253,6 +254,31 @@ static int dt_set_fb(void)
+     return 0;
+ }
+ 
++/*
++ * With a large boot.bin, iBoot's CTRR range falls inside the payload, where the initrd sits.
++ * Linux frees the initrd once it has unpacked it, protected pages included, and then faults
++ * writing to them. Move the initrd off the range.
++ */
++static void move_initrd_off_ctrr(void)
++{
++    if (chip_id != T8132 && chip_id != T8140)
++        return;
++
++    u64 ctrr_start = ALIGN_DOWN(mrs(SYS_IMP_APL_CTRR_LOWER_EL1), get_page_size());
++    u64 ctrr_end = ALIGN_UP(mrs(SYS_IMP_APL_CTRR_UPPER_EL1) + SZ_4K, get_page_size());
++    u64 start = ALIGN_DOWN((u64)initrd_start, get_page_size());
++    u64 end = ALIGN_UP((u64)initrd_start + initrd_size, get_page_size());
++
++    if (!ctrr_start || end <= ctrr_start || start >= ctrr_end)
++        return;
++
++    void *copy = heapblock_alloc_aligned(initrd_size, get_page_size());
++    memcpy(copy, initrd_start, initrd_size);
++    printf("FDT: moved the initrd from %p to %p, off CTRR 0x%lx..0x%lx\n", initrd_start, copy,
++           ctrr_start, ctrr_end);
++    initrd_start = copy;
++}
++
+ static int dt_set_chosen(void)
+ {
+ 
+@@ -272,6 +298,8 @@ static int dt_set_chosen(void)
+     }
+ 
+     if (initrd_start && initrd_size) {
++        move_initrd_off_ctrr();
++
+         if (fdt_setprop_u64(dt, node, "linux,initrd-start", (u64)initrd_start))
+             bail("FDT: couldn't set chosen.linux,initrd-start property\n");
+ 
+-- 
+2.54.0
+
