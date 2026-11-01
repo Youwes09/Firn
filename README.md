@@ -20,8 +20,7 @@ coprocessor (PMP), and the internal display through its display
 controller (DCP), with brightness and blanking. Set
 `hardware.firn.wifiRegion` (for example `"US"`) for 5 GHz Wi-Fi.
 
-In progress on the new kernel ([docs/TODO.md](docs/TODO.md)): USB-C is
-built but not yet tested.
+USB-C is built but not yet tested ([docs/TODO.md](docs/TODO.md)).
 
 Not supported: speakers, headphones, GPU, external displays, CPU clocks
 above the heat caps, suspend. Closing the lid powers off. Sustained writes of
@@ -87,8 +86,8 @@ Linux's.
 ## Licence
 
 Firn's own code is under the [MIT licence](LICENSE). Patches keep the
-licence of the project they apply to or the one their author chose: the
-kernel's are GPL-2.0, and m1n1's t8132 GPU handoff is GPL-2.0-or-later.
+licence of the project they apply to: GPL-2.0 for the kernel, and m1n1's
+and the installer's own licences for theirs.
 
 Firn is not affiliated with or endorsed by Asahi Linux, Omarchy-M4-Native,
 Gravity Linux or Apple.

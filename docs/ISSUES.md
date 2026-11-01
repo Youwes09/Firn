@@ -7,7 +7,8 @@ records the evidence, so a later test starts from it rather than from scratch.
 
 **Status:** open, cause not found. Normal use is unaffected; avoid writing
 more than a few GB in one burst (build on another machine and copy the
-results).
+results). Crashes 1 to 5 ran on the earlier Gravity-based kernels; the
+mainline series has not been tested yet.
 
 **Reproduction:** `head -c 96M /dev/urandom | split` into small files plus
 40 MB of larger files per directory, on the root filesystem, without pauses.
@@ -95,116 +96,27 @@ only at boot and in the crash log.
 
 Crash logs, traces and per-second samples are kept outside the repository.
 
-## 2. The trackpad does not always start
-
-**Status:** fixed in the series (patches 0018–0021). On 2026-10-27 the
-trackpad reported `Touch MT ready` on 4 of 4 reboots and on a cold boot
-with the AFE reset, against 0 of 4 start attempts without it. A 40 s
-`evtest` capture showed movement across the pad, 82 click press/release
-pairs, up to four contacts and no dropped events.
-
-The multi-touch firmware rejects the stock version 1 interface reset. On
-the source kernel without the fix:
-
-```
-dockchannel-hid 394b30000.input: Resetting multi-touch
-dockchannel-hid 394b30000.input: output report 0x40 to iface 0 (comm) failed with err 0xe00002c2
-```
-
-and opening the device fails with `EIO`. The installer kernel sends the
-version 2 request (`dockchannel_hid.m4_power_v2=1`). With it the trackpad
-started on 2026-10-26 (`Touch MT ready`, touch events seen with `evtest`)
-but timed out on earlier boots:
-
-```
-dockchannel-hid 394b30000.input: Resetting multi-touch
-dockchannel-hid 394b30000.input: iface multi-touch start timed out
-```
-
-after which every open failed with `EINPROGRESS` because the driver never
-cleared its starting flag.
-
-The timeouts came with the firmware's own report that the AFE did not
-boot:
-
-```
-afe_bl_trp_hbpp.c:175: AFE Chip Boot Failure for HBPP[0]: No HINT_L
-afe_pwr.c:676: AFE[0] bootload failed: 1
-```
-
-The version 2 request has two phases per state change, and the host is
-meant to reset the AFE between them. The installer kernel sent both phases
-back to back, so the AFE started only when it happened to come up anyway.
-On the J713 the AFE reset is an SMC action on `gP1c` (GPIO 28, the
-`apple,afe-reset-gpios` pin): argument 1 holds the AFE in reset, 50 ms,
-then argument 0 releases it (Omarchy-M4-Native's
-`docs/j713-afe-native-action.md`). Setting the pin's output is not the
-same and does not work.
-
-The series:
-
-- selects the version 2 request through the
-  `apple,t8132-dockchannel-hid` compatible (0018);
-- clears the starting flag on a start timeout, so the next open tries
-  again (0019);
-- exports `macsmc_gpio_action()` from the SMC GPIO driver (0020);
-- runs the AFE reset between the two phases (0021).
-
-## 3. Kernel parameters that did nothing
-
-`pcie_apple.m4_link_diag=1`, `pcie_apple.m4_keep_clocks=1` and
-`dockchannel_hid.m4_afe_action=1` are in the installer's qualified set, but
-no kernel tree defines them. `m4trace_hit=999` only arms a watchdog reset at
-a trace point that never fires. The source kernel and this repository drop
-all of them.
-
-## 4. The clock is months behind in early boot
+## 2. The clock is months behind in early boot
 
 The first fsck of the root filesystem saw the time as March 2026 and the
 superblock's last write as in the future, until NTP set the clock. Nothing
 reads the RTC early. Harmless so far; it will matter for anything that checks
 certificates or timestamps before the network is up.
 
-## 5. Workarounds whose cause is unknown
+## 3. Workarounds in effect
 
-- `irqchip/apple-aic`: on t8132 the EL2 guest timer FIQ enables and
-  `ICH_HCR_EL2` are not written (patch 0006). m1n1 reports the Apple system
-  registers as locked on M4 (`apple_sysregs_unlocked` is false), which may be
-  the cause. Until it is solved, KVM guests get no timer interrupts.
-  Yureka Lilian's M4 tree carries the same workaround (`7c74add40c06`).
-- `arm64.nowfxt`: WFIT in `__delay()` reportedly stops the M4 at EL2. Not
-  yet confirmed by booting without it.
+Each stands in for a fix that is not done yet ([TODO.md](TODO.md)).
 
-## 6. The boot chain from source: what has booted
-
-Booted on a J713 (2026-10-27, six boots): the devicetree from the kernel
-series (SMC, NVMe, Wi-Fi, Bluetooth, keyboard and trackpad came up), and
-m1n1 stage 2 from `c9ef56f7` with the trust cache reservation and
-Omarchy-M4-Native's GPU handoff patch, behind their installer and stage 1.
-
-Booted on a second J713 (Mac16,12, 2026-10-28), everything from this
-repository: the installer built from asahi-installer with
-`pkgs/installer/patches`, m1n1 stage 1 from `c9ef56f7` with the issue #82
-patch, and m1n1 stage 2 without the GPU handoff patch, which reports the
-T8132 GPU as unsupported and leaves its memory regions disabled. An update
-through firn-boot then booted as well.
-
-The trust cache reservation is the right one: the kernel's `phram` module
-reads the ADT that m1n1 passes, and its `/chosen/memory-map` `TrustCache`
-entry (`0x10004174000`, `0x60000`) is the `/memreserve/` entry of that
-boot.
-
-## 7. Not yet at Asahi standard
-
-- KB2UKA's patches carry only the committer's sign-off, under clause (b)
-  of the Developer's Certificate of Origin; checkpatch reports
-  NO_AUTHOR_SIGN_OFF until their author adds one.
-- `make dtbs_check` (`checks.devicetree-schema`) still reports the
-  downstream drivers that have no binding on any Apple SoC: AOP, MTP,
-  dockchannel, SEP, ATC PHY, display crossbar and the GPU.
-- The CPU frequency tables stop at the clocks iBoot hands over. That keeps
-  the Air cool without a thermal policy, but it is policy in the
-  devicetree, which upstream does not take.
-- The GPU: Asahi's driver is in the tree but has no G16 support yet, and
-  the kernel does not build it; see [GPU.md](GPU.md).
-- The kernel links with GNU ld; their build used LLD.
+- **No sleep.** Suspend and hibernate are refused, and closing the lid
+  powers the Air off.
+- **Capped CPU clocks.** Nothing throttles the CPUs yet, so `firn-cpu-cap`
+  holds the P cores at 1.8 GHz and the E cores at 2.17 GHz, about 74 C under
+  load.
+- **`idle=nop`.** A plain wfi loses the core's registers on T8132, so the
+  default idle path must not run; cpuidle idles the cores.
+- **`arm64.nowfxt`.** WFIT in `__delay()` stops the M4 at EL2.
+- **No KVM guest timers.** AIC skips the EL2 guest timer FIQ enables and
+  `ICH_HCR_EL2` on T8132, as writing them hangs the boot. m1n1 reports the
+  Apple system registers as locked on M4, which may be the cause.
+- **`nvme_apple.flush_interval=0`**, after Omarchy-M4-Native #167; the
+  crash in issue 1 happens with or without it.

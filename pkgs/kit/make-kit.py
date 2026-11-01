@@ -11,7 +11,7 @@ import sys
 import zipfile
 
 PACKAGE = 'firn-j713.zip'
-# Its GPU firmware is the one the kernel is developed against.
+# The display driver supports this firmware's DCP interface.
 STUB_FIRMWARE = '26.6.2'
 
 
