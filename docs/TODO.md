@@ -20,12 +20,18 @@ in [ISSUES.md](ISSUES.md).
 
 - [ ] `firn-cpu-cap`: SMC thermal zones and cpufreq cooling instead.
 - [ ] Sleep, which needs every co-processor's power states understood.
-- [ ] `idle=nop`: make the arch idle path safe on T8132.
-- [ ] `arm64.nowfxt`: an arm64 erratum keyed on the M4's MIDR.
+- [ ] `idle=nop` and `arm64.nowfxt`: every wfi powers an M4 core down,
+      and WFIT most likely stops it for the same reason (not yet tested).
+      cpuidle no longer uses `cpu_do_idle()`, but the idle path before it
+      loads does. An arm64 erratum for the M4 cores could wait with wfe
+      there (safe, measured) and drop WFxT, retiring both parameters; it
+      needs the M4 part numbers queued in mainline.
 - [ ] AIC's skipped EL2 FIQ masks: find why the writes hang.
 - [ ] PMC is kept always-on for PMP; the driver whose firmware touches PMC
       should claim it as a power domain.
 - [ ] brcmfmac's flat 30 s escan timer: scale it with the channel count.
+- [ ] brcmfmac on a busy public network: `GET STA INFO failed, -52` and
+      `escan_handler: Buffer is too small: ignoring`, not seen at home.
 - [ ] The page flip timestamp HACK in the DCP driver, which moves
       completion up to 1 ms earlier for external displays.
 - [ ] `nvme_apple.flush_interval=0`, kept from an Omarchy-M4-Native report.
