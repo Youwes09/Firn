@@ -78,7 +78,7 @@ in
           ! modinfo "$m" >/dev/null 2>&1 || exit 1
         done'
       check "the hardware switches are on the kernel command line" '
-        for p in maxcpus=10 idle=nop arm64.nowfxt; do
+        for p in idle=nop arm64.nowfxt; do
           grep -qw "$p" /proc/cmdline || exit 1
         done'
 

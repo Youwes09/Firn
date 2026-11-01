@@ -28,8 +28,7 @@ in
 
     boot.kernelPackages = pkgs.linuxPackagesFor kernel;
     boot.kernelParams = [
-      # firn-boot refuses a generation without maxcpus, idle and nowfxt.
-      "maxcpus=10"
+      # firn-boot refuses a generation without idle and nowfxt.
       "idle=nop"
       # WFIT in __delay() stops the M4 at EL2.
       "arm64.nowfxt"

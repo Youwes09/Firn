@@ -21,7 +21,6 @@ import zlib
 
 # WFIT in __delay() stops the M4 at EL2.
 REQUIRED_ARGS = (
-    'maxcpus=10',
     'idle=nop',
     'arm64.nowfxt',
 )

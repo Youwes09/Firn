@@ -59,7 +59,7 @@ FIRMWARE = cpio([('vendorfw', 0o40755, b''),
                  ('vendorfw/brcm/fw.bin', 0o100644, b'\x01\x02\x03')])
 INITRD = gzip.compress(cpio([('init', 0o100755, b'#!/bin/sh\n')]), mtime=0)
 NEW_INITRD = gzip.compress(cpio([('init', 0o100755, b'nixos stage 1\n')]), mtime=0)
-PARAMS = 'maxcpus=10 idle=nop arm64.nowfxt panic=0 console=tty0 loglevel=4'
+PARAMS = 'idle=nop arm64.nowfxt panic=0 console=tty0 loglevel=4'
 NIXOS_ARGS = PARAMS.split() + ['root=fstab', 'loglevel=4']
 INSTALLED_ARGS = PARAMS + ' root=fstab init=/nix/store/a-nixos-system/init'
 

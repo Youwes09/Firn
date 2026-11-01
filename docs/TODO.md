@@ -41,9 +41,8 @@ Known problems with the shipped system are in [ISSUES.md](ISSUES.md).
       firmware PMGR) while applying its `dvfs-domain` tunable, which
       lists the DISP domain. The PMC power state was off: nothing in
       Linux claims it, so genpd turns it off at `sync_state`. Gravity's
-      kernel never reaches `sync_state` for that PMGR and so left it on
-      by accident. `t8132-pmgr.dtsi` now keeps PMC on; PMP starts on
-      every boot.
+      devicetree marks PMC always-on; `t8132-pmgr.dtsi` now does too, and
+      PMP starts on every boot.
 - [x] Boot warnings, on Gravity's kernel as on this one, fixed: the
       T8132 is marked DMA-coherent (its cores report CLIDR_EL1.LoC == 0,
       which mainline warned about for every device on every probe);
@@ -189,8 +188,8 @@ Known problems with the shipped system are in [ISSUES.md](ISSUES.md).
 - [ ] `idle=nop`: a plain wfi loses the core's registers, so the
       default idle path must not run. Make the arch idle path safe on
       T8132 instead.
-- [ ] `maxcpus=10`: the devicetree has exactly 10 CPUs; likely
-      redundant. firn-boot still requires it.
+- [x] `maxcpus=10` came from the first installer's boot arguments; the
+      devicetree has exactly the 10 CPUs, so it limited nothing. Dropped.
 - [ ] AIC skips the EL2 FIQ masks on T8132; KVM guests get no timer
       interrupts until the hang is understood.
 - [ ] PMC is kept always-on for PMP. The driver whose firmware touches

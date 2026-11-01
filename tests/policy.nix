@@ -29,7 +29,6 @@ let
     "no kernel patches from the configuration" = cfg.boot.kernelPatches == [ ];
     "no devicetree overlays" = cfg.hardware.deviceTree.overlays == [ ];
     "kernel parameters keep the hardware switches" = lib.all (p: lib.elem p params) [
-      "maxcpus=10"
       "idle=nop"
       "arm64.nowfxt"
     ];
