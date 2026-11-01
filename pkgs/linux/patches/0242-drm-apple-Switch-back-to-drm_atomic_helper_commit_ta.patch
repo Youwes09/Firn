@@ -1,0 +1,58 @@
+From 00b09b5195e4d6e208eb147ce1378f5e530a6387 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 27 Apr 2024 17:55:25 +0200
+Subject: [PATCH] drm: apple: Switch back to
+ drm_atomic_helper_commit_tail_rpm()
+
+The custom commit_tail implementation stopped making after "drm/apple:
+Disable fake vblank IRQ machinery" which stopped calling
+drm_vblank_init(). Revert back to the standard helper implementation.
+Avoids or at least significantly reduces page flips taking approximately
+one frame time in kwin_wayland 6.
+
+Fixes: ("drm/apple: Switch to nonblocking commit handling")
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 22 +---------------------
+ 1 file changed, 1 insertion(+), 21 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index a91aa3969054..e3988701e0cc 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -239,26 +239,6 @@ static void apple_crtc_atomic_begin(struct drm_crtc *crtc,
+ 	}
+ }
+ 
+-static void dcp_atomic_commit_tail(struct drm_atomic_state *old_state)
+-{
+-	struct drm_device *dev = old_state->dev;
+-
+-	drm_atomic_helper_commit_modeset_disables(dev, old_state);
+-
+-	drm_atomic_helper_commit_modeset_enables(dev, old_state);
+-
+-	drm_atomic_helper_commit_planes(dev, old_state,
+-					DRM_PLANE_COMMIT_ACTIVE_ONLY);
+-
+-	drm_atomic_helper_fake_vblank(old_state);
+-
+-	drm_atomic_helper_commit_hw_done(old_state);
+-
+-	drm_atomic_helper_wait_for_flip_done(dev, old_state);
+-
+-	drm_atomic_helper_cleanup_planes(dev, old_state);
+-}
+-
+ static void apple_crtc_cleanup(struct drm_crtc *crtc)
+ {
+ 	drm_crtc_cleanup(crtc);
+@@ -281,7 +261,7 @@ static const struct drm_mode_config_funcs apple_mode_config_funcs = {
+ };
+ 
+ static const struct drm_mode_config_helper_funcs apple_mode_config_helpers = {
+-	.atomic_commit_tail	= dcp_atomic_commit_tail,
++	.atomic_commit_tail	= drm_atomic_helper_commit_tail_rpm,
+ };
+ 
+ static void appledrm_connector_cleanup(struct drm_connector *connector)

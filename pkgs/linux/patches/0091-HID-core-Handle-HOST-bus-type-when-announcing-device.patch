@@ -1,0 +1,24 @@
+From db5fd31a1fcf72caaaca41f8d9b0313a495db487 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Fri, 8 Jul 2022 02:06:15 +0900
+Subject: [PATCH] HID: core: Handle HOST bus type when announcing devices
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+---
+ drivers/hid/hid-core.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/hid/hid-core.c b/drivers/hid/hid-core.c
+index 5e9dcdf32145..9e48bbf17799 100644
+--- a/drivers/hid/hid-core.c
++++ b/drivers/hid/hid-core.c
+@@ -2379,6 +2379,9 @@ int hid_connect(struct hid_device *hdev, unsigned int connect_mask)
+ 	case BUS_SPI:
+ 		bus = "SPI";
+ 		break;
++	case BUS_HOST:
++		bus = "HOST";
++		break;
+ 	case BUS_VIRTUAL:
+ 		bus = "VIRTUAL";
+ 		break;

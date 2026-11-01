@@ -1,0 +1,37 @@
+From 83b6f3d18a7c173abf6e01574cfdcf636159ff50 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 23 Mar 2023 08:40:42 +0100
+Subject: [PATCH] drm/apple: Drop unsupported DRM_FORMAT_ARGB2101010
+
+Depends on https://gitlab.freedesktop.org/asahi/mesa/-/merge_requests/5
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 1 -
+ drivers/gpu/drm/apple/iomfb.c     | 1 -
+ 2 files changed, 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 1fb2a70fd888..a6e65c8c5d48 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -147,7 +147,6 @@ static const struct drm_plane_funcs apple_plane_funcs = {
+  */
+ static const u32 dcp_formats[] = {
+ 	DRM_FORMAT_XRGB2101010,
+-	DRM_FORMAT_ARGB2101010,
+ 	DRM_FORMAT_XRGB8888,
+ 	DRM_FORMAT_ARGB8888,
+ 	DRM_FORMAT_XBGR8888,
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 48f9a80f76fc..0ce1e02309d8 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -412,7 +412,6 @@ u32 drm_format_to_dcp(u32 drm)
+ 	case DRM_FORMAT_ABGR8888:
+ 		return fourcc_code('A', 'B', 'G', 'R');
+ 
+-	case DRM_FORMAT_ARGB2101010:
+ 	case DRM_FORMAT_XRGB2101010:
+ 		return fourcc_code('r', '0', '3', 'w');
+ 	}

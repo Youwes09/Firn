@@ -11,7 +11,8 @@ Test tiers, in order. Do not go on past a failed gate.
 | T3 preflight | Mac, read-only | `bash preflight.command` | `RESULT: ready to install`, or WARN lines understood |
 | T4 install | Mac | [GUIDE.md](GUIDE.md), parts 4 and 5 | Each stage's checks |
 
-T2 boots the shipped kernel and initrd in QEMU's virtual arm64 machine. It tests
+T2 boots the shipped initrd in QEMU's virtual arm64 machine, on the J713 kernel
+plus the drivers that machine needs (`pkgs/linux/qemu-virt.config`). It tests
 the software path, not Apple hardware. Its EFI partition is on a separate
 virtual disk, so it cannot catch anything that depends on the Mac's single
 disk layout, such as systemd's GPT auto-mounting.

@@ -11,7 +11,9 @@ let
     uuid = cfg.hardware.firn.image.rootUuid;
   };
   efiUuid = "3d6b3c0e-5f1a-4a8e-9b7d-2c4e6f8a0b1c";
-  machine = "-M virt -cpu max -smp 2 -m 3072";
+  # QEMU emulates pointer authentication with QARMA by default, which is
+  # slow and runs on nearly every kernel call; its own algorithm is not.
+  machine = "-M virt -cpu max,pauth-impdef=on -smp 2 -m 3072";
 in
 pkgs.runCommand "firn-vm-boot"
   {

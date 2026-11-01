@@ -1,0 +1,63 @@
+From fdb50d5da351cd65802cdbcdb5421113df6b2f08 Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Thu, 29 Oct 2026 00:30:23 -0500
+Subject: [PATCH] arm64: dts: apple: t8132: Add the SMC reboot
+
+Add the boot and shutdown state cells in the Abbey PMU's legacy
+scratchpad and the SMC reboot node that uses them. Without
+shutdown_flag, the SMC off1 command restarts the machine instead of
+leaving it off.
+
+Based on work from Omarchy-M4-Native, released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 7cf2cb8f26d3..3ed92d61b9f4 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -291,6 +291,26 @@ pm_setting: pm-setting@2001 {
+ 					rtc_offset: rtc-offset@2100 {
+ 						reg = <0x2100 0x6>;
+ 					};
++
++					/* Legacy scratchpad, ADT info-leg_scrpad */
++					boot_stage: boot-stage@f801 {
++						reg = <0xf801 0x1>;
++					};
++
++					boot_error_count: boot-error-count@f802,0 {
++						reg = <0xf802 0x1>;
++						bits = <0 4>;
++					};
++
++					panic_count: panic-count@f802,4 {
++						reg = <0xf802 0x1>;
++						bits = <4 4>;
++					};
++
++					shutdown_flag: shutdown-flag@f80f,3 {
++						reg = <0xf80f 0x1>;
++						bits = <3 1>;
++					};
+ 				};
+ 			};
+ 		};
+@@ -308,6 +328,14 @@ smc_gpio: gpio {
+ 				#gpio-cells = <2>;
+ 			};
+ 
++			smc_reboot: reboot {
++				compatible = "apple,smc-reboot";
++				nvmem-cells = <&shutdown_flag>, <&boot_stage>,
++					      <&boot_error_count>, <&panic_count>;
++				nvmem-cell-names = "shutdown_flag", "boot_stage",
++						   "boot_error_count", "panic_count";
++			};
++
+ 			rtc {
+ 				compatible = "apple,smc-rtc";
+ 				nvmem-cells = <&rtc_offset>;

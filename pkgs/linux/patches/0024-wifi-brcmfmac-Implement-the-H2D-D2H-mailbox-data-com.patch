@@ -1,0 +1,123 @@
+From 4cb0fcbbf7a7dbde4403676a4c4bd0f3d616c4f2 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 18 Oct 2022 21:58:21 +0900
+Subject: [PATCH] wifi: brcmfmac: Implement the H2D/D2H mailbox data commonring
+ messages
+
+Newer firmware versions use these to exchange mailbox data, instead of
+the hardware mailbox registers. Add handling for them to msgbuf.c.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 91d6478f886dacd50091412b60bffeca05aee012)
+
+Original-Commit: ba04bc3ba1b90ee00ed878accee96cb8339de915
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/msgbuf.c      | 59 +++++++++++++++++++
+ .../broadcom/brcm80211/brcmfmac/msgbuf.h      |  1 +
+ 2 files changed, 60 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c
+index beccb048391a..ba9985644f0c 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c
+@@ -244,6 +244,19 @@ struct msgbuf_flowring_flush_resp {
+ 	__le32				rsvd0[3];
+ };
+ 
++struct msgbuf_h2d_mailbox_data {
++	struct msgbuf_common_hdr	msg;
++	__le32				data;
++	__le32				rsvd0[7];
++};
++
++struct msgbuf_d2h_mailbox_data {
++	struct msgbuf_common_hdr	msg;
++	struct msgbuf_completion_hdr	compl_hdr;
++	__le32				data;
++	__le32				rsvd0[2];
++};
++
+ struct brcmf_msgbuf_work_item {
+ 	struct list_head queue;
+ 	u32 flowid;
+@@ -1346,6 +1359,16 @@ brcmf_msgbuf_process_flow_ring_delete_response(struct brcmf_msgbuf *msgbuf,
+ }
+ 
+ 
++static void brcmf_msgbuf_process_d2h_mailbox_data(struct brcmf_msgbuf *msgbuf,
++						  void *buf)
++{
++	struct msgbuf_d2h_mailbox_data *d2h_mb_data = buf;
++	struct brcmf_pub *drvr = msgbuf->drvr;
++
++	brcmf_bus_d2h_mb_rx(drvr->bus_if, le32_to_cpu(d2h_mb_data->data));
++}
++
++
+ static void brcmf_msgbuf_process_msgtype(struct brcmf_msgbuf *msgbuf, void *buf)
+ {
+ 	struct brcmf_pub *drvr = msgbuf->drvr;
+@@ -1388,6 +1411,10 @@ static void brcmf_msgbuf_process_msgtype(struct brcmf_msgbuf *msgbuf, void *buf)
+ 		brcmf_dbg(MSGBUF, "MSGBUF_TYPE_RX_CMPLT\n");
+ 		brcmf_msgbuf_process_rx_complete(msgbuf, buf);
+ 		break;
++	case MSGBUF_TYPE_D2H_MAILBOX_DATA:
++		brcmf_dbg(MSGBUF, "MSGBUF_TYPE_D2H_MAILBOX_DATA\n");
++		brcmf_msgbuf_process_d2h_mailbox_data(msgbuf, buf);
++		break;
+ 	default:
+ 		bphy_err(drvr, "Unsupported msgtype %d\n", msg->msgtype);
+ 		break;
+@@ -1526,6 +1553,38 @@ void brcmf_msgbuf_delete_flowring(struct brcmf_pub *drvr, u16 flowid)
+ 	}
+ }
+ 
++
++int brcmf_msgbuf_h2d_mb_write(struct brcmf_pub *drvr, u32 data)
++{
++	struct brcmf_msgbuf *msgbuf = (struct brcmf_msgbuf *)drvr->proto->pd;
++	struct brcmf_commonring *commonring;
++	struct msgbuf_h2d_mailbox_data *request;
++	void *ret_ptr;
++	int err;
++
++	commonring = msgbuf->commonrings[BRCMF_H2D_MSGRING_CONTROL_SUBMIT];
++	brcmf_commonring_lock(commonring);
++	ret_ptr = brcmf_commonring_reserve_for_write(commonring);
++	if (!ret_ptr) {
++		bphy_err(drvr, "Failed to reserve space in commonring\n");
++		brcmf_commonring_unlock(commonring);
++		return -ENOMEM;
++	}
++
++	request = (struct msgbuf_h2d_mailbox_data *)ret_ptr;
++	request->msg.msgtype = MSGBUF_TYPE_H2D_MAILBOX_DATA;
++	request->msg.ifidx = -1;
++	request->msg.flags = 0;
++	request->msg.request_id = 0;
++	request->data = data;
++
++	err = brcmf_commonring_write_complete(commonring);
++	brcmf_commonring_unlock(commonring);
++
++	return err;
++}
++
++
+ #ifdef DEBUG
+ static int brcmf_msgbuf_stats_read(struct seq_file *seq, void *data)
+ {
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h
+index 6a849f4a94dd..89b6b7f9ddb7 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h
+@@ -32,6 +32,7 @@ int brcmf_proto_msgbuf_rx_trigger(struct device *dev);
+ void brcmf_msgbuf_delete_flowring(struct brcmf_pub *drvr, u16 flowid);
+ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr);
+ void brcmf_proto_msgbuf_detach(struct brcmf_pub *drvr);
++int brcmf_msgbuf_h2d_mb_write(struct brcmf_pub *drvr, u32 data);
+ #else
+ static inline int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
+ {

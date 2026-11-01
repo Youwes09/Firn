@@ -1,0 +1,28 @@
+From 66775f0103e95d367e2cdcc84742ca5e7ed7fa61 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 28 Nov 2023 14:27:18 +0100
+Subject: [PATCH] drm: apple: dcp: Fix resume with DPTX based display outputs
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index d233e4d9208d..52201834a0d5 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -1034,6 +1034,13 @@ static int dcp_platform_resume(struct device *dev)
+ 	if (dcp->hdmi_hpd_irq)
+ 		enable_irq(dcp->hdmi_hpd_irq);
+ 
++	if (dcp->hdmi_hpd) {
++		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
++		dev_info(dcp->dev, "resume: HPD connected:%d\n", connected);
++		if (connected)
++			dcp_dptx_connect(dcp, 0);
++	}
++
+ 	return 0;
+ }
+ 

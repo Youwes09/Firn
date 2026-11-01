@@ -1,0 +1,333 @@
+From 9c84db6a20ad4535beb435778b97a9ad4ce703ec Mon Sep 17 00:00:00 2001
+From: Daniel Berlin <dberlin@dberlin.org>
+Date: Tue, 10 Oct 2023 09:42:36 -0400
+Subject: [PATCH] [brcmfmac] Support GCMP cipher suite, used by WPA3.
+
+This patch adds support for using GCMP/etc during offload
+where supported by the firmware.
+
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+(cherry picked from commit 999b7240c323766c3ca75acd41005dfbe8d3866d)
+
+Original-Commit: c74fb0a1c237fdbb4ac7198185b9e445f40b6789
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    | 132 +++++++++++++++++-
+ .../broadcom/brcm80211/brcmfmac/feature.c     |   1 +
+ .../broadcom/brcm80211/brcmfmac/feature.h     |   8 +-
+ .../broadcom/brcm80211/brcmfmac/fwil_types.h  |  18 +++
+ .../broadcom/brcm80211/include/brcmu_wifi.h   |   7 +
+ 5 files changed, 161 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 43d0e8bdce28..56b8ff280286 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -33,7 +33,9 @@
+ #include "vendor.h"
+ #include "bus.h"
+ #include "common.h"
++#include "feature.h"
+ #include "fwvid.h"
++#include "xtlv.h"
+ 
+ #define BRCMF_SCAN_IE_LEN_MAX		2048
+ 
+@@ -125,6 +127,13 @@ struct cca_msrmnt_query {
+ 	u32 time_req;
+ };
+ 
++/* algo bit vector */
++#define KEY_ALGO_MASK(_algo)	(1 << (_algo))
++
++/* start enum value for BSS properties */
++#define WL_WSEC_INFO_BSS_BASE 0x0100
++#define WL_WSEC_INFO_BSS_ALGOS (WL_WSEC_INFO_BSS_BASE + 6)
++
+ static bool check_vif_up(struct brcmf_cfg80211_vif *vif)
+ {
+ 	if (!test_bit(BRCMF_VIF_STATUS_READY, &vif->sme_state)) {
+@@ -237,16 +246,22 @@ static const struct ieee80211_regdomain brcmf_regdom = {
+ /* Note: brcmf_cipher_suites is an array of int defining which cipher suites
+  * are supported. A pointer to this array and the number of entries is passed
+  * on to upper layers. AES_CMAC defines whether or not the driver supports MFP.
+- * So the cipher suite AES_CMAC has to be the last one in the array, and when
+- * device does not support MFP then the number of suites will be decreased by 1
++ * MFP support includes a few other suites,  so if MFP is not supported,
++ * then the number of suites will be decreased by 4
+  */
+ static const u32 brcmf_cipher_suites[] = {
+ 	WLAN_CIPHER_SUITE_WEP40,
+ 	WLAN_CIPHER_SUITE_WEP104,
+ 	WLAN_CIPHER_SUITE_TKIP,
+ 	WLAN_CIPHER_SUITE_CCMP,
+-	/* Keep as last entry: */
+-	WLAN_CIPHER_SUITE_AES_CMAC
++	WLAN_CIPHER_SUITE_CCMP_256,
++	WLAN_CIPHER_SUITE_GCMP,
++	WLAN_CIPHER_SUITE_GCMP_256,
++	/* Keep as last 4 entries: */
++	WLAN_CIPHER_SUITE_AES_CMAC,
++	WLAN_CIPHER_SUITE_BIP_CMAC_256,
++	WLAN_CIPHER_SUITE_BIP_GMAC_128,
++	WLAN_CIPHER_SUITE_BIP_GMAC_256
+ };
+ 
+ /* Vendor specific ie. id = 221, oui and type defines exact ie */
+@@ -2035,6 +2050,48 @@ static s32 brcmf_set_auth_type(struct net_device *ndev,
+ 	return err;
+ }
+ 
++static s32 brcmf_set_wsec_info_algos(struct brcmf_if *ifp, u32 algos, u32 mask)
++{
++	struct brcmf_pub *drvr = ifp->drvr;
++	s32 err = 0;
++	struct brcmf_wsec_info *wsec_info;
++	struct brcmf_xtlv *wsec_info_tlv;
++	u16 tlv_data_len;
++	u8 tlv_data[8];
++	u32 param_len;
++	u8 *buf;
++
++	brcmf_dbg(TRACE, "Enter\n");
++
++	buf = kzalloc(sizeof(struct brcmf_wsec_info) + sizeof(tlv_data),
++		      GFP_KERNEL);
++	if (!buf) {
++		bphy_err(drvr, "unable to allocate.\n");
++		return -ENOMEM;
++	}
++	wsec_info = (struct brcmf_wsec_info *)buf;
++	wsec_info->version = BRCMF_WSEC_INFO_VER;
++	wsec_info_tlv =
++		(struct brcmf_xtlv *)(buf +
++				      offsetof(struct brcmf_wsec_info, tlvs));
++	wsec_info->num_tlvs++;
++	tlv_data_len = sizeof(tlv_data);
++	memcpy(tlv_data, &algos, sizeof(algos));
++	memcpy(tlv_data + sizeof(algos), &mask, sizeof(mask));
++	brcmf_xtlv_pack_header(wsec_info_tlv, WL_WSEC_INFO_BSS_ALGOS,
++			       tlv_data_len, tlv_data, 0);
++
++	param_len = offsetof(struct brcmf_wsec_info, tlvs) +
++		    offsetof(struct brcmf_wsec_info_tlv, data) + tlv_data_len;
++
++	err = brcmf_fil_bsscfg_data_set(ifp, "wsec_info", buf, param_len);
++	if (err)
++		brcmf_err("set wsec_info_error:%d\n", err);
++
++	kfree(buf);
++	return err;
++}
++
+ static s32
+ brcmf_set_wsec_mode(struct net_device *ndev,
+ 		    struct cfg80211_connect_params *sme)
+@@ -2047,6 +2104,8 @@ brcmf_set_wsec_mode(struct net_device *ndev,
+ 	s32 gval = 0;
+ 	s32 wsec;
+ 	s32 err = 0;
++	u32 algos = 0;
++	u32 mask = 0;
+ 
+ 	if (sme->crypto.n_ciphers_pairwise) {
+ 		switch (sme->crypto.ciphers_pairwise[0]) {
+@@ -2063,6 +2122,15 @@ brcmf_set_wsec_mode(struct net_device *ndev,
+ 		case WLAN_CIPHER_SUITE_AES_CMAC:
+ 			pval = AES_ENABLED;
+ 			break;
++		case WLAN_CIPHER_SUITE_GCMP_256:
++			if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GCMP)) {
++				brcmf_err("This chip does not support GCMP\n");
++				return -EOPNOTSUPP;
++			}
++			pval = AES_ENABLED;
++			algos = KEY_ALGO_MASK(CRYPTO_ALGO_AES_GCM256);
++			mask = algos | KEY_ALGO_MASK(CRYPTO_ALGO_AES_CCM);
++			break;
+ 		default:
+ 			bphy_err(drvr, "invalid cipher pairwise (%d)\n",
+ 				 sme->crypto.ciphers_pairwise[0]);
+@@ -2084,6 +2152,15 @@ brcmf_set_wsec_mode(struct net_device *ndev,
+ 		case WLAN_CIPHER_SUITE_AES_CMAC:
+ 			gval = AES_ENABLED;
+ 			break;
++		case WLAN_CIPHER_SUITE_GCMP_256:
++			if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GCMP)) {
++				brcmf_err("This chip does not support GCMP\n");
++				return -EOPNOTSUPP;
++			}
++			gval = AES_ENABLED;
++			algos = KEY_ALGO_MASK(CRYPTO_ALGO_AES_GCM256);
++			mask = algos | KEY_ALGO_MASK(CRYPTO_ALGO_AES_CCM);
++			break;
+ 		default:
+ 			bphy_err(drvr, "invalid cipher group (%d)\n",
+ 				 sme->crypto.cipher_group);
+@@ -2092,6 +2169,7 @@ brcmf_set_wsec_mode(struct net_device *ndev,
+ 	}
+ 
+ 	brcmf_dbg(CONN, "pval (%d) gval (%d)\n", pval, gval);
++	brcmf_dbg(CONN, "algos (0x%x) mask (0x%x)\n", algos, mask);
+ 	/* In case of privacy, but no security and WPS then simulate */
+ 	/* setting AES. WPS-2.0 allows no security                   */
+ 	if (brcmf_find_wpsie(sme->ie, sme->ie_len) && !pval && !gval &&
+@@ -2104,6 +2182,15 @@ brcmf_set_wsec_mode(struct net_device *ndev,
+ 		bphy_err(drvr, "error (%d)\n", err);
+ 		return err;
+ 	}
++	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GCMP)) {
++		brcmf_dbg(CONN, "set_wsec_info algos (0x%x) mask (0x%x)\n",
++			  algos, mask);
++		err = brcmf_set_wsec_info_algos(ifp, algos, mask);
++		if (err) {
++			brcmf_err("set wsec_info error (%d)\n", err);
++			return err;
++		}
++	}
+ 
+ 	sec = &profile->sec;
+ 	sec->cipher_pairwise = sme->crypto.ciphers_pairwise[0];
+@@ -2860,6 +2947,8 @@ brcmf_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 	s32 val;
+ 	s32 wsec;
+ 	s32 err;
++	u32 algos = 0;
++	u32 mask = 0;
+ 	u8 keybuf[8];
+ 	bool ext_key;
+ 
+@@ -2943,6 +3032,30 @@ brcmf_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 		val = AES_ENABLED;
+ 		brcmf_dbg(CONN, "WLAN_CIPHER_SUITE_CCMP\n");
+ 		break;
++	case WLAN_CIPHER_SUITE_GCMP_256:
++		if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GCMP)) {
++			brcmf_err("the low layer not support GCMP\n");
++			err = -EOPNOTSUPP;
++			goto done;
++		}
++		key->algo = CRYPTO_ALGO_AES_GCM256;
++		val = AES_ENABLED;
++		brcmf_dbg(CONN, "WLAN_CIPHER_SUITE_GCMP_256\n");
++		algos = KEY_ALGO_MASK(CRYPTO_ALGO_AES_GCM256);
++		mask = algos | KEY_ALGO_MASK(CRYPTO_ALGO_AES_CCM);
++		break;
++	case WLAN_CIPHER_SUITE_BIP_GMAC_256:
++		if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GCMP)) {
++			brcmf_err("the low layer not support GCMP\n");
++			err = -EOPNOTSUPP;
++			goto done;
++		}
++		key->algo = CRYPTO_ALGO_BIP_GMAC256;
++		val = AES_ENABLED;
++		algos = KEY_ALGO_MASK(CRYPTO_ALGO_BIP_GMAC256);
++		mask = algos | KEY_ALGO_MASK(CRYPTO_ALGO_AES_CCM);
++		brcmf_dbg(CONN, "WLAN_CIPHER_SUITE_BIP_GMAC_256\n");
++		break;
+ 	default:
+ 		bphy_err(drvr, "Invalid cipher (0x%x)\n", params->cipher);
+ 		err = -EINVAL;
+@@ -2964,6 +3077,17 @@ brcmf_cfg80211_add_key(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 		bphy_err(drvr, "set wsec error (%d)\n", err);
+ 		goto done;
+ 	}
++	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_GCMP)) {
++		brcmf_dbg(CONN,
++			  "set_wsdec_info algos (0x%x) mask (0x%x)\n",
++			  algos, mask);
++		err = brcmf_set_wsec_info_algos(ifp, algos, mask);
++		if (err) {
++			brcmf_err("set wsec_info error (%d)\n", err);
++			return err;
++		}
++	}
++
+ 
+ done:
+ 	brcmf_dbg(TRACE, "Exit\n");
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+index ff41b94b91a7..9b07c3398479 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+@@ -47,6 +47,7 @@ static const struct brcmf_feat_fwcap brcmf_fwcap_map[] = {
+ 	{ BRCMF_FEAT_SAE_EXT, "sae_ext" },
+ 	{ BRCMF_FEAT_FBT, "fbt " },
+ 	{ BRCMF_FEAT_OKC, "okc" },
++	{ BRCMF_FEAT_GCMP, "gcmp"}
+ };
+ 
+ #ifdef DEBUG
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
+index 5c926f07c652..56c61c7f35ce 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
+@@ -32,7 +32,12 @@
+  * DUMP_OBSS: Firmware has capable to dump obss info to support ACS
+  * SCAN_V2: Version 2 scan params
+  * SAE_EXT: SAE authentication handled by user-space supplicant
++ * SCAN_v3: Version 3 scan params
++ * PMKID_V2: Version 2 PMKID
++ * PMKID_V3: Version 3 PMKID
+  * EVENT_MSGS_EXT: Event messages extension
++ * JOIN_V1: Version 1 join struct
++ * GCMP: GCMP Cipher suite support
+  */
+ #define BRCMF_FEAT_LIST \
+ 	BRCMF_FEAT_DEF(MBSS) \
+@@ -64,7 +69,8 @@
+ 	BRCMF_FEAT_DEF(SAE_EXT) \
+ 	BRCMF_FEAT_DEF(FBT) \
+ 	BRCMF_FEAT_DEF(OKC) \
+-	BRCMF_FEAT_DEF(EVENT_MSGS_EXT)
++	BRCMF_FEAT_DEF(EVENT_MSGS_EXT) \
++	BRCMF_FEAT_DEF(GCMP)
+ 
+ /*
+  * Quirks:
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index a4ec3808a5c8..27ec9a414338 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -1309,4 +1309,22 @@ struct brcmf_eventmsgs_ext_le {
+ 	u8	mask[];
+ };
+ 
++/* version of the brcmf_wl_wsec_info structure */
++#define BRCMF_WSEC_INFO_VER 1
++
++/* tlv used to return wl_wsec_info properties */
++struct brcmf_wsec_info_tlv {
++	u16 type;
++	u16 len; /* data length */
++	u8 data[1]; /* data follows */
++};
++
++/* input/output data type for wsec_info iovar */
++struct brcmf_wsec_info {
++	u8 version; /* structure version */
++	u8 pad[2];
++	u8 num_tlvs;
++	struct brcmf_wsec_info_tlv tlvs[1]; /* tlv data follows */
++};
++
+ #endif /* FWIL_TYPES_H_ */
+diff --git a/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h b/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h
+index 354d8da014f1..550742e484d9 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h
++++ b/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h
+@@ -215,6 +215,13 @@ static inline bool ac_bitmap_tst(u8 bitmap, int prec)
+ #define CRYPTO_ALGO_AES_RESERVED1	5
+ #define CRYPTO_ALGO_AES_RESERVED2	6
+ #define CRYPTO_ALGO_NALG		7
++#define CRYPTO_ALGO_AES_GCM     14  /* 128 bit GCM */
++#define CRYPTO_ALGO_AES_CCM256  15  /* 256 bit CCM */
++#define CRYPTO_ALGO_AES_GCM256  16  /* 256 bit GCM */
++#define CRYPTO_ALGO_BIP_CMAC256 17  /* 256 bit BIP CMAC */
++#define CRYPTO_ALGO_BIP_GMAC    18  /* 128 bit BIP GMAC */
++#define CRYPTO_ALGO_BIP_GMAC256 19  /* 256 bit BIP GMAC */
++
+ 
+ /* wireless security bitvec */
+ 

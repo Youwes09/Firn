@@ -1,0 +1,58 @@
+From 03594611f2e719db61f66064844d32087ea825fa Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 6 Jun 2023 15:53:23 +0900
+Subject: [PATCH] wifi: brcmfmac: Do not service msgbuf IRQs until ready in MSI
+ mode
+
+This is the counterpart to b50255c83b. In MSI mode we can still get MSIs
+even with IRQs disabled, so add an explicit gate for it.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit f04be345ad51b984406bbaeca70954c0efe65471)
+
+Original-Commit: 763f3cdc4d4df4323902cf3a9e2b09d39468bf8c
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 482f04f8d55a..6331ca46e12c 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -408,6 +408,7 @@ struct brcmf_pciedev_info {
+ 	wait_queue_head_t mbdata_resp_wait;
+ 	bool mbdata_completed;
+ 	bool irq_allocated;
++	bool irq_ready;
+ 	bool have_msi;
+ 	bool wowl_enabled;
+ 	u8 dma_idx_sz;
+@@ -991,6 +992,8 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
+ static void brcmf_pcie_intr_disable(struct brcmf_pciedev_info *devinfo)
+ {
+ 	brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxmask, 0);
++
++	devinfo->irq_ready = false;
+ }
+ 
+ 
+@@ -999,6 +1002,8 @@ static void brcmf_pcie_intr_enable(struct brcmf_pciedev_info *devinfo)
+ 	brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxmask,
+ 			       devinfo->reginfo->int_d2h_db |
+ 			       devinfo->reginfo->int_fn0);
++
++	devinfo->irq_ready = true;
+ }
+ 
+ static void brcmf_pcie_hostready(struct brcmf_pciedev_info *devinfo)
+@@ -1044,7 +1049,7 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
+ 			brcmf_pcie_poll_mb_data(devinfo);
+ 	}
+ 	if (devinfo->have_msi || status & devinfo->reginfo->int_d2h_db) {
+-		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
++		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && devinfo->irq_ready)
+ 			brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
+ 	}
+ 

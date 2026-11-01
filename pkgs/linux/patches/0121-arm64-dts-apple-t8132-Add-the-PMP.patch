@@ -1,0 +1,236 @@
+From 8fc747fe2b04e1cc7ddcb5296e63b889064f033a Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Wed, 28 Oct 2026 21:36:50 -0700
+Subject: [PATCH] arm64: dts: apple: t8132: Add the PMP
+
+Add PMP with its mailbox, DART and power-state reports. PMP reads the
+GPU block while it runs, so the GPU report holds ps_gfx on.
+
+[Youwes09: from Gravity Linux 898c9da9c905, checked against the J713
+ ADT; the DMA window in the five-cell DART specifier, T8132 mailbox and
+ report-entry compatibles, address order]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 202 +++++++++++++++++++++++++++
+ 1 file changed, 202 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index a96497758aea..9ca8de206d4a 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -386,6 +386,192 @@ cpufreq_p: cpufreq@211e20000 {
+ 			#performance-domain-cells = <0>;
+ 		};
+ 
++		pmp_dart: iommu@380300000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x3 0x80300000 0x0 0xc000>;
++			#iommu-cells = <5>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 881 IRQ_TYPE_LEVEL_HIGH>;
++			power-domains = <&ps_pmp>;
++
++			status = "disabled";
++		};
++
++		pmp_report: pmp-report@3803c0000 {
++			compatible = "apple,t8132-pmp-v2-report";
++			reg = <0x3 0x803c0000 0x0 0x20000>,
++			      <0x3 0x828ac000 0x0 0x2c>;
++			reg-names = "report", "event-config";
++			#address-cells = <1>;
++			#size-cells = <0>;
++			power-domains = <&ps_pms_sram>;
++
++			status = "disabled";
++
++			pmp_report_agx: report@4 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x4>;
++				#power-domain-cells = <0>;
++				power-domains = <&ps_gfx>;
++				label = "pmp-agx";
++				/*
++				 * PMP reads the GPU block while it runs and takes a
++				 * bus error if the GPU domain is off.
++				 */
++				apple,always-on;
++			};
++
++			pmp_report_disp: report@7 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x7>;
++				#power-domain-cells = <0>;
++				label = "pmp-disp";
++			};
++
++			pmp_report_boot_f: report@f {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0xf>;
++				#power-domain-cells = <0>;
++				label = "pmp-boot-f";
++			};
++
++			pmp_report_boot_10: report@10 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x10>;
++				#power-domain-cells = <0>;
++				label = "pmp-boot-10";
++			};
++
++			pmp_report_dispext1: report@11 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x11>;
++				#power-domain-cells = <0>;
++				power-domains = <&ps_dispext1_sys>;
++				label = "pmp-dispext1";
++			};
++
++			pmp_report_atc0_common: report@12 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x12>;
++				#power-domain-cells = <0>;
++				label = "pmp-atc0-common";
++			};
++
++			pmp_report_atc1: report@13 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x13>;
++				#power-domain-cells = <0>;
++				label = "pmp-atc1";
++			};
++
++			pmp_report_atc2: report@14 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x14>;
++				#power-domain-cells = <0>;
++				label = "pmp-atc2";
++			};
++
++			pmp_report_atc3_common: report@15 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x15>;
++				#power-domain-cells = <0>;
++				label = "pmp-atc3-common";
++			};
++
++			pmp_report_soc_ni0: report@16 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x16>;
++				#power-domain-cells = <0>;
++				label = "pmp-soc-ni0";
++			};
++
++			pmp_report_soc_ni1: report@17 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x17>;
++				#power-domain-cells = <0>;
++				label = "pmp-soc-ni1";
++			};
++
++			pmp_report_boot_18: report@18 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x18>;
++				#power-domain-cells = <0>;
++				label = "pmp-boot-18";
++			};
++
++			pmp_report_soc_ni3: report@19 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x19>;
++				#power-domain-cells = <0>;
++				label = "pmp-soc-ni3";
++			};
++
++			pmp_report_soc_ni4: report@1a {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x1a>;
++				#power-domain-cells = <0>;
++				label = "pmp-soc-ni4";
++			};
++
++			pmp_report_soc_ni5: report@1b {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x1b>;
++				#power-domain-cells = <0>;
++				label = "pmp-soc-ni5";
++			};
++
++			pmp_report_ans: report@1d {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x1d>;
++				#power-domain-cells = <0>;
++				label = "pmp-ans";
++			};
++
++			pmp_report_pcie: report@1e {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x1e>;
++				#power-domain-cells = <0>;
++				label = "pmp-pcie";
++			};
++
++			pmp_report_sio: report@22 {
++				compatible = "apple,t8132-pmp-v2-report-entry",
++					     "apple,t6000-pmp-v2-report-entry";
++				reg = <0x22>;
++				#power-domain-cells = <0>;
++				label = "pmp-sio";
++			};
++		};
++
++		pmp: pmp@380500000 {
++			compatible = "apple,t8132-pmp-v2", "apple,t6000-pmp-v2";
++			reg = <0x3 0x80500000 0x0 0xc0000>,
++			      <0x3 0x80e00000 0x0 0x4000>;
++			reg-names = "pmp", "asc";
++			iommus = <&pmp_dart 0 0x100 0x0 0x10 0x0>;
++			mboxes = <&pmp_mbox>;
++			power-domains = <&ps_pmp>;
++
++			status = "disabled";
++		};
++
+ 		pmgr: power-management@380700000 {
+ 			compatible = "apple,t8132-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+ 			#address-cells = <1>;
+@@ -394,6 +580,22 @@ pmgr: power-management@380700000 {
+ 			/* child nodes are added in t8132-pmgr.dtsi */
+ 		};
+ 
++		pmp_mbox: mbox@380e08000 {
++			compatible = "apple,t8132-asc-mailbox", "apple,asc-mailbox-v4";
++			reg = <0x3 0x80e08000 0x0 0x4000>;
++			#mbox-cells = <0>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 877 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 878 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 879 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 880 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "send-empty", "send-not-empty",
++					  "recv-empty", "recv-not-empty";
++			power-domains = <&ps_pmp>;
++
++			status = "disabled";
++		};
++
+ 		aic: interrupt-controller@381000000 {
+ 			compatible = "apple,t8132-aic3", "apple,t8122-aic3";
+ 			#interrupt-cells = <3>;

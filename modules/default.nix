@@ -44,5 +44,12 @@
         nix.settings.extra-sandbox-paths.
       '';
     };
+
+    kernelConfig = lib.mkOption {
+      type = lib.types.path;
+      default = ../pkgs/linux/j713.config;
+      internal = true;
+      description = "Kernel configuration; the VM boot test swaps in j713-vm.config.";
+    };
   };
 }

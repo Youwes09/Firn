@@ -1,0 +1,47 @@
+From a58b6153287f755984e850af58803401a0408fa5 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 6 Nov 2023 23:44:08 +0100
+Subject: [PATCH] drm: apple: dptx: Adapt dptxport_connect() to observed
+ behavior
+
+Adapt to behavior seen on j474s with dcp0 driving lpdptx-phy and
+dp2hdmi using the macOS 13.5 firmware.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dptxep.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index 3113a77db226..234485085dcc 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -90,6 +90,7 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
+ {
+ 	struct dptx_port *dptx = service->cookie;
+ 	struct dcpdptx_connection_cmd cmd, resp;
++	u32 unk_field = 0x0; // seen as 0x100 under some conditions
+ 	int ret;
+ 	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
+ 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
+@@ -99,7 +100,7 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
+ 	trace_dptxport_connect(dptx, core, atc, die);
+ 
+ 	cmd.target = cpu_to_le32(target);
+-	cmd.unk = cpu_to_le32(0x100);
++	cmd.unk = cpu_to_le32(unk_field);
+ 	ret = afk_service_call(service, 0, 11, &cmd, sizeof(cmd), 24, &resp,
+ 			       sizeof(resp), 24);
+ 	if (ret)
+@@ -107,8 +108,9 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
+ 
+ 	if (le32_to_cpu(resp.target) != target)
+ 		return -EINVAL;
+-	if (le32_to_cpu(resp.unk) != 0x100)
+-		return -EINVAL;
++	if (le32_to_cpu(resp.unk) != unk_field)
++		dev_notice(service->ep->dcp->dev, "unexpected unk field in reply: 0x%x (0x%x)\n",
++			  le32_to_cpu(resp.unk), unk_field);
+ 
+ 	return 0;
+ }

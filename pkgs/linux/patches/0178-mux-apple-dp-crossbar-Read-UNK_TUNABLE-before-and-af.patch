@@ -1,0 +1,27 @@
+From b9a5bb6ea6af79983e9f271f44d7a5f8f0a7baaa Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 30 Apr 2023 15:26:44 +0200
+Subject: [PATCH] mux: apple dp crossbar: Read UNK_TUNABLE before and after
+ writing it
+
+Makes traces easier to compare with macOS.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/mux/apple-display-crossbar.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/mux/apple-display-crossbar.c b/drivers/mux/apple-display-crossbar.c
+index 8901ad2b1b2d..6acd5a87bd7d 100644
+--- a/drivers/mux/apple-display-crossbar.c
++++ b/drivers/mux/apple-display-crossbar.c
+@@ -252,7 +252,9 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
+ 	if (IS_ERR(dpxbar->regs))
+ 		return PTR_ERR(dpxbar->regs);
+ 
++	readl(dpxbar->regs + UNK_TUNABLE);
+ 	writel(hw->tunable, dpxbar->regs + UNK_TUNABLE);
++	readl(dpxbar->regs + UNK_TUNABLE);
+ 
+ 	for (unsigned int i = 0; i < MUX_MAX; ++i) {
+ 		mux_chip->mux[i].states = hw->n_ufp;

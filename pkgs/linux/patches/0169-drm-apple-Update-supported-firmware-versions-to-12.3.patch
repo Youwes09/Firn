@@ -1,0 +1,115 @@
+From 3ac7637afe5b054264c158c716b8092270032040 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 4 Sep 2023 23:07:45 +0200
+Subject: [PATCH] drm: apple: Update supported firmware versions to 12.3 and
+ 13.5
+
+Removes support for all firmware versions which report as compatible to
+13.3 except 13.5. This will be removed after m1n1 reports firmware 13.5
+as "apple,firmware-compat" for a while.
+The files with "v13_3" will be renamed at a later point to avoid
+conflicts with development trees.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp-internal.h |  2 +-
+ drivers/gpu/drm/apple/dcp.c          | 14 ++++++++++++--
+ drivers/gpu/drm/apple/iomfb.c        | 12 ++++++------
+ 3 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 1328640b3fae..e6dac0c9ab9b 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -21,7 +21,7 @@ struct apple_dcp;
+ enum dcp_firmware_version {
+ 	DCP_FIRMWARE_UNKNOWN,
+ 	DCP_FIRMWARE_V_12_3,
+-	DCP_FIRMWARE_V_13_3,
++	DCP_FIRMWARE_V_13_5,
+ };
+ 
+ enum {
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index d8f3b7f3623e..b00e64e8d07b 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -441,8 +441,18 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
+ 
+ 	if (strncmp(compat_str, "12.3.0", sizeof(compat_str)) == 0)
+ 		return DCP_FIRMWARE_V_12_3;
+-	if (strncmp(compat_str, "13.3.0", sizeof(compat_str)) == 0)
+-		return DCP_FIRMWARE_V_13_3;
++	/*
++	 * m1n1 reports firmware version 13.5 as compatible with 13.3. This is
++	 * only true for the iomfb endpoint. The interface for the dptx-port
++	 * endpoint changed between 13.3 and 13.5. The driver will only support
++	 * firmware 13.5. Check the actual firmware version for compat version
++	 * 13.3 until m1n1 reports 13.5 as "firmware-compat".
++	 */
++	else if ((strncmp(compat_str, "13.3.0", sizeof(compat_str)) == 0) &&
++		 (strncmp(fw_str, "13.5.0", sizeof(compat_str)) == 0))
++		return DCP_FIRMWARE_V_13_5;
++	else if (strncmp(compat_str, "13.5.0", sizeof(compat_str)) == 0)
++		return DCP_FIRMWARE_V_13_5;
+ 
+ 	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",
+ 		compat_str, fw_str);
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 8fd55baa22ea..8715574e0ca4 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -225,7 +225,7 @@ void dcp_sleep(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_12_3:
+ 		iomfb_sleep_v12_3(dcp);
+ 		break;
+-	case DCP_FIRMWARE_V_13_3:
++	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_sleep_v13_3(dcp);
+ 		break;
+ 	default:
+@@ -242,7 +242,7 @@ void dcp_poweron(struct platform_device *pdev)
+ 	case DCP_FIRMWARE_V_12_3:
+ 		iomfb_poweron_v12_3(dcp);
+ 		break;
+-	case DCP_FIRMWARE_V_13_3:
++	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_poweron_v13_3(dcp);
+ 		break;
+ 	default:
+@@ -260,7 +260,7 @@ void dcp_poweroff(struct platform_device *pdev)
+ 	case DCP_FIRMWARE_V_12_3:
+ 		iomfb_poweroff_v12_3(dcp);
+ 		break;
+-	case DCP_FIRMWARE_V_13_3:
++	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_poweroff_v13_3(dcp);
+ 		break;
+ 	default:
+@@ -505,7 +505,7 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ 	case DCP_FIRMWARE_V_12_3:
+ 		iomfb_flush_v12_3(dcp, crtc, state);
+ 		break;
+-	case DCP_FIRMWARE_V_13_3:
++	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_flush_v13_3(dcp, crtc, state);
+ 		break;
+ 	default:
+@@ -521,7 +521,7 @@ static void iomfb_start(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_12_3:
+ 		iomfb_start_v12_3(dcp);
+ 		break;
+-	case DCP_FIRMWARE_V_13_3:
++	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_start_v13_3(dcp);
+ 		break;
+ 	default:
+@@ -574,7 +574,7 @@ void iomfb_shutdown(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_12_3:
+ 		iomfb_shutdown_v12_3(dcp);
+ 		break;
+-	case DCP_FIRMWARE_V_13_3:
++	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_shutdown_v13_3(dcp);
+ 		break;
+ 	default:

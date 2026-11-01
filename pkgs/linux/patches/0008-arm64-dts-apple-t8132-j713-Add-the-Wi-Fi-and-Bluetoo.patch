@@ -1,0 +1,32 @@
+From 4cc3934476b775c1eb88b0dd430f34f00c939f30 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 12:19:42 -0500
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the Wi-Fi and Bluetooth
+ board type
+
+The J713 radio module is "garden" (ADT /arm-io/wlan module-instance).
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index e1fc5d47f487..eb9751b14cb9 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -30,6 +30,14 @@ led-0 {
+ 	};
+ };
+ 
++&wifi0 {
++	brcm,board-type = "apple,garden";
++};
++
++&bluetooth0 {
++	brcm,board-type = "apple,garden";
++};
++
+ &fpwm1 {
+ 	status = "okay";
+ };

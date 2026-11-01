@@ -1,0 +1,1183 @@
+From 1d380810bd6f2b963db22e02bea7c0b0d8def1c9 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Thu, 5 Oct 2023 01:23:32 +0900
+Subject: [PATCH] [brcmfmac] Support new join parameter structure versions
+
+To support new join parameter versions, we move to using a function
+pointer structure that knows how to deal with the different versions
+of structures
+
+Drive-by fix: Always count the assoc_params length even if no bssid is
+provided. It doesn't make sense to truncate it off, since we need to set
+the bssid to the broadcast addr anyway in that case.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+[Niklas: ported to v7.3: kept upstream's DPP-era FWSUP semantics (is_sae_akm
+ excludes SAE AKMs from PSK offload; SAE path gated on sae_pwd and
+ BRCMF_FEAT_SAE; sup_wpa set/cleared, which this commit had dropped and
+ a later commit restores) inside the restructured params-based connect]
+(cherry picked from commit fd5ed61da794514d4b35957b3549514e9ca5163f)
+
+Original-Commit: ddba7dbc5d95995884c995facc9fe0a3057f3f08
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/Makefile      |   1 +
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    | 268 ++++++----------
+ .../broadcom/brcm80211/brcmfmac/cfg80211.h    |   2 +
+ .../broadcom/brcm80211/brcmfmac/core.h        |  43 ++-
+ .../broadcom/brcm80211/brcmfmac/feature.c     |  42 ++-
+ .../broadcom/brcm80211/brcmfmac/fwil_types.h  | 118 ++++++-
+ .../broadcom/brcm80211/brcmfmac/join_param.c  | 288 ++++++++++++++++++
+ .../broadcom/brcm80211/brcmfmac/join_param.h  |  22 ++
+ .../broadcom/brcm80211/brcmfmac/scan_param.c  |   8 +-
+ 9 files changed, 612 insertions(+), 180 deletions(-)
+ create mode 100644 drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.c
+ create mode 100644 drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.h
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile
+index f3f72f952457..694b50a0664f 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile
+@@ -25,6 +25,7 @@ brcmfmac-objs += \
+ 		btcoex.o \
+ 		vendor.o \
+ 		pno.o \
++		join_param.o \
+ 		scan_param.o \
+ 		xtlv.o
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 1f7b8d8de82e..c5b51ff5d14a 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -79,10 +79,6 @@
+ 
+ #define	DOT11_BCN_PRB_FIXED_LEN		12	/* beacon/probe fixed length */
+ 
+-#define BRCMF_SCAN_JOIN_ACTIVE_DWELL_TIME_MS	320
+-#define BRCMF_SCAN_JOIN_PASSIVE_DWELL_TIME_MS	400
+-#define BRCMF_SCAN_JOIN_PROBE_INTERVAL_MS	20
+-
+ #define BRCMF_SCAN_CHANNEL_TIME		40
+ #define BRCMF_SCAN_UNASSOC_TIME		40
+ #define BRCMF_SCAN_PASSIVE_TIME		120
+@@ -101,9 +97,6 @@
+ #define PKT_TOKEN_IDX			15
+ #define IDLE_TOKEN_IDX			12
+ 
+-#define BRCMF_ASSOC_PARAMS_FIXED_SIZE \
+-	(sizeof(struct brcmf_assoc_params_le) - sizeof(u16))
+-
+ #define BRCMF_MAX_CHANSPEC_LIST \
+ 	(BRCMF_DCMD_MEDLEN / sizeof(__le32) - 1)
+ 
+@@ -392,8 +385,8 @@ static int nl80211_band_to_chanspec_band(enum nl80211_band band)
+ 	}
+ }
+ 
+-static u16 chandef_to_chanspec(struct brcmu_d11inf *d11inf,
+-			       struct cfg80211_chan_def *ch)
++u16 chandef_to_chanspec(struct brcmu_d11inf *d11inf,
++			struct cfg80211_chan_def *ch)
+ {
+ 	struct brcmu_chan ch_inf;
+ 	s32 primary_offset;
+@@ -1139,7 +1132,7 @@ s32 brcmf_notify_escan_complete(struct brcmf_cfg80211_info *cfg,
+ 
+ 	if (fw_abort) {
+ 		u32 len;
+-		void *data = drvr->scan_param_handler.get_prepped_struct(cfg, &len, NULL);
++		void *data = drvr->scan_param_handler.get_struct_for_request(cfg, &len, NULL);
+ 		if (!data){
+ 			bphy_err(drvr, "Scan abort failed to prepare abort struct\n");
+ 			return 0;
+@@ -1379,7 +1372,7 @@ brcmf_run_escan(struct brcmf_cfg80211_info *cfg, struct brcmf_if *ifp,
+ 
+ 	brcmf_dbg(SCAN, "E-SCAN START\n");
+ 
+-	prepped_params = drvr->scan_param_handler.get_prepped_struct(cfg, &struct_size, request);
++	prepped_params = drvr->scan_param_handler.get_struct_for_request(cfg, &struct_size, request);
+ 	if (!prepped_params) {
+ 		err = -EINVAL;
+ 		goto exit;
+@@ -1698,21 +1691,19 @@ static void brcmf_link_down(struct brcmf_cfg80211_vif *vif, u16 reason,
+ 	brcmf_dbg(TRACE, "Exit\n");
+ }
+ 
+-static s32
+-brcmf_cfg80211_join_ibss(struct wiphy *wiphy, struct net_device *ndev,
+-		      struct cfg80211_ibss_params *params)
++static s32 brcmf_cfg80211_join_ibss(struct wiphy *wiphy,
++				    struct net_device *ndev,
++				    struct cfg80211_ibss_params *params)
+ {
+ 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+ 	struct brcmf_if *ifp = netdev_priv(ndev);
+ 	struct brcmf_cfg80211_profile *profile = &ifp->vif->profile;
+ 	struct brcmf_pub *drvr = cfg->pub;
+-	struct brcmf_join_params join_params;
+-	size_t join_params_size = 0;
+-	s32 err = 0;
++	void *join_params;
++	u32 join_params_size = 0;
+ 	s32 wsec = 0;
+ 	s32 bcnprd;
+-	u16 chanspec;
+-	u32 ssid_len;
++	s32 err = 0;
+ 
+ 	brcmf_dbg(TRACE, "Enter\n");
+ 	if (!check_vif_up(ifp->vif))
+@@ -1786,58 +1777,40 @@ brcmf_cfg80211_join_ibss(struct wiphy *wiphy, struct net_device *ndev,
+ 		goto done;
+ 	}
+ 
+-	/* Configure required join parameter */
+-	memset(&join_params, 0, sizeof(struct brcmf_join_params));
+-
+-	/* SSID */
+-	ssid_len = min_t(u32, params->ssid_len, IEEE80211_MAX_SSID_LEN);
+-	memcpy(join_params.ssid_le.SSID, params->ssid, ssid_len);
+-	join_params.ssid_le.SSID_len = cpu_to_le32(ssid_len);
+-	join_params_size = sizeof(join_params.ssid_le);
+-
+-	/* BSSID */
+ 	if (params->bssid) {
+-		memcpy(join_params.params_le.bssid, params->bssid, ETH_ALEN);
+-		join_params_size += BRCMF_ASSOC_PARAMS_FIXED_SIZE;
+ 		memcpy(profile->bssid, params->bssid, ETH_ALEN);
+ 	} else {
+-		eth_broadcast_addr(join_params.params_le.bssid);
+ 		eth_zero_addr(profile->bssid);
+ 	}
+ 
+-	/* Channel */
++	cfg->ibss_starter = false;
++	cfg->channel = 0;
+ 	if (params->chandef.chan) {
+-		u32 target_channel;
++		u16 chanspec;
++		cfg->channel = ieee80211_frequency_to_channel(
++			params->chandef.chan->center_freq);
++		/* adding chanspec */
++		chanspec = chandef_to_chanspec(&cfg->d11inf, &params->chandef);
++
++		/* set chanspec */
++		err = brcmf_fil_iovar_int_set(ifp, "chanspec", chanspec);
+ 
+-		cfg->channel =
+-			ieee80211_frequency_to_channel(
+-				params->chandef.chan->center_freq);
+-		if (params->channel_fixed) {
+-			/* adding chanspec */
+-			chanspec = chandef_to_chanspec(&cfg->d11inf,
+-						       &params->chandef);
+-			join_params.params_le.chanspec_list[0] =
+-				cpu_to_le16(chanspec);
+-			join_params.params_le.chanspec_num = cpu_to_le32(1);
+-			join_params_size += sizeof(join_params.params_le);
+-		}
+-
+-		/* set channel for starter */
+-		target_channel = cfg->channel;
+-		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_CHANNEL,
+-					    target_channel);
+ 		if (err) {
+ 			bphy_err(drvr, "WLC_SET_CHANNEL failed (%d)\n", err);
+ 			goto done;
+ 		}
+-	} else
+-		cfg->channel = 0;
+-
+-	cfg->ibss_starter = false;
+-
++	}
+ 
+-	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_SSID,
+-				     &join_params, join_params_size);
++	join_params = drvr->join_param_handler.get_struct_for_ibss(
++		cfg, &join_params_size, params);
++	if (!join_params) {
++		bphy_err(drvr, "Converting join params failed\n");
++		goto done;
++	}
++	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_SSID, join_params,
++				     join_params_size);
++	/* Free params no matter what */
++	kfree(join_params);
+ 	if (err) {
+ 		bphy_err(drvr, "WLC_SET_SSID failed (%d)\n", err);
+ 		goto done;
+@@ -2400,52 +2373,51 @@ static void brcmf_set_join_pref(struct brcmf_if *ifp,
+ 
+ static s32
+ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
+-		       struct cfg80211_connect_params *sme)
++		       struct cfg80211_connect_params *params)
+ {
+ 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
+ 	struct brcmf_if *ifp = netdev_priv(ndev);
+ 	struct brcmf_cfg80211_profile *profile = &ifp->vif->profile;
+-	struct ieee80211_channel *chan = sme->channel;
++	struct ieee80211_channel *chan = params->channel;
+ 	struct brcmf_pub *drvr = ifp->drvr;
+-	struct brcmf_join_params join_params;
+-	size_t join_params_size;
++	void *join_params;
++	u32 join_params_size;
++	void *fallback_join_params;
++	u32 fallback_join_params_size;
+ 	const struct brcmf_tlv *rsn_ie;
+ 	const struct brcmf_vs_tlv *wpa_ie;
+ 	const void *ie;
+ 	u32 ie_len;
+-	struct brcmf_ext_join_params_le *ext_join_params;
+-	u16 chanspec;
+ 	s32 err = 0;
+-	u32 ssid_len;
+ 
+ 	brcmf_dbg(TRACE, "Enter\n");
+ 	if (!check_vif_up(ifp->vif))
+ 		return -EIO;
+ 
+-	if (!sme->ssid) {
++	if (!params->ssid) {
+ 		bphy_err(drvr, "Invalid ssid\n");
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+-	if (sme->channel_hint)
+-		chan = sme->channel_hint;
++	if (params->channel_hint)
++		chan = params->channel_hint;
+ 
+-	if (sme->bssid_hint)
+-		sme->bssid = sme->bssid_hint;
++	if (params->bssid_hint)
++		params->bssid = params->bssid_hint;
+ 
+ 	if (ifp->vif == cfg->p2p.bss_idx[P2PAPI_BSSCFG_PRIMARY].vif) {
+ 		/* A normal (non P2P) connection request setup. */
+ 		ie = NULL;
+ 		ie_len = 0;
+ 		/* find the WPA_IE */
+-		wpa_ie = brcmf_find_wpaie((u8 *)sme->ie, sme->ie_len);
++		wpa_ie = brcmf_find_wpaie((u8 *)params->ie, params->ie_len);
+ 		if (wpa_ie) {
+ 			ie = wpa_ie;
+ 			ie_len = wpa_ie->len + TLV_HDR_LEN;
+ 		} else {
+ 			/* find the RSN_IE */
+-			rsn_ie = brcmf_parse_tlvs((const u8 *)sme->ie,
+-						  sme->ie_len,
++			rsn_ie = brcmf_parse_tlvs((const u8 *)params->ie,
++						  params->ie_len,
+ 						  WLAN_EID_RSN);
+ 			if (rsn_ie) {
+ 				ie = rsn_ie;
+@@ -2456,7 +2428,7 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
+ 	}
+ 
+ 	err = brcmf_vif_set_mgmt_ie(ifp->vif, BRCMF_VNDR_IE_ASSOCREQ_FLAG,
+-				    sme->ie, sme->ie_len);
++				    params->ie, params->ie_len);
+ 	if (err)
+ 		bphy_err(drvr, "Set Assoc REQ IE Failed\n");
+ 	else
+@@ -2467,53 +2439,51 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
+ 	if (chan) {
+ 		cfg->channel =
+ 			ieee80211_frequency_to_channel(chan->center_freq);
+-		chanspec = channel_to_chanspec(&cfg->d11inf, chan);
+-		brcmf_dbg(CONN, "channel=%d, center_req=%d, chanspec=0x%04x\n",
+-			  cfg->channel, chan->center_freq, chanspec);
++		brcmf_dbg(CONN, "channel=%d, center_req=%d\n",
++			  cfg->channel, chan->center_freq);
+ 	} else {
+ 		cfg->channel = 0;
+-		chanspec = 0;
+ 	}
+ 
+-	brcmf_dbg(INFO, "ie (%p), ie_len (%zd)\n", sme->ie, sme->ie_len);
++	brcmf_dbg(INFO, "ie (%p), ie_len (%zd)\n", params->ie, params->ie_len);
+ 
+-	err = brcmf_set_wpa_version(ndev, sme);
++	err = brcmf_set_wpa_version(ndev, params);
+ 	if (err) {
+ 		bphy_err(drvr, "wl_set_wpa_version failed (%d)\n", err);
+ 		goto done;
+ 	}
+ 
+-	sme->auth_type = brcmf_war_auth_type(ifp, sme->auth_type);
+-	err = brcmf_set_auth_type(ndev, sme);
++	params->auth_type = brcmf_war_auth_type(ifp, params->auth_type);
++	err = brcmf_set_auth_type(ndev, params);
+ 	if (err) {
+ 		bphy_err(drvr, "wl_set_auth_type failed (%d)\n", err);
+ 		goto done;
+ 	}
+ 
+-	err = brcmf_set_wsec_mode(ndev, sme);
++	err = brcmf_set_wsec_mode(ndev, params);
+ 	if (err) {
+ 		bphy_err(drvr, "wl_set_set_cipher failed (%d)\n", err);
+ 		goto done;
+ 	}
+ 
+-	err = brcmf_set_key_mgmt(ndev, sme);
++	err = brcmf_set_key_mgmt(ndev, params);
+ 	if (err) {
+ 		bphy_err(drvr, "wl_set_key_mgmt failed (%d)\n", err);
+ 		goto done;
+ 	}
+ 
+-	err = brcmf_set_sharedkey(ndev, sme);
++	err = brcmf_set_sharedkey(ndev, params);
+ 	if (err) {
+ 		bphy_err(drvr, "brcmf_set_sharedkey failed (%d)\n", err);
+ 		goto done;
+ 	}
+-
+ 	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FWSUP)) {
+-		u32 akm = sme->crypto.n_akm_suites ? sme->crypto.akm_suites[0] : 0;
++		u32 akm = params->crypto.n_akm_suites ?
++			  params->crypto.akm_suites[0] : 0;
+ 		bool is_sae_akm = akm == WLAN_AKM_SUITE_SAE ||
+ 			akm == WLAN_AKM_SUITE_FT_OVER_SAE;
+ 
+-		if (sme->crypto.psk && !is_sae_akm &&
++		if (params->crypto.psk && !is_sae_akm &&
+ 		    profile->use_fwsup != BRCMF_PROFILE_FWSUP_SAE) {
+ 			if (profile->use_fwsup == BRCMF_PROFILE_FWSUP_NONE) {
+ 				brcmf_dbg(INFO, "using PSK offload\n");
+@@ -2524,6 +2494,7 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
+ 				goto done;
+ 			}
+ 		}
++
+ 		if (profile->use_fwsup != BRCMF_PROFILE_FWSUP_NONE) {
+ 			/* enable firmware supplicant for this interface */
+ 			err = brcmf_fil_iovar_int_set(ifp, "sup_wpa", 1);
+@@ -2534,107 +2505,66 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
+ 		} else {
+ 			err = brcmf_fil_iovar_int_set(ifp, "sup_wpa", 0);
+ 		}
+-		if (profile->use_fwsup == BRCMF_PROFILE_FWSUP_PSK)
+-			err = brcmf_set_pmk(ifp, sme->crypto.psk,
++
++		if (profile->use_fwsup == BRCMF_PROFILE_FWSUP_PSK &&
++		    params->crypto.psk)
++			err = brcmf_set_pmk(ifp, params->crypto.psk,
+ 					    BRCMF_WSEC_MAX_PSK_LEN);
+ 		else if (profile->use_fwsup == BRCMF_PROFILE_FWSUP_SAE &&
+-			 sme->crypto.sae_pwd &&
++			 params->crypto.sae_pwd &&
+ 			 brcmf_feat_is_enabled(ifp, BRCMF_FEAT_SAE)) {
+ 			/* clean up user-space RSNE */
+ 			if (brcmf_fil_iovar_data_set(ifp, "wpaie", NULL, 0)) {
+ 				bphy_err(drvr, "failed to clean up user-space RSNE\n");
+ 				goto done;
+ 			}
+-			err = brcmf_fwvid_set_sae_password(ifp, &sme->crypto);
+-			if (!err && sme->crypto.psk)
+-				err = brcmf_set_pmk(ifp, sme->crypto.psk,
++			err = brcmf_fwvid_set_sae_password(ifp, &params->crypto);
++			if (!err && params->crypto.psk)
++				err = brcmf_set_pmk(ifp, params->crypto.psk,
+ 						    BRCMF_WSEC_MAX_PSK_LEN);
+ 		}
+ 		if (err)
+ 			goto done;
+ 	}
+-	/* Join with specific BSSID and cached SSID
+-	 * If SSID is zero join based on BSSID only
+-	 */
+-	join_params_size = offsetof(struct brcmf_ext_join_params_le, assoc_le) +
+-		offsetof(struct brcmf_assoc_params_le, chanspec_list);
+-	if (cfg->channel)
+-		join_params_size += sizeof(u16);
+-	ext_join_params = kzalloc_obj(*ext_join_params);
+-	if (ext_join_params == NULL) {
+-		err = -ENOMEM;
+-		goto done;
+-	}
+-	ssid_len = min_t(u32, sme->ssid_len, IEEE80211_MAX_SSID_LEN);
+-	ext_join_params->ssid_le.SSID_len = cpu_to_le32(ssid_len);
+-	memcpy(&ext_join_params->ssid_le.SSID, sme->ssid, ssid_len);
+-	if (ssid_len < IEEE80211_MAX_SSID_LEN)
+-		brcmf_dbg(CONN, "SSID \"%s\", len (%d)\n",
+-			  ext_join_params->ssid_le.SSID, ssid_len);
++	brcmf_set_join_pref(ifp, &params->bss_select);
++	if (params->ssid_len < IEEE80211_MAX_SSID_LEN)
++		brcmf_dbg(CONN, "SSID \"%s\", len (%zu)\n", params->ssid,
++			  params->ssid_len);
++	join_params = drvr->join_param_handler.get_struct_for_connect(
++		cfg, &join_params_size, params);
+ 
+-	/* Set up join scan parameters */
+-	ext_join_params->scan_le.scan_type = -1;
+-	ext_join_params->scan_le.home_time = cpu_to_le32(-1);
++	if (join_params) {
++		err = brcmf_fil_bsscfg_data_set(ifp, "join", join_params,
++						join_params_size);
+ 
+-	if (sme->bssid)
+-		memcpy(&ext_join_params->assoc_le.bssid, sme->bssid, ETH_ALEN);
+-	else
+-		eth_broadcast_addr(ext_join_params->assoc_le.bssid);
+-
+-	if (cfg->channel) {
+-		ext_join_params->assoc_le.chanspec_num = cpu_to_le32(1);
+-
+-		ext_join_params->assoc_le.chanspec_list[0] =
+-			cpu_to_le16(chanspec);
+-		/* Increase dwell time to receive probe response or detect
+-		 * beacon from target AP at a noisy air only during connect
+-		 * command.
+-		 */
+-		ext_join_params->scan_le.active_time =
+-			cpu_to_le32(BRCMF_SCAN_JOIN_ACTIVE_DWELL_TIME_MS);
+-		ext_join_params->scan_le.passive_time =
+-			cpu_to_le32(BRCMF_SCAN_JOIN_PASSIVE_DWELL_TIME_MS);
+-		/* To sync with presence period of VSDB GO send probe request
+-		 * more frequently. Probe request will be stopped when it gets
+-		 * probe response from target AP/GO.
+-		 */
+-		ext_join_params->scan_le.nprobes =
+-			cpu_to_le32(BRCMF_SCAN_JOIN_ACTIVE_DWELL_TIME_MS /
+-				    BRCMF_SCAN_JOIN_PROBE_INTERVAL_MS);
+-	} else {
+-		ext_join_params->scan_le.active_time = cpu_to_le32(-1);
+-		ext_join_params->scan_le.passive_time = cpu_to_le32(-1);
+-		ext_join_params->scan_le.nprobes = cpu_to_le32(-1);
++		/* We only free the join parameters if we were successful.
++		 * Otherwise they are used to extract the fallback, below */
++		if (!err) {
++			kfree(join_params);
++			/* This is it. join command worked, we are done */
++			goto done;
++		}
++		/* For versions >= 1, this should have worked, so report the error */
++		if (drvr->join_param_handler.version >= 1) {
++			bphy_err(drvr, "Failed to use join iovar to join: %d\n",
++				 err);
++		}
+ 	}
+ 
+-	brcmf_set_join_pref(ifp, &sme->bss_select);
+-
+-	err  = brcmf_fil_bsscfg_data_set(ifp, "join", ext_join_params,
+-					 join_params_size);
+-	kfree(ext_join_params);
+-	if (!err)
+-		/* This is it. join command worked, we are done */
++	/* Fallback to using WLC_SET_SSID approach, which just uses join_params parts of the structure */
++	fallback_join_params = drvr->join_param_handler.get_join_from_ext_join(
++		join_params, &fallback_join_params_size);
++	if (!fallback_join_params) {
++		bphy_err(drvr, "Unable to generate fallback join params\n");
++		kfree(join_params);
+ 		goto done;
+-
+-	/* join command failed, fallback to set ssid */
+-	memset(&join_params, 0, sizeof(join_params));
+-	join_params_size = sizeof(join_params.ssid_le);
+-
+-	memcpy(&join_params.ssid_le.SSID, sme->ssid, ssid_len);
+-	join_params.ssid_le.SSID_len = cpu_to_le32(ssid_len);
+-
+-	if (sme->bssid)
+-		memcpy(join_params.params_le.bssid, sme->bssid, ETH_ALEN);
+-	else
+-		eth_broadcast_addr(join_params.params_le.bssid);
+-
+-	if (cfg->channel) {
+-		join_params.params_le.chanspec_list[0] = cpu_to_le16(chanspec);
+-		join_params.params_le.chanspec_num = cpu_to_le32(1);
+-		join_params_size += sizeof(join_params.params_le);
+ 	}
+ 	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_SSID,
+-				     &join_params, join_params_size);
++				     fallback_join_params,
++				     fallback_join_params_size);
++
++	kfree(join_params);
++	kfree(fallback_join_params);
+ 	if (err)
+ 		bphy_err(drvr, "BRCMF_C_SET_SSID failed (%d)\n", err);
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
+index 66c14b9e68a3..7cb42b61c83e 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
+@@ -502,6 +502,8 @@ s32 brcmf_vif_set_mgmt_ie(struct brcmf_cfg80211_vif *vif, s32 pktflag,
+ s32 brcmf_vif_clear_mgmt_ies(struct brcmf_cfg80211_vif *vif);
+ u16 channel_to_chanspec(struct brcmu_d11inf *d11inf,
+ 			struct ieee80211_channel *ch);
++u16 chandef_to_chanspec(struct brcmu_d11inf *d11inf,
++			struct cfg80211_chan_def *ch);
+ bool brcmf_get_vif_state_any(struct brcmf_cfg80211_info *cfg,
+ 			     unsigned long state);
+ void brcmf_cfg80211_arm_vif_event(struct brcmf_cfg80211_info *cfg,
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h
+index c7562bdb61e8..4b52a3aa855d 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h
+@@ -115,12 +115,48 @@ struct pno_struct_handler {
+ 			       u8 (*ssid)[IEEE80211_MAX_SSID_LEN], u8 *ssid_len,
+ 			       u8 *channel, enum nl80211_band *band);
+ };
++
+ struct cfg80211_scan_request;
+ struct scan_param_struct_handler {
+ 	u8 version;
+-	void *(*get_prepped_struct)(struct brcmf_cfg80211_info *cfg,
+-				    u32 *struct_size,
+-				    struct cfg80211_scan_request *request);
++	void *(*get_struct_for_request)(struct brcmf_cfg80211_info *cfg,
++					u32 *struct_size,
++					struct cfg80211_scan_request *request);
++};
++
++struct cfg80211_ibss_params;
++struct cfg80211_connect_params;
++
++/**
++ * struct join_param_struct_handler - Handler for different join parameter versions
++ *
++ * There are a number of different, incompatible structures and interface versions for join/extended join parameters
++ * We abstract away the actual structures used, so that code does not have to worry about filling in structs properly.
++ *
++ * This interface deliberately takes and returns opaque structures.
++ *
++ * @version - Interface version the firmware supports/uses
++ * @get_struct_for_ibss - Return a join parameter structure for a set of IBSS parameters.
++ * This structure can be used to join the passed BSS.
++ * @get_struct_for_connect - Return an extended join parameter structure for a set of connect
++ * parameters.  This structure can be used to join the SSID specified in the parameters.
++ * @get_join_from_ext_join - When an extended join does not work, we fall back to a regular join.
++ * This function produces a join parameter struture from an extended join one.
++ */
++struct join_param_struct_handler {
++	u8 version;
++	/* This returns a join_param type struct */
++	void *(*get_struct_for_ibss)(struct brcmf_cfg80211_info *cfg,
++				     u32 *struct_size,
++				     struct cfg80211_ibss_params *params);
++	/* This returns an ext_join_param type struct */
++	void *(*get_struct_for_connect)(struct brcmf_cfg80211_info *cfg,
++					u32 *struct_size,
++					struct cfg80211_connect_params *params);
++	/* This returns the join param portion of an ext_join_param type struct.
++	 * The memory returned is separately allocated from the passed-in struct.
++	 */
++	void *(*get_join_from_ext_join)(void *ext_join_param, u32 *struct_size);
+ };
+ 
+ /* Common structure for module and instance linkage */
+@@ -174,6 +210,7 @@ struct brcmf_pub {
+ 	u16 cnt_ver;
+ 	struct pno_struct_handler pno_handler;
+ 	struct scan_param_struct_handler scan_param_handler;
++	struct join_param_struct_handler join_param_handler;
+ };
+ 
+ /* forward declarations */
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+index 13f37f9d808f..9329c1a05d72 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+@@ -18,9 +18,22 @@
+ #include "common.h"
+ #include "pno.h"
+ #include "scan_param.h"
++#include "join_param.h"
+ 
+ #define BRCMF_FW_UNSUPPORTED	23
+ 
++/* MIN branch version supporting join iovar versioning */
++#define MIN_JOINEXT_V1_FW_MAJOR 17u
++/* Branch/es supporting join iovar versioning prior to
++ * MIN_JOINEXT_V1_FW_MAJOR
++ */
++#define MIN_JOINEXT_V1_BR2_FW_MAJOR      16
++#define MIN_JOINEXT_V1_BR2_FW_MINOR      1
++
++#define MIN_JOINEXT_V1_BR1_FW_MAJOR      14
++#define MIN_JOINEXT_V1_BR1_FW_MINOR_2    2
++#define MIN_JOINEXT_V1_BR1_FW_MINOR_4    4
++
+ /*
+  * expand feature list to array of feature strings.
+  */
+@@ -141,7 +154,7 @@ struct brcmf_feat_wlcfeat {
+ 
+ static const struct brcmf_feat_wlcfeat brcmf_feat_wlcfeat_map[] = {
+ 	{ 12, 0, BIT(BRCMF_FEAT_PMKID_V2) },
+-	{ 13, 0, BIT(BRCMF_FEAT_PMKID_V3) },
++	{ 13, 0, BIT(BRCMF_FEAT_PMKID_V3) }
+ };
+ 
+ static void brcmf_feat_wlc_version_overrides(struct brcmf_pub *drv)
+@@ -294,6 +307,7 @@ static int brcmf_feat_fwcap_debugfs_read(struct seq_file *seq, void *data)
+ void brcmf_feat_attach(struct brcmf_pub *drvr)
+ {
+ 	struct brcmf_if *ifp = brcmf_get_ifp(drvr, 0);
++	struct brcmf_join_version_le join_ver;
+ 	struct brcmf_scan_version_le scan_ver;
+ 	struct brcmf_pno_param_v3_le pno_params;
+ 	struct brcmf_pno_macaddr_le pfn_mac;
+@@ -348,12 +362,36 @@ void brcmf_feat_attach(struct brcmf_pub *drvr)
+ 
+ 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_FWSUP, "sup_wpa");
+ 
++	err = brcmf_fil_iovar_data_get(ifp, "join_ver", &join_ver, sizeof(join_ver));
++	if (!err) {
++		u16 ver = le16_to_cpu(join_ver.join_ver_major);
++		brcmf_join_param_setup_for_version(drvr, ver);
++	} else {
++		/* Default to version 0, unless it is one of the firmware branches
++		 * that doesn't have a join_ver iovar but are still version 1 */
++		u8 version = 0;
++		struct brcmf_wlc_version_le ver;
++		err = brcmf_fil_iovar_data_get(ifp, "wlc_ver", &ver, sizeof(ver));
++		if (!err) {
++			u16 major = le16_to_cpu(ver.wlc_ver_major);
++			u16 minor = le16_to_cpu(ver.wlc_ver_minor);
++			if (((major == MIN_JOINEXT_V1_BR1_FW_MAJOR) &&
++			     ((minor == MIN_JOINEXT_V1_BR1_FW_MINOR_2) ||
++			      (minor == MIN_JOINEXT_V1_BR1_FW_MINOR_4))) ||
++			    ((major == MIN_JOINEXT_V1_BR2_FW_MAJOR) &&
++			     (minor >= MIN_JOINEXT_V1_BR2_FW_MINOR)) ||
++			    (major >= MIN_JOINEXT_V1_FW_MAJOR)) {
++				version = 1;
++			}
++		}
++		brcmf_join_param_setup_for_version(drvr, version);
++	}
+ 	err = brcmf_fil_iovar_data_get(ifp, "scan_ver", &scan_ver, sizeof(scan_ver));
+ 	if (!err) {
+ 		u16 ver = le16_to_cpu(scan_ver.scan_ver_major);
+ 		brcmf_scan_param_setup_for_version(drvr, ver);
+ 	} else {
+-		/* Default tp version 1. */
++		/* Default to version 1. */
+ 		brcmf_scan_param_setup_for_version(drvr, 1);
+ 	}
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index e4b3b13a8ff9..14d91e7749e8 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -590,11 +590,67 @@ struct brcmf_escan_result_le {
+ struct brcmf_assoc_params_le {
+ 	/* 00:00:00:00:00:00: broadcast scan */
+ 	u8 bssid[ETH_ALEN];
++	/* 0: use chanspec_num, and the single bssid,
++	 * otherwise count of chanspecs in chanspec_list
++	 * AND paired bssids following chanspec_list
++	 * also, chanspec_num has to be set to zero
++	 * for bssid list to be used
++	 */
++	__le16 bssid_cnt;
++	/* 0: all available channels, otherwise count of chanspecs in
++	 * chanspec_list */
++	__le32 chanspec_num;
++	/* list of chanspecs */
++	__le16 chanspec_list[];
++};
++
++struct brcmf_assoc_params_v1_le {
++	__le16 version;
++	__le16 flags;
++	/* 00:00:00:00:00:00: broadcast scan */
++	u8 bssid[ETH_ALEN];
++	/* 0: use chanspec_num, and the single bssid,
++	 * otherwise count of chanspecs in chanspec_list
++	 * AND paired bssids following chanspec_list
++	 * also, chanspec_num has to be set to zero
++	 * for bssid list to be used
++	 */
++	__le16 bssid_cnt;
++	/* 0: all available channels, otherwise count of chanspecs in
++	 * chanspec_list */
++	__le32 chanspec_num;
++	/* list of chanspecs */
++	__le16 chanspec_list[];
++};
++
++/* ML assoc and scan params */
++struct brcmf_ml_assoc_scan_params_v1_le {
++	/* whether to follow strictly ordered assoc ? */
++	u8 ml_assoc_mode;
++	/* to identify whether ml scan needs to be triggered */
++	u8 ml_scan_mode;
++	u8 pad[2];
++};
++
++struct brcmf_assoc_params_v2_le {
++	__le16 version;
++	__le16 flags;
++	/* 00:00:00:00:00:00: broadcast scan */
++	u8 bssid[ETH_ALEN];
++	/* 0: use chanspec_num, and the single bssid,
++	 * otherwise count of chanspecs in chanspec_list
++	 * AND paired bssids following chanspec_list
++	 * also, chanspec_num has to be set to zero
++	 * for bssid list to be used
++	 */
++	__le16 bssid_cnt;
++	/* Multilink association and scan params */
++	struct brcmf_ml_assoc_scan_params_v1_le ml_assoc_scan_params;
+ 	/* 0: all available channels, otherwise count of chanspecs in
+ 	 * chanspec_list */
+ 	__le32 chanspec_num;
+ 	/* list of chanspecs */
+-	__le16 chanspec_list[1];
++	__le16 chanspec_list[];
+ };
+ 
+ /**
+@@ -619,9 +675,19 @@ struct brcmf_join_params {
+ 	struct brcmf_assoc_params_le params_le;
+ };
+ 
++struct brcmf_join_params_v1 {
++	struct brcmf_ssid_le ssid_le;
++	struct brcmf_assoc_params_v1_le params_le;
++};
++struct brcmf_join_params_v2 {
++	struct brcmf_ssid_le ssid_le;
++	struct brcmf_assoc_params_v2_le params_le;
++};
++
+ /* scan params for extended join */
+ struct brcmf_join_scan_params_le {
+ 	u8 scan_type;		/* 0 use default, active or passive scan */
++	u8 PAD[3];
+ 	__le32 nprobes;		/* -1 use default, nr of probes per channel */
+ 	__le32 active_time;	/* -1 use default, dwell time per channel for
+ 				 * active scanning
+@@ -634,6 +700,23 @@ struct brcmf_join_scan_params_le {
+ 				 */
+ };
+ 
++/* scan params for extended join */
++struct brcmf_join_scan_params_v1_le {
++	u8 scan_type; /* 0 use default, active or passive scan */
++	u8 ml_scan_mode; /* 0 scan ML channels in RNR, 1 scan only provided channels */
++	u8 PAD[2];
++	__le32 nprobes; /* -1 use default, nr of probes per channel */
++	__le32 active_time; /* -1 use default, dwell time per channel for
++				 * active scanning
++				 */
++	__le32 passive_time; /* -1 use default, dwell time per channel
++				 * for passive scanning
++				 */
++	__le32 home_time; /* -1 use default, dwell time for the home
++				 * channel between channel scans
++				 */
++};
++
+ /* extended join params */
+ struct brcmf_ext_join_params_le {
+ 	struct brcmf_ssid_le ssid_le;	/* {0, ""}: wildcard scan */
+@@ -641,6 +724,24 @@ struct brcmf_ext_join_params_le {
+ 	struct brcmf_assoc_params_le assoc_le;
+ };
+ 
++/* extended join params */
++struct brcmf_ext_join_params_v1_le {
++	__le16 version;
++	u16 pad;
++	struct brcmf_ssid_le ssid_le;	/* {0, ""}: wildcard scan */
++	struct brcmf_join_scan_params_le scan_le;
++	struct brcmf_assoc_params_v1_le assoc_le;
++};
++
++/* extended join params v2 */
++struct brcmf_ext_join_params_v2_le {
++	__le16 version;
++	u16 pad;
++	struct brcmf_ssid_le ssid_le;	/* {0, ""}: wildcard scan */
++	struct brcmf_join_scan_params_v1_le scan_le;
++	struct brcmf_assoc_params_v2_le assoc_le;
++};
++
+ struct brcmf_wsec_key {
+ 	u32 index;		/* key index */
+ 	u32 len;		/* key length */
+@@ -946,7 +1047,20 @@ struct brcmf_wlc_version_le {
+ };
+ 
+ /**
+- * struct brcmf_wl_scan_version_le - scan interface version
++ * struct brcmf_join_version_le - join interface version
++ */
++struct brcmf_join_version_le {
++	__le16	version;		/**< version of the structure */
++	__le16	length;			/**< length of the entire structure */
++
++	/* join interface version numbers */
++	__le16	join_ver_major;		/**< join interface major version number */
++	u8	pad[2];
++};
++#define BRCMF_JOIN_VERSION_VERSION 1
++
++/**
++ * struct brcmf_scan_version_le - scan interface version
+  */
+ struct brcmf_scan_version_le {
+         __le16  version;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.c
+new file mode 100644
+index 000000000000..4f026571c7e7
+--- /dev/null
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.c
+@@ -0,0 +1,288 @@
++// SPDX-License-Identifier: ISC
++/*
++ * Copyright (c) 2023 Daniel Berlin
++ */
++#include <linux/gcd.h>
++#include <net/cfg80211.h>
++
++#include "core.h"
++#include "debug.h"
++#include "fwil_types.h"
++#include "cfg80211.h"
++#include "join_param.h"
++
++/* These defaults are the same as found in the DHD drivers, and represent
++ * reasonable defaults for various scan dwell and probe times.   */
++#define BRCMF_SCAN_JOIN_ACTIVE_DWELL_TIME_MS 320
++#define BRCMF_SCAN_JOIN_PASSIVE_DWELL_TIME_MS 400
++#define BRCMF_SCAN_JOIN_PROBE_INTERVAL_MS 20
++
++/* Most of the actual structure fields we fill in are the same for various versions
++ * However, due to various incompatible changes and variants, the fields are not always
++ * in the same place.
++ * This makes for code duplication, so we try to commonize setting fields where it makes sense.
++ */
++
++static void brcmf_joinscan_set_ssid(struct brcmf_ssid_le *ssid_le,
++				    const u8 *ssid, u32 ssid_len)
++{
++	ssid_len = min_t(u32, ssid_len, IEEE80211_MAX_SSID_LEN);
++	ssid_le->SSID_len = cpu_to_le32(ssid_len);
++	memcpy(ssid_le->SSID, ssid, ssid_len);
++}
++
++static void brcmf_joinscan_set_bssid(u8 out_bssid[6], const u8 *in_bssid)
++{
++	if (in_bssid) {
++		memcpy(out_bssid, in_bssid, ETH_ALEN);
++	} else {
++		eth_broadcast_addr(out_bssid);
++	}
++}
++
++/* Create a single channel chanspec list from a wireless stack channel */
++static void brcmf_joinscan_set_single_chanspec_from_channel(
++	struct brcmf_cfg80211_info *cfg, struct ieee80211_channel *chan,
++	__le32 *chanspec_count, __le16 (*chanspec_list)[])
++{
++	u16 chanspec = channel_to_chanspec(&cfg->d11inf, chan);
++	*chanspec_count = cpu_to_le32(1);
++	(*chanspec_list)[0] = cpu_to_le16(chanspec);
++}
++
++/* Create a single channel chanspec list from a wireless stack chandef */
++static void brcmf_joinscan_set_single_chanspec_from_chandef(
++	struct brcmf_cfg80211_info *cfg, struct cfg80211_chan_def *chandef,
++	__le32 *chanspec_count, __le16 (*chanspec_list)[])
++{
++	u16 chanspec = chandef_to_chanspec(&cfg->d11inf, chandef);
++	*chanspec_count = cpu_to_le32(1);
++	(*chanspec_list)[0] = cpu_to_le16(chanspec);
++}
++
++static void *brcmf_get_struct_for_ibss_v0(struct brcmf_cfg80211_info *cfg,
++					  u32 *struct_size,
++					  struct cfg80211_ibss_params *params)
++{
++	struct brcmf_join_params *join_params;
++
++	u32 join_params_size = struct_size(join_params, params_le.chanspec_list,
++					   params->chandef.chan != NULL);
++
++	*struct_size = join_params_size;
++	join_params = kzalloc(join_params_size, GFP_KERNEL);
++	if (!join_params) {
++		bphy_err(cfg, "Unable to allocate memory for join params\n");
++		return NULL;
++	}
++	brcmf_joinscan_set_ssid(&join_params->ssid_le, params->ssid,
++				params->ssid_len);
++	brcmf_joinscan_set_bssid(join_params->params_le.bssid, params->bssid);
++	/* Channel */
++	if (cfg->channel) {
++		brcmf_joinscan_set_single_chanspec_from_chandef(
++			cfg, &params->chandef,
++			&join_params->params_le.chanspec_num,
++			&join_params->params_le.chanspec_list);
++	}
++	return join_params;
++}
++
++static void *
++brcmf_get_prepped_struct_for_ibss_v1(struct brcmf_cfg80211_info *cfg,
++				     u32 *struct_size,
++				     struct cfg80211_ibss_params *params)
++{
++	struct brcmf_join_params_v1 *join_params;
++	u32 join_params_size = struct_size(join_params, params_le.chanspec_list,
++					   params->chandef.chan != NULL);
++
++	*struct_size = join_params_size;
++	join_params = kzalloc(join_params_size, GFP_KERNEL);
++	if (!join_params) {
++		bphy_err(cfg, "Unable to allocate memory for join params\n");
++		return NULL;
++	}
++	join_params->params_le.version = cpu_to_le16(1);
++	brcmf_joinscan_set_ssid(&join_params->ssid_le, params->ssid,
++				params->ssid_len);
++	brcmf_joinscan_set_bssid(join_params->params_le.bssid, params->bssid);
++	/* Channel */
++	if (cfg->channel) {
++		brcmf_joinscan_set_single_chanspec_from_chandef(
++			cfg, &params->chandef,
++			&join_params->params_le.chanspec_num,
++			&join_params->params_le.chanspec_list);
++	}
++	return join_params;
++}
++
++static void
++brcmf_joinscan_set_common_v0v1_params(struct brcmf_join_scan_params_le *scan_le,
++				      bool have_channel)
++{
++	/* Set up join scan parameters */
++	scan_le->scan_type = 0;
++	scan_le->home_time = cpu_to_le32(-1);
++
++	if (have_channel) {
++		/* Increase dwell time to receive probe response or detect
++		 * beacon from target AP at a noisy air only during connect
++		 * command.
++		 */
++		scan_le->active_time =
++			cpu_to_le32(BRCMF_SCAN_JOIN_ACTIVE_DWELL_TIME_MS);
++		scan_le->passive_time =
++			cpu_to_le32(BRCMF_SCAN_JOIN_PASSIVE_DWELL_TIME_MS);
++		/* To sync with presence period of VSDB GO send probe request
++		 * more frequently. Probe request will be stopped when it gets
++		 * probe response from target AP/GO.
++		 */
++		scan_le->nprobes =
++			cpu_to_le32(BRCMF_SCAN_JOIN_ACTIVE_DWELL_TIME_MS /
++				    BRCMF_SCAN_JOIN_PROBE_INTERVAL_MS);
++	} else {
++		scan_le->active_time = cpu_to_le32(-1);
++		scan_le->passive_time = cpu_to_le32(-1);
++		scan_le->nprobes = cpu_to_le32(-1);
++	}
++}
++static void *
++brcmf_get_struct_for_connect_v0(struct brcmf_cfg80211_info *cfg,
++				u32 *struct_size,
++				struct cfg80211_connect_params *params)
++{
++	struct brcmf_ext_join_params_le *ext_v0;
++	u32 join_params_size =
++		struct_size(ext_v0, assoc_le.chanspec_list, cfg->channel != 0);
++
++	*struct_size = join_params_size;
++	ext_v0 = kzalloc(join_params_size, GFP_KERNEL);
++	if (!ext_v0) {
++		bphy_err(
++			cfg,
++			"Could not allocate memory for extended join parameters\n");
++		return NULL;
++	}
++	brcmf_joinscan_set_ssid(&ext_v0->ssid_le, params->ssid,
++				params->ssid_len);
++	brcmf_joinscan_set_common_v0v1_params(&ext_v0->scan_le,
++					      cfg->channel != 0);
++	brcmf_joinscan_set_bssid(ext_v0->assoc_le.bssid, params->bssid);
++	if (cfg->channel) {
++		struct ieee80211_channel *chan = params->channel_hint ?
++							 params->channel_hint :
++							 params->channel;
++		brcmf_joinscan_set_single_chanspec_from_channel(
++			cfg, chan, &ext_v0->assoc_le.chanspec_num,
++			&ext_v0->assoc_le.chanspec_list);
++	}
++	return ext_v0;
++}
++
++static void *
++brcmf_get_struct_for_connect_v1(struct brcmf_cfg80211_info *cfg,
++				u32 *struct_size,
++				struct cfg80211_connect_params *params)
++{
++	struct brcmf_ext_join_params_v1_le *ext_v1;
++	u32 join_params_size =
++		struct_size(ext_v1, assoc_le.chanspec_list, cfg->channel != 0);
++
++	*struct_size = join_params_size;
++	ext_v1 = kzalloc(join_params_size, GFP_KERNEL);
++	if (!ext_v1) {
++		bphy_err(
++			cfg,
++			"Could not allocate memory for extended join parameters\n");
++		return NULL;
++	}
++	ext_v1->version = cpu_to_le16(1);
++	ext_v1->assoc_le.version = cpu_to_le16(1);
++	brcmf_joinscan_set_ssid(&ext_v1->ssid_le, params->ssid,
++				params->ssid_len);
++	brcmf_joinscan_set_common_v0v1_params(&ext_v1->scan_le,
++					      cfg->channel != 0);
++	brcmf_joinscan_set_bssid(ext_v1->assoc_le.bssid, params->bssid);
++	if (cfg->channel) {
++		struct ieee80211_channel *chan = params->channel_hint ?
++							 params->channel_hint :
++							 params->channel;
++		brcmf_joinscan_set_single_chanspec_from_channel(
++			cfg, chan, &ext_v1->assoc_le.chanspec_num,
++			&ext_v1->assoc_le.chanspec_list);
++	}
++	return ext_v1;
++}
++
++static void *brcmf_get_join_from_ext_join_v0(void *ext_join, u32 *struct_size)
++{
++	struct brcmf_ext_join_params_le *ext_join_v0 =
++		(struct brcmf_ext_join_params_le *)ext_join;
++	u32 chanspec_num = le32_to_cpu(ext_join_v0->assoc_le.chanspec_num);
++	struct brcmf_join_params *join_params;
++	u32 join_params_size =
++		struct_size(join_params, params_le.chanspec_list, chanspec_num);
++	u32 assoc_size = struct_size_t(struct brcmf_assoc_params_le,
++				       chanspec_list, chanspec_num);
++
++	*struct_size = join_params_size;
++	join_params = kzalloc(join_params_size, GFP_KERNEL);
++	if (!join_params) {
++		return NULL;
++	}
++	memcpy(&join_params->ssid_le, &ext_join_v0->ssid_le,
++	       sizeof(ext_join_v0->ssid_le));
++	memcpy(&join_params->params_le, &ext_join_v0->assoc_le, assoc_size);
++
++	return join_params;
++}
++
++static void *brcmf_get_join_from_ext_join_v1(void *ext_join, u32 *struct_size)
++{
++	struct brcmf_ext_join_params_v1_le *ext_join_v1 =
++		(struct brcmf_ext_join_params_v1_le *)ext_join;
++	u32 chanspec_num = le32_to_cpu(ext_join_v1->assoc_le.chanspec_num);
++	struct brcmf_join_params_v1 *join_params;
++	u32 join_params_size =
++		struct_size(join_params, params_le.chanspec_list, chanspec_num);
++	u32 assoc_size = struct_size_t(struct brcmf_assoc_params_le,
++				       chanspec_list, chanspec_num);
++
++	*struct_size = join_params_size;
++	join_params = kzalloc(join_params_size, GFP_KERNEL);
++	if (!join_params) {
++		return NULL;
++	}
++	memcpy(&join_params->ssid_le, &ext_join_v1->ssid_le,
++	       sizeof(ext_join_v1->ssid_le));
++	memcpy(&join_params->params_le, &ext_join_v1->assoc_le, assoc_size);
++
++	return join_params;
++}
++
++int brcmf_join_param_setup_for_version(struct brcmf_pub *drvr, u8 version)
++{
++	drvr->join_param_handler.version = version;
++	switch (version) {
++	case 0:
++		drvr->join_param_handler.get_struct_for_ibss =
++			brcmf_get_struct_for_ibss_v0;
++		drvr->join_param_handler.get_struct_for_connect =
++			brcmf_get_struct_for_connect_v0;
++		drvr->join_param_handler.get_join_from_ext_join =
++			brcmf_get_join_from_ext_join_v0;
++		break;
++	case 1:
++		drvr->join_param_handler.get_struct_for_ibss =
++			brcmf_get_prepped_struct_for_ibss_v1;
++		drvr->join_param_handler.get_struct_for_connect =
++			brcmf_get_struct_for_connect_v1;
++		drvr->join_param_handler.get_join_from_ext_join =
++			brcmf_get_join_from_ext_join_v1;
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.h
+new file mode 100644
+index 000000000000..f549fe2a7408
+--- /dev/null
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/join_param.h
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: ISC
++/*
++ * Copyright (c) 2023 Daniel Berlin
++ */
++
++#ifndef _BRCMF_JOIN_PARAM_H
++#define _BRCMF_JOIN_PARAM_H
++
++struct brcmf_pub;
++
++/**
++ * brcmf_join_param_setup_for_version() - Setup the driver to handle join structures
++ *
++ * There are a number of different structures and interface versions for join/extended join parameters
++ * This sets up the driver to handle a particular interface version.
++ *
++ * @drvr Driver structure to setup
++ * @ver Interface version
++ * Return: %0 if okay, error code otherwise
++ */
++int brcmf_join_param_setup_for_version(struct brcmf_pub *drvr, u8 ver);
++#endif /* _BRCMF_JOIN_PARAM_H */
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c
+index 6bd5f6d1616c..4f634509d252 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c
+@@ -423,19 +423,19 @@ int brcmf_scan_param_setup_for_version(struct brcmf_pub *drvr, u8 version)
+ 	drvr->scan_param_handler.version = version;
+ 	switch (version) {
+ 	case 1: {
+-		drvr->scan_param_handler.get_prepped_struct =
++		drvr->scan_param_handler.get_struct_for_request =
+ 			brcmf_scan_param_get_prepped_struct_v1;
+ 	} break;
+ 	case 2: {
+-		drvr->scan_param_handler.get_prepped_struct =
++		drvr->scan_param_handler.get_struct_for_request =
+ 			brcmf_scan_param_get_prepped_struct_v2;
+ 	} break;
+ 	case 3: {
+-		drvr->scan_param_handler.get_prepped_struct =
++		drvr->scan_param_handler.get_struct_for_request =
+ 			brcmf_scan_param_get_prepped_struct_v3;
+ 	} break;
+ 	case 4: {
+-		drvr->scan_param_handler.get_prepped_struct =
++		drvr->scan_param_handler.get_struct_for_request =
+ 			brcmf_scan_param_get_prepped_struct_v4;
+ 
+ 	} break;

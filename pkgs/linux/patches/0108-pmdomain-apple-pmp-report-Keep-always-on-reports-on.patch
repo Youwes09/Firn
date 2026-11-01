@@ -1,0 +1,75 @@
+From 4946d63d8cf480ed510e0a7bd5296135050be97e Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 26 Oct 2026 18:30:00 -0400
+Subject: [PATCH] pmdomain: apple: pmp-report: Keep always-on reports on
+
+An always-on report set its vote, but its domain was registered as off
+with only GENPD_FLAG_ACTIVE_WAKEUP, so genpd could drop the vote again.
+Register it as an always-on domain that starts on, set the vote after
+pm_genpd_init(), and remove the domain if that or adding the provider
+fails.
+
+[Youwes09: split from niklassheth/linux 86255757f52d and 5d11d42673a0,
+ without apple,boot-on]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/pmdomain/apple/pmp-report.c | 23 ++++++++++++++++-------
+ 1 file changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/pmdomain/apple/pmp-report.c b/drivers/pmdomain/apple/pmp-report.c
+index c38e3dde2217..c8089ee2ed4c 100644
+--- a/drivers/pmdomain/apple/pmp-report.c
++++ b/drivers/pmdomain/apple/pmp-report.c
+@@ -143,6 +143,7 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
+ 	int ret;
+ 	const char *name;
+ 	struct of_phandle_iterator it;
++	bool always_on;
+ 
+ 	ent = devm_kzalloc(dev, sizeof(*ent), GFP_KERNEL);
+ 	if (!ent)
+@@ -158,22 +159,29 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "missing label property\n");
+ 
+-	if (of_property_read_bool(node, "apple,always-on")) {
+-		ent->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
+-		apple_pmp_report_set_state(&ent->genpd, true);
+-	}
++	always_on = of_property_read_bool(node, "apple,always-on");
++	if (always_on)
++		ent->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
+ 
+ 	ent->genpd.name = name;
+ 	ent->genpd.power_on = apple_pmp_report_entry_power_on;
+ 	ent->genpd.power_off = apple_pmp_report_entry_power_off;
+ 
+-	ret = pm_genpd_init(&ent->genpd, NULL, true);
++	ret = pm_genpd_init(&ent->genpd, NULL, !always_on);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "pm_genpd_init failed\n");
+ 
++	if (always_on) {
++		ret = apple_pmp_report_set_state(&ent->genpd, true);
++		if (ret)
++			goto err_remove_genpd;
++	}
++
+ 	ret = of_genpd_add_provider_simple(node, &ent->genpd);
+-	if (ret)
+-		return dev_err_probe(dev, ret, "of_genpd_add_provider_simple failed\n");
++	if (ret) {
++		dev_err_probe(dev, ret, "of_genpd_add_provider_simple failed\n");
++		goto err_remove_genpd;
++	}
+ 
+ 	of_for_each_phandle(&it, ret, node, "power-domains", "#power-domain-cells", -1) {
+ 		struct of_phandle_args parent, child;
+@@ -200,6 +208,7 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
+ 	return 0;
+ err_remove:
+ 	of_genpd_del_provider(node);
++err_remove_genpd:
+ 	pm_genpd_remove(&ent->genpd);
+ 	return ret;
+ }

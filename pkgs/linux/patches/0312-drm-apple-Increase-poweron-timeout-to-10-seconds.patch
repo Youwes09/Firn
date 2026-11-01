@@ -1,0 +1,51 @@
+From 6a3244c4847b7fbb4b07fd0512013048c8ae4a88 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 14 Mar 2026 08:13:03 +0100
+Subject: [PATCH] drm/apple: Increase poweron timeout to 10 seconds
+
+Occasionally dcp_poweron takes a long time. Double the timeout to 10
+seconds. This is most likely a sequencing error / race condition on
+driver side. On the system the timeout was observed
+dcp_set_power_state_req usually takes 1ms or less. Occasionally it takes
+much longer and sometimes exceeds 5 seconds. DCP clearly does more when
+poweron takes longer based on its syslog messages. This could be tied to
+the hotplug state or racing against DPTX commands.
+TODO: find a way to recover from timeouts.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index fea8ac7e9faf..c85603e8ba2d 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -824,15 +824,21 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
+ 		dcp_set_display_device(dcp, false, &handle,
+ 				       dcp_on_set_parameter, cookie);
+ 	}
+-	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(5000));
++	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(10000));
+ 
+-	if (ret == 0)
+-		dev_warn(dcp->dev, "wait for power timed out\n");
+-	else if (ret > 0)
+-		dev_info(dcp->dev, "dcp_set_power_state_req returned, %d ms remaining\n", jiffies_to_msecs(ret));
+-	if (ret <= 0)
++	if (ret == 0) {
++		dev_warn(dcp->dev, "wait for power timed out, connector will be broken\n");
++	} else if (ret > 0) {
++		int msecs = jiffies_to_msecs(ret);
++		if (msecs > 6000)
++			dev_info(dcp->dev, "dcp_set_power_state_req returned, %d ms remaining\n", msecs);
++		else
++			dev_warn(dcp->dev, "dcp_set_power_state_req returned, %d ms remaining\n", msecs);
++	} else {
+ 		drm_connector_set_link_status_property(&dcp->connector->base,
+ 						       DRM_MODE_LINK_STATUS_BAD);
++		dev_warn(dcp->dev, "wait for completion error: %d\n", ret);
++	}
+ 
+ 	kref_put(&cookie->refcount, release_wait_cookie);;
+ 

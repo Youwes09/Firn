@@ -5,8 +5,8 @@ unofficial.
 
 Everything that runs on the Air is built from source here:
 
-- the kernel: Gravity Linux's `gravity-m4` (7.1.13) with the J713 patches
-  it lacks;
+- the kernel: mainline Linux with a J713-only patch series, each patch
+  credited to its authors;
 - m1n1 stage 1 and stage 2: upstream m1n1 with Firn's patches;
 - the macOS-side installer: Gravity Linux's installer with the J713 added.
 
@@ -15,12 +15,16 @@ both pinned by hash, as Asahi Linux's own installer does.
 
 ## What works
 
-Keyboard, trackpad, NVMe, Wi-Fi, Bluetooth, hinge-side USB-C and the panel,
-with brightness in `/sys/class/backlight/apple-panel-bl`. Set
+Keyboard, trackpad, NVMe, Wi-Fi, Bluetooth, the power management
+coprocessor (PMP), and the internal display through its display
+controller (DCP), with brightness and blanking. Set
 `hardware.firn.wifiRegion` (for example `"US"`) for 5 GHz Wi-Fi.
 
-Not supported: speakers, headphones, GPU, CPU clocks above the heat caps,
-the front USB-C port, suspend. Closing the lid powers off. Sustained writes of
+In progress on the new kernel ([docs/TODO.md](docs/TODO.md)): USB-C is
+built but not yet tested.
+
+Not supported: speakers, headphones, GPU, external displays, CPU clocks
+above the heat caps, suspend. Closing the lid powers off. Sustained writes of
 several GB can crash the storage controller; see
 [docs/ISSUES.md](docs/ISSUES.md).
 

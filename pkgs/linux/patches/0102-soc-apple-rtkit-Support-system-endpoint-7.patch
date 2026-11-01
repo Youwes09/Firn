@@ -1,0 +1,118 @@
+From d1e85c285df1977bd8b3cc2f063e20a2425450a9 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 18 Aug 2026 05:57:36 -0400
+Subject: [PATCH] soc: apple: rtkit: Support system endpoint 7
+
+Newer firmware, such as T8132's PMP, advertises system endpoint 7 and
+does not finish booting until it is started. It asks for a buffer like
+IOReport does, but expects reply type 5.
+
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+[Youwes09: endpoint 7 parts of niklassheth/linux 782a89307a9c; commit
+ message]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/soc/apple/rtkit-internal.h |  1 +
+ drivers/soc/apple/rtkit.c          | 27 +++++++++++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/drivers/soc/apple/rtkit-internal.h b/drivers/soc/apple/rtkit-internal.h
+index b8d5244678f0..52007b07b10c 100644
+--- a/drivers/soc/apple/rtkit-internal.h
++++ b/drivers/soc/apple/rtkit-internal.h
+@@ -43,6 +43,7 @@ struct apple_rtkit {
+ 	DECLARE_BITMAP(endpoints, APPLE_RTKIT_MAX_ENDPOINTS);
+ 
+ 	struct apple_rtkit_shmem ioreport_buffer;
++	struct apple_rtkit_shmem system7_buffer;
+ 	struct apple_rtkit_shmem crashlog_buffer;
+ 	struct apple_rtkit_shmem oslog_buffer;
+ 
+diff --git a/drivers/soc/apple/rtkit.c b/drivers/soc/apple/rtkit.c
+index a3fdac8f6f06..34b6b148d279 100644
+--- a/drivers/soc/apple/rtkit.c
++++ b/drivers/soc/apple/rtkit.c
+@@ -21,6 +21,8 @@ enum {
+ 	APPLE_RTKIT_EP_SYSLOG = 2,
+ 	APPLE_RTKIT_EP_DEBUG = 3,
+ 	APPLE_RTKIT_EP_IOREPORT = 4,
++	/* Advertised by newer firmware and required to complete RTKit boot. */
++	APPLE_RTKIT_EP_UNKNOWN7 = 7,
+ 	APPLE_RTKIT_EP_OSLOG = 8,
+ };
+ 
+@@ -60,6 +62,8 @@ enum {
+ 
+ #define APPLE_RTKIT_SYSLOG_TYPE GENMASK_ULL(59, 52)
+ 
++#define APPLE_RTKIT_SYSTEM7_BUFFER_REPLY 5
++
+ #define APPLE_RTKIT_SYSLOG_LOG 5
+ 
+ #define APPLE_RTKIT_SYSLOG_INIT	     8
+@@ -190,6 +194,7 @@ static void apple_rtkit_management_rx_epmap(struct apple_rtkit *rtk, u64 msg)
+ 		case APPLE_RTKIT_EP_CRASHLOG:
+ 		case APPLE_RTKIT_EP_DEBUG:
+ 		case APPLE_RTKIT_EP_IOREPORT:
++		case APPLE_RTKIT_EP_UNKNOWN7:
+ 		case APPLE_RTKIT_EP_OSLOG:
+ 			dev_dbg(rtk->dev,
+ 				"RTKit: Starting system endpoint 0x%02x\n", ep);
+@@ -307,6 +312,8 @@ static int apple_rtkit_common_rx_get_buffer(struct apple_rtkit *rtk,
+ 					    buffer->iova >> 12);
+ 		} else {
+ 			reply = FIELD_PREP(APPLE_RTKIT_SYSLOG_TYPE,
++					   ep == APPLE_RTKIT_EP_UNKNOWN7 ?
++					   APPLE_RTKIT_SYSTEM7_BUFFER_REPLY :
+ 					   APPLE_RTKIT_BUFFER_REQUEST);
+ 			reply |= FIELD_PREP(APPLE_RTKIT_BUFFER_REQUEST_SIZE,
+ 					    buffer->size >> 12);
+@@ -420,6 +427,21 @@ static void apple_rtkit_ioreport_rx(struct apple_rtkit *rtk, u64 msg)
+ 	}
+ }
+ 
++static void apple_rtkit_system7_rx(struct apple_rtkit *rtk, u64 msg)
++{
++	u8 type = FIELD_GET(APPLE_RTKIT_SYSLOG_TYPE, msg);
++
++	switch (type) {
++	case APPLE_RTKIT_BUFFER_REQUEST:
++		apple_rtkit_common_rx_get_buffer(rtk, &rtk->system7_buffer,
++						 APPLE_RTKIT_EP_UNKNOWN7, msg);
++		break;
++	default:
++		dev_warn(rtk->dev, "RTKit: Unknown system endpoint 7 message: %llx\n",
++			 msg);
++	}
++}
++
+ static void apple_rtkit_syslog_rx_init(struct apple_rtkit *rtk, u64 msg)
+ {
+ 	rtk->syslog_n_entries = FIELD_GET(APPLE_RTKIT_SYSLOG_N_ENTRIES, msg);
+@@ -544,6 +566,9 @@ static void apple_rtkit_rx_work(struct work_struct *work)
+ 	case APPLE_RTKIT_EP_IOREPORT:
+ 		apple_rtkit_ioreport_rx(rtk, rtk_work->msg);
+ 		break;
++	case APPLE_RTKIT_EP_UNKNOWN7:
++		apple_rtkit_system7_rx(rtk, rtk_work->msg);
++		break;
+ 	case APPLE_RTKIT_EP_OSLOG:
+ 		apple_rtkit_oslog_rx(rtk, rtk_work->msg);
+ 		break;
+@@ -737,6 +762,7 @@ int apple_rtkit_reinit(struct apple_rtkit *rtk)
+ 	flush_workqueue(rtk->wq);
+ 
+ 	apple_rtkit_free_buffer(rtk, &rtk->ioreport_buffer);
++	apple_rtkit_free_buffer(rtk, &rtk->system7_buffer);
+ 	apple_rtkit_free_buffer(rtk, &rtk->crashlog_buffer);
+ 	apple_rtkit_free_buffer(rtk, &rtk->oslog_buffer);
+ 	apple_rtkit_free_buffer(rtk, &rtk->syslog_buffer);
+@@ -941,6 +967,7 @@ void apple_rtkit_free(struct apple_rtkit *rtk)
+ 	destroy_workqueue(rtk->wq);
+ 
+ 	apple_rtkit_free_buffer(rtk, &rtk->ioreport_buffer);
++	apple_rtkit_free_buffer(rtk, &rtk->system7_buffer);
+ 	apple_rtkit_free_buffer(rtk, &rtk->crashlog_buffer);
+ 	apple_rtkit_free_buffer(rtk, &rtk->oslog_buffer);
+ 	apple_rtkit_free_buffer(rtk, &rtk->syslog_buffer);

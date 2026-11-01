@@ -1,0 +1,468 @@
+From 050ac459707ac7ab8949056b96e6bfcf729e2353 Mon Sep 17 00:00:00 2001
+From: Daniel Berlin <dberlin@dberlin.org>
+Date: Tue, 31 Oct 2023 00:06:22 -0400
+Subject: [PATCH] [brcmfmac] Add support for more rate info in station dumps
+
+We try to retrieve a newer sta_info structure that has
+both rx and tx ratespecs, but if we don't get the
+structure we are expecting we fall back to tx rate info only.
+
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+(cherry picked from commit d11ce836dcd14695b5799389270788dac04c3825)
+
+Original-Commit: 109ad5cbc8eed2e11fbae5b4d54f0e60329c2ec8
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    |  93 ++++++-
+ .../broadcom/brcm80211/brcmfmac/fwil_types.h  |  12 +
+ .../broadcom/brcm80211/brcmfmac/ratespec.h    | 252 ++++++++++++++++++
+ 3 files changed, 355 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/net/wireless/broadcom/brcm80211/brcmfmac/ratespec.h
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 712a0b389dbe..2cd92a005409 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -36,6 +36,7 @@
+ #include "feature.h"
+ #include "fwvid.h"
+ #include "xtlv.h"
++#include "ratespec.h"
+ 
+ #define BRCMF_SCAN_IE_LEN_MAX		2048
+ 
+@@ -3133,6 +3134,70 @@ brcmf_cfg80211_get_station_ibss(struct brcmf_if *ifp,
+ 	return 0;
+ }
+ 
++static void brcmf_convert_ratespec_to_rateinfo(u32 ratespec,
++					       struct rate_info *rateinfo)
++{
++	/* First extract the bandwidth info */
++	switch (ratespec & BRCMF_RSPEC_BW_MASK) {
++	case BRCMF_RSPEC_BW_20MHZ:
++		rateinfo->bw = RATE_INFO_BW_20;
++		break;
++	case BRCMF_RSPEC_BW_40MHZ:
++		rateinfo->bw = RATE_INFO_BW_40;
++		break;
++	case BRCMF_RSPEC_BW_80MHZ:
++		rateinfo->bw = RATE_INFO_BW_80;
++		break;
++	case BRCMF_RSPEC_BW_160MHZ:
++		rateinfo->bw = RATE_INFO_BW_160;
++		break;
++	case BRCMF_RSPEC_BW_320MHZ:
++		rateinfo->bw = RATE_INFO_BW_320;
++		break;
++	default:
++		/* Fill in nothing */
++		break;
++	}
++	if (BRCMF_RSPEC_ISHT(ratespec)) {
++		rateinfo->flags |= RATE_INFO_FLAGS_MCS;
++		rateinfo->mcs = ratespec & BRCMF_RSPEC_HT_MCS_MASK;
++	} else if (BRCMF_RSPEC_ISVHT(ratespec)) {
++		rateinfo->flags |= RATE_INFO_FLAGS_VHT_MCS;
++		rateinfo->mcs = ratespec & BRCMF_RSPEC_VHT_MCS_MASK;
++		rateinfo->nss = (ratespec & BRCMF_RSPEC_VHT_NSS_MASK) >>
++				BRCMF_RSPEC_VHT_NSS_SHIFT;
++	} else if (BRCMF_RSPEC_ISHE(ratespec)) {
++		u32 ltf_gi = BRCMF_RSPEC_HE_LTF_GI(ratespec);
++
++		rateinfo->flags |= RATE_INFO_FLAGS_HE_MCS;
++		rateinfo->mcs = ratespec & BRCMF_RSPEC_HE_MCS_MASK;
++		rateinfo->nss = (ratespec & BRCMF_RSPEC_HE_NSS_MASK) >>
++				BRCMF_RSPEC_HE_NSS_SHIFT;
++		rateinfo->he_dcm = BRCMF_RSPEC_HE_DCM(ratespec);
++		if (HE_IS_GI_0_8us(ltf_gi)) {
++			rateinfo->he_gi = NL80211_RATE_INFO_HE_GI_0_8;
++		} else if (HE_IS_GI_1_6us(ltf_gi)) {
++			rateinfo->he_gi = NL80211_RATE_INFO_HE_GI_1_6;
++		} else if (HE_IS_GI_3_2us(ltf_gi)) {
++			rateinfo->he_gi = NL80211_RATE_INFO_HE_GI_3_2;
++		}
++	} else if (BRCMF_RSPEC_ISEHT(ratespec)) {
++		u32 ltf_gi = BRCMF_RSPEC_EHT_LTF_GI(ratespec);
++
++		rateinfo->flags |= RATE_INFO_FLAGS_EHT_MCS;
++		rateinfo->mcs = ratespec & BRCMF_RSPEC_EHT_MCS_MASK;
++		rateinfo->nss = (ratespec & BRCMF_RSPEC_EHT_NSS_MASK) >>
++				BRCMF_RSPEC_EHT_NSS_SHIFT;
++		if (EHT_IS_GI_0_8us(ltf_gi)) {
++			rateinfo->eht_gi = NL80211_RATE_INFO_EHT_GI_0_8;
++		} else if (EHT_IS_GI_1_6us(ltf_gi)) {
++			rateinfo->eht_gi = NL80211_RATE_INFO_EHT_GI_1_6;
++		} else if (EHT_IS_GI_3_2us(ltf_gi)) {
++			rateinfo->eht_gi = NL80211_RATE_INFO_EHT_GI_3_2;
++		}
++	}
++}
++
+ static s32
+ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 			   const u8 *mac, struct station_info *sinfo)
+@@ -3150,6 +3215,8 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 	s32 count_rssi = 0;
+ 	int rssi;
+ 	u32 i;
++	u16 struct_ver;
++	u16 info_len;
+ 
+ 	brcmf_dbg(TRACE, "Enter, MAC %pM\n", mac);
+ 	if (!check_vif_up(ifp->vif))
+@@ -3173,7 +3240,9 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 			goto done;
+ 		}
+ 	}
+-	brcmf_dbg(TRACE, "version %d\n", le16_to_cpu(sta_info_le.ver));
++	info_len = le16_to_cpu(sta_info_le.len);
++	struct_ver = le16_to_cpu(sta_info_le.ver);
++	brcmf_dbg(TRACE, "version %d\n", struct_ver);
+ 	sinfo->filled = BIT_ULL(NL80211_STA_INFO_INACTIVE_TIME);
+ 	sinfo->inactive_time = le32_to_cpu(sta_info_le.idle) * 1000;
+ 	sta_flags = le32_to_cpu(sta_info_le.flags);
+@@ -3207,12 +3276,13 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 			sinfo->rxrate.legacy =
+ 				le32_to_cpu(sta_info_le.rx_rate) / 100;
+ 		}
+-		if (le16_to_cpu(sta_info_le.ver) >= 4) {
++		if (struct_ver >= 4) {
+ 			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_TX_BYTES);
+ 			sinfo->tx_bytes = le64_to_cpu(sta_info_le.tx_tot_bytes);
+ 			sinfo->filled |= BIT_ULL(NL80211_STA_INFO_RX_BYTES);
+ 			sinfo->rx_bytes = le64_to_cpu(sta_info_le.rx_tot_bytes);
+ 		}
++
+ 		for (i = 0; i < BRCMF_ANT_MAX; i++) {
+ 			if (sta_info_le.rssi[i] == 0 ||
+ 			    sta_info_le.rx_lastpkt_rssi[i] == 0)
+@@ -3251,6 +3321,25 @@ brcmf_cfg80211_get_station(struct wiphy *wiphy, struct wireless_dev *wdev,
+ 			}
+ 		}
+ 	}
++	/* Some version 7 structs have ratespecs from the last packet. */
++	if (struct_ver >= 7) {
++		if (info_len >= sizeof(sta_info_le)) {
++			brcmf_convert_ratespec_to_rateinfo(
++				le32_to_cpu(sta_info_le.v7.tx_rspec),
++				&sinfo->txrate);
++			brcmf_convert_ratespec_to_rateinfo(
++				le32_to_cpu(sta_info_le.v7.rx_rspec),
++				&sinfo->rxrate);
++		} else {
++			/* We didn't get the fields we were expecting, fallback to nrate */
++			u32 nrate = 0;
++			err = brcmf_fil_iovar_int_get(ifp, "nrate", &nrate);
++			if (!err) {
++				brcmf_convert_ratespec_to_rateinfo(
++					nrate, &sinfo->txrate);
++			}
++		}
++	}
+ done:
+ 	brcmf_dbg(TRACE, "Exit\n");
+ 	return err;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index 14d91e7749e8..7b8f809cdc41 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -824,13 +824,17 @@ struct brcmf_channel_info_le {
+ 	__le32 scan_channel;
+ };
+ 
++#define BRCMF_MAX_ASSOC_OUI_NUM 6
++#define BRCMF_ASSOC_OUI_LEN 3
+ struct brcmf_sta_info_le {
+ 	__le16 ver;		/* version of this struct */
+ 	__le16 len;		/* length in bytes of this structure */
+ 	__le16 cap;		/* sta's advertised capabilities */
++	u16 PAD;
+ 	__le32 flags;		/* flags defined below */
+ 	__le32 idle;		/* time since data pkt rx'd from sta */
+ 	u8 ea[ETH_ALEN];		/* Station address */
++	u16 PAD2;
+ 	__le32 count;			/* # rates in this set */
+ 	u8 rates[BRCMF_MAXRATES_IN_SET];	/* rates in 500kbps units */
+ 						/* w/hi bit set if basic */
+@@ -862,6 +866,7 @@ struct brcmf_sta_info_le {
+ 	__le16 aid;                    /* association ID */
+ 	__le16 ht_capabilities;        /* advertised ht caps */
+ 	__le16 vht_flags;              /* converted vht flags */
++	u16 PAD3;
+ 	__le32 tx_pkts_retry_cnt;      /* # of frames where a retry was
+ 					 * exhausted.
+ 					 */
+@@ -914,6 +919,13 @@ struct brcmf_sta_info_le {
+ 			__le32 tx_rspec;	/* Rate of last successful tx frame */
+ 			__le32 rx_rspec;	/* Rate of last successful rx frame */
+ 			__le32 wnm_cap;		/* wnm capabilities */
++			__le16 he_flags;	/* converted he flags */
++			u16 PAD;
++			struct {
++				u8 count;
++				u8 oui[BRCMF_MAX_ASSOC_OUI_NUM][BRCMF_ASSOC_OUI_LEN];
++			} vendor_oui;
++			u8 link_bw;
+ 		} v7;
+ 	};
+ };
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/ratespec.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/ratespec.h
+new file mode 100644
+index 000000000000..37e722daab14
+--- /dev/null
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/ratespec.h
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: ISC
++/*
++ * Copyright (c) 2023 Daniel Berlin
++ */
++
++#ifndef BRCMFMAC_RATESPEC_H
++#define BRCMFMAC_RATESPEC_H
++/* Rate spec. definitions */
++/* for BRCMF_RSPEC_ENCODING field >= BRCMF_RSPEC_ENCODING_HE, backward compatible */
++
++/**< Legacy rate or MCS or MCS + NSS */
++#define BRCMF_RSPEC_RATE_MASK 0x000000FFu
++/**< Tx chain expansion beyond Nsts */
++#define BRCMF_RSPEC_TXEXP_MASK 0x00000300u
++#define BRCMF_RSPEC_TXEXP_SHIFT 8u
++/* EHT GI indices */
++#define BRCMF_RSPEC_EHT_GI_MASK 0x00000C00u
++#define BRCMF_RSPEC_EHT_GI_SHIFT 10u
++/* HE GI indices */
++#define BRCMF_RSPEC_HE_GI_MASK 0x00000C00u
++#define BRCMF_RSPEC_HE_GI_SHIFT 10u
++/**< Range extension mask */
++#define BRCMF_RSPEC_ER_MASK 0x0000C000u
++#define BRCMF_RSPEC_ER_SHIFT 14u
++/**< Range extension tone config */
++#define BRCMF_RSPEC_ER_TONE_MASK 0x00004000u
++#define BRCMF_RSPEC_ER_TONE_SHIFT 14u
++/**< Range extension enable */
++#define BRCMF_RSPEC_ER_ENAB_MASK 0x00008000u
++#define BRCMF_RSPEC_ER_ENAB_SHIFT 15u
++/**< Bandwidth */
++#define BRCMF_RSPEC_BW_MASK 0x00070000u
++#define BRCMF_RSPEC_BW_SHIFT 16u
++/**< Dual Carrier Modulation */
++#define BRCMF_RSPEC_DCM 0x00080000u
++#define BRCMF_RSPEC_DCM_SHIFT 19u
++/**< STBC expansion, Nsts = 2 * Nss */
++#define BRCMF_RSPEC_STBC 0x00100000u
++#define BRCMF_RSPEC_TXBF 0x00200000u
++#define BRCMF_RSPEC_LDPC 0x00400000u
++/* HT/VHT SGI indication */
++#define BRCMF_RSPEC_SGI 0x00800000u
++/**< DSSS short preable - Encoding 0 */
++#define BRCMF_RSPEC_SHORT_PREAMBLE 0x00800000u
++/**< Encoding of RSPEC_RATE field */
++#define BRCMF_RSPEC_ENCODING_MASK 0x07000000u
++#define BRCMF_RSPEC_ENCODING_SHIFT 24u
++#define BRCMF_RSPEC_OVERRIDE_RATE 0x40000000u /**< override rate only */
++#define BRCMF_RSPEC_OVERRIDE_MODE 0x80000000u /**< override both rate & mode */
++
++/* ======== RSPEC_EHT_GI|RSPEC_SGI fields for EHT ======== */
++/* 11be Draft 0.4 Table 36-35:Common field for non-OFDMA transmission.
++ * Table 36-32 Common field for OFDMA transmission
++ */
++#define BRCMF_RSPEC_EHT_LTF_GI(rspec) \
++	(((rspec) & BRCMF_RSPEC_EHT_GI_MASK) >> BRCMF_RSPEC_EHT_GI_SHIFT)
++#define BRCMF_RSPEC_EHT_2x_LTF_GI_0_8us (0x0u)
++#define BRCMF_RSPEC_EHT_2x_LTF_GI_1_6us (0x1u)
++#define BRCMF_RSPEC_EHT_4x_LTF_GI_0_8us (0x2u)
++#define BRCMF_RSPEC_EHT_4x_LTF_GI_3_2us (0x3u)
++#define WL_EHT_GI_TO_RSPEC(gi)                             \
++	((u32)(((gi) << BRCMF_RSPEC_EHT_GI_SHIFT) & \
++		      BRCMF_RSPEC_EHT_GI_MASK))
++#define WL_EHT_GI_TO_RSPEC_SET(rspec, gi) \
++	((rspec & (~BRCMF_RSPEC_EHT_GI_MASK)) | WL_EHT_GI_TO_RSPEC(gi))
++
++/* Macros for EHT LTF and GI */
++#define EHT_IS_2X_LTF(gi)                             \
++	(((gi) == BRCMF_RSPEC_EHT_2x_LTF_GI_0_8us) || \
++	 ((gi) == BRCMF_RSPEC_EHT_2x_LTF_GI_1_6us))
++#define EHT_IS_4X_LTF(gi)                             \
++	(((gi) == BRCMF_RSPEC_EHT_4x_LTF_GI_0_8us) || \
++	 ((gi) == BRCMF_RSPEC_EHT_4x_LTF_GI_3_2us))
++
++#define EHT_IS_GI_0_8us(gi)                           \
++	(((gi) == BRCMF_RSPEC_EHT_2x_LTF_GI_0_8us) || \
++	 ((gi) == BRCMF_RSPEC_EHT_4x_LTF_GI_0_8us))
++#define EHT_IS_GI_1_6us(gi) ((gi) == BRCMF_RSPEC_EHT_2x_LTF_GI_1_6us)
++#define EHT_IS_GI_3_2us(gi) ((gi) == BRCMF_RSPEC_EHT_4x_LTF_GI_3_2us)
++
++/* ======== RSPEC_HE_GI|RSPEC_SGI fields for HE ======== */
++
++/* GI for HE */
++#define BRCMF_RSPEC_HE_LTF_GI(rspec) \
++	(((rspec) & BRCMF_RSPEC_HE_GI_MASK) >> BRCMF_RSPEC_HE_GI_SHIFT)
++#define BRCMF_RSPEC_HE_1x_LTF_GI_0_8us (0x0u)
++#define BRCMF_RSPEC_HE_2x_LTF_GI_0_8us (0x1u)
++#define BRCMF_RSPEC_HE_2x_LTF_GI_1_6us (0x2u)
++#define BRCMF_RSPEC_HE_4x_LTF_GI_3_2us (0x3u)
++#define BRCMF_RSPEC_ISHEGI(rspec) \
++	(RSPEC_HE_LTF_GI(rspec) > BRCMF_RSPEC_HE_1x_LTF_GI_0_8us)
++#define HE_GI_TO_RSPEC(gi) \
++	(((u32)(gi) << BRCMF_RSPEC_HE_GI_SHIFT) & BRCMF_RSPEC_HE_GI_MASK)
++#define HE_GI_TO_RSPEC_SET(rspec, gi) \
++	((rspec & (~BRCMF_RSPEC_HE_GI_MASK)) | HE_GI_TO_RSPEC(gi))
++
++/* Macros for HE LTF and GI */
++#define HE_IS_1X_LTF(gi) ((gi) == BRCMF_RSPEC_HE_1x_LTF_GI_0_8us)
++#define HE_IS_2X_LTF(gi)                             \
++	(((gi) == BRCMF_RSPEC_HE_2x_LTF_GI_0_8us) || \
++	 ((gi) == BRCMF_RSPEC_HE_2x_LTF_GI_1_6us))
++#define HE_IS_4X_LTF(gi) ((gi) == BRCMF_RSPEC_HE_4x_LTF_GI_3_2us)
++
++#define HE_IS_GI_0_8us(gi)                           \
++	(((gi) == BRCMF_RSPEC_HE_1x_LTF_GI_0_8us) || \
++	 ((gi) == BRCMF_RSPEC_HE_2x_LTF_GI_0_8us))
++#define HE_IS_GI_1_6us(gi) ((gi) == BRCMF_RSPEC_HE_2x_LTF_GI_1_6us)
++#define HE_IS_GI_3_2us(gi) ((gi) == BRCMF_RSPEC_HE_4x_LTF_GI_3_2us)
++
++/* RSPEC Macros for extracting and using HE-ER and DCM */
++#define BRCMF_RSPEC_HE_DCM(rspec) \
++	(((rspec) & BRCMF_RSPEC_DCM) >> BRCMF_RSPEC_DCM_SHIFT)
++#define BRCMF_RSPEC_HE_ER(rspec) \
++	(((rspec) & BRCMF_RSPEC_ER_MASK) >> BRCMF_RSPEC_ER_SHIFT)
++#define BRCMF_RSPEC_HE_ER_ENAB(rspec) \
++	(((rspec) & BRCMF_RSPEC_ER_ENAB_MASK) >> BRCMF_RSPEC_ER_ENAB_SHIFT)
++#define BRCMF_RSPEC_HE_ER_TONE(rspec) \
++	(((rspec) & BRCMF_RSPEC_ER_TONE_MASK) >> BRCMF_RSPEC_ER_TONE_SHIFT)
++/* ======== RSPEC_RATE field ======== */
++
++/* Encoding 0 - legacy rate */
++/* DSSS, CCK, and OFDM rates in [500kbps] units */
++#define BRCMF_RSPEC_LEGACY_RATE_MASK 0x0000007F
++#define WLC_RATE_1M 2
++#define WLC_RATE_2M 4
++#define WLC_RATE_5M5 11
++#define WLC_RATE_11M 22
++#define WLC_RATE_6M 12
++#define WLC_RATE_9M 18
++#define WLC_RATE_12M 24
++#define WLC_RATE_18M 36
++#define WLC_RATE_24M 48
++#define WLC_RATE_36M 72
++#define WLC_RATE_48M 96
++#define WLC_RATE_54M 108
++
++/* Encoding 1 - HT MCS */
++/**< HT MCS value mask in rspec */
++#define BRCMF_RSPEC_HT_MCS_MASK 0x0000007F
++
++/* Encoding >= 2 */
++/* NSS & MCS values mask in rspec */
++#define BRCMF_RSPEC_NSS_MCS_MASK 0x000000FF
++/* mimo MCS value mask in rspec */
++#define BRCMF_RSPEC_MCS_MASK 0x0000000F
++/* mimo NSS value mask in rspec */
++#define BRCMF_RSPEC_NSS_MASK 0x000000F0
++/* mimo NSS value shift in rspec */
++#define BRCMF_RSPEC_NSS_SHIFT 4
++
++/* Encoding 2 - VHT MCS + NSS */
++/**< VHT MCS value mask in rspec */
++#define BRCMF_RSPEC_VHT_MCS_MASK BRCMF_RSPEC_MCS_MASK
++/**< VHT Nss value mask in rspec */
++#define BRCMF_RSPEC_VHT_NSS_MASK BRCMF_RSPEC_NSS_MASK
++/**< VHT Nss value shift in rspec */
++#define BRCMF_RSPEC_VHT_NSS_SHIFT BRCMF_RSPEC_NSS_SHIFT
++
++/* Encoding 3 - HE MCS + NSS */
++/**< HE MCS value mask in rspec */
++#define BRCMF_RSPEC_HE_MCS_MASK BRCMF_RSPEC_MCS_MASK
++/**< HE Nss value mask in rspec */
++#define BRCMF_RSPEC_HE_NSS_MASK BRCMF_RSPEC_NSS_MASK
++/**< HE Nss value shift in rpsec */
++#define BRCMF_RSPEC_HE_NSS_SHIFT BRCMF_RSPEC_NSS_SHIFT
++
++#define BRCMF_RSPEC_HE_NSS_UNSPECIFIED 0xf
++
++/* Encoding 4 - EHT MCS + NSS */
++/**< EHT MCS value mask in rspec */
++#define BRCMF_RSPEC_EHT_MCS_MASK BRCMF_RSPEC_MCS_MASK
++/**< EHT Nss value mask in rspec */
++#define BRCMF_RSPEC_EHT_NSS_MASK BRCMF_RSPEC_NSS_MASK
++/**< EHT Nss value shift in rpsec */
++#define BRCMF_RSPEC_EHT_NSS_SHIFT BRCMF_RSPEC_NSS_SHIFT
++
++/* ======== RSPEC_BW field ======== */
++
++#define BRCMF_RSPEC_BW_UNSPECIFIED 0u
++#define BRCMF_RSPEC_BW_20MHZ 0x00010000u
++#define BRCMF_RSPEC_BW_40MHZ 0x00020000u
++#define BRCMF_RSPEC_BW_80MHZ 0x00030000u
++#define BRCMF_RSPEC_BW_160MHZ 0x00040000u
++#define BRCMF_RSPEC_BW_320MHZ 0x00060000u
++
++/* ======== RSPEC_ENCODING field ======== */
++
++/* NOTE: Assuming the rate field is always NSS+MCS starting from VHT encoding!
++ *       Modify/fix RSPEC_ISNSSMCS() macro if above condition changes any time.
++ */
++/**< Legacy rate is stored in RSPEC_RATE */
++#define BRCMF_RSPEC_ENCODE_RATE 0x00000000u
++/**< HT MCS is stored in RSPEC_RATE */
++#define BRCMF_RSPEC_ENCODE_HT 0x01000000u
++/**< VHT MCS and NSS are stored in RSPEC_RATE */
++#define BRCMF_RSPEC_ENCODE_VHT 0x02000000u
++/**< HE MCS and NSS are stored in RSPEC_RATE */
++#define BRCMF_RSPEC_ENCODE_HE 0x03000000u
++/**< EHT MCS and NSS are stored in RSPEC_RATE */
++#define BRCMF_RSPEC_ENCODE_EHT 0x04000000u
++
++/**
++ * ===============================
++ * Handy macros to parse rate spec
++ * ===============================
++ */
++#define BRCMF_RSPEC_BW(rspec) ((rspec) & BRCMF_RSPEC_BW_MASK)
++#define BRCMF_RSPEC_IS20MHZ(rspec) (RSPEC_BW(rspec) == BRCMF_RSPEC_BW_20MHZ)
++#define BRCMF_RSPEC_IS40MHZ(rspec) (RSPEC_BW(rspec) == BRCMF_RSPEC_BW_40MHZ)
++#define BRCMF_RSPEC_IS80MHZ(rspec) (RSPEC_BW(rspec) == BRCMF_RSPEC_BW_80MHZ)
++#define BRCMF_RSPEC_IS160MHZ(rspec) (RSPEC_BW(rspec) == BRCMF_RSPEC_BW_160MHZ)
++#if defined(WL_BW320MHZ)
++#define BRCMF_RSPEC_IS320MHZ(rspec) (RSPEC_BW(rspec) == BRCMF_RSPEC_BW_320MHZ)
++#else
++#define BRCMF_RSPEC_IS320MHZ(rspec) (FALSE)
++#endif /* WL_BW320MHZ */
++
++#define BRCMF_RSPEC_BW_GE(rspec, rspec_bw) (RSPEC_BW(rspec) >= rspec_bw)
++#define BRCMF_RSPEC_BW_LE(rspec, rspec_bw) (RSPEC_BW(rspec) <= rspec_bw)
++#define BRCMF_RSPEC_BW_GT(rspec, rspec_bw) (!RSPEC_BW_LE(rspec, rspec_bw))
++#define BRCMF_RSPEC_BW_LT(rspec, rspec_bw) (!RSPEC_BW_GE(rspec, rspec_bw))
++
++#define BRCMF_RSPEC_ISSGI(rspec) (((rspec) & BRCMF_RSPEC_SGI) != 0)
++#define BRCMF_RSPEC_ISLDPC(rspec) (((rspec) & BRCMF_RSPEC_LDPC) != 0)
++#define BRCMF_RSPEC_ISSTBC(rspec) (((rspec) & BRCMF_RSPEC_STBC) != 0)
++#define BRCMF_RSPEC_ISTXBF(rspec) (((rspec) & BRCMF_RSPEC_TXBF) != 0)
++
++#define BRCMF_RSPEC_TXEXP(rspec) \
++	(((rspec) & BRCMF_RSPEC_TXEXP_MASK) >> BRCMF_RSPEC_TXEXP_SHIFT)
++
++#define BRCMF_RSPEC_ENCODE(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) >> BRCMF_RSPEC_ENCODING_SHIFT)
++#define BRCMF_RSPEC_ISLEGACY(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) == BRCMF_RSPEC_ENCODE_RATE)
++
++#define BRCMF_RSPEC_ISHT(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) == BRCMF_RSPEC_ENCODE_HT)
++#define BRCMF_RSPEC_ISVHT(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) == BRCMF_RSPEC_ENCODE_VHT)
++#define BRCMF_RSPEC_ISHE(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) == BRCMF_RSPEC_ENCODE_HE)
++#define BRCMF_RSPEC_ISEHT(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) == BRCMF_RSPEC_ENCODE_EHT)
++
++/* fast check if rate field is NSS+MCS format (starting from VHT ratespec) */
++#define BRCMF_RSPEC_ISVHTEXT(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) >= BRCMF_RSPEC_ENCODE_VHT)
++/* fast check if rate field is NSS+MCS format (starting from HE ratespec) */
++#define BRCMF_RSPEC_ISHEEXT(rspec) \
++	(((rspec) & BRCMF_RSPEC_ENCODING_MASK) >= BRCMF_RSPEC_ENCODE_HE)
++
++#endif /* BRCMFMAC_RATESPEC_H */

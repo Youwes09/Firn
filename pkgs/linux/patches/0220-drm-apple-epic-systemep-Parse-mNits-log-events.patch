@@ -1,0 +1,154 @@
+From e7f7c7235fd801dae72767f27faaa4b08beabcd2 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 10 Dec 2023 13:40:14 +0100
+Subject: [PATCH] drm: apple: epic: systemep: Parse "mNits" log events
+
+The 13.5 firmware has stopped updating the NITS property on backlight
+brightness changes. Parse system log events instead which report
+backlight's brightness in millinits.
+Fixes the backlight device's "actual_brightness" property used by the
+systemd backlight service to save and restore brightness.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/parser.c   | 48 ++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/apple/parser.h   |  9 ++++++
+ drivers/gpu/drm/apple/systemep.c | 37 ++++++++++++++++++++++++
+ 3 files changed, 94 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index 6e9cea6a8a26..65bf0ad60daa 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -984,3 +984,51 @@ int parse_sound_mode(struct dcp_parse_ctx *handle,
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(parse_sound_mode);
++
++int parse_system_log_mnits(struct dcp_parse_ctx *handle, struct dcp_system_ev_mnits *entry)
++{
++	struct iterator it;
++	int ret;
++	s64 mnits = -1;
++	s64 idac = -1;
++	s64 timestamp = -1;
++	bool type_match = false;
++
++	dcp_parse_foreach_in_dict(handle, it) {
++		char *key = parse_string(it.handle);
++		if (IS_ERR(key)) {
++			ret = PTR_ERR(key);
++		} else if (!strcmp(key, "mNits")) {
++			ret = parse_int(it.handle, &mnits);
++		} else if (!strcmp(key, "iDAC")) {
++			ret = parse_int(it.handle, &idac);
++		} else if (!strcmp(key, "logEvent")) {
++			const char * value = parse_string(it.handle);
++			if (!IS_ERR_OR_NULL(value)) {
++				type_match = strcmp(value, "Display (Event Forward)") == 0;
++				kfree(value);
++			}
++		} else if (!strcmp(key, "timestamp")) {
++			ret = parse_int(it.handle, &timestamp);
++		} else {
++			skip(it.handle);
++		}
++
++		if (!IS_ERR_OR_NULL(key))
++			kfree(key);
++
++		if (ret) {
++			pr_err("dcp parser: failed to parse mNits sys event\n");
++			return ret;
++		}
++	}
++
++	if (!type_match ||  mnits < 0 || idac < 0 || timestamp < 0)
++		return -EINVAL;
++
++	entry->millinits = mnits;
++	entry->idac = idac;
++	entry->timestamp = timestamp;
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/apple/parser.h b/drivers/gpu/drm/apple/parser.h
+index 6e101f77cbb6..11857f0aa6af 100644
+--- a/drivers/gpu/drm/apple/parser.h
++++ b/drivers/gpu/drm/apple/parser.h
+@@ -126,4 +126,13 @@ int parse_sound_mode(struct dcp_parse_ctx *handle,
+ 		     struct snd_pcm_chmap_elem *chmap,
+ 		     struct dcp_sound_cookie *cookie);
+ 
++struct dcp_system_ev_mnits {
++	u32 timestamp;
++	u32 millinits;
++	u32 idac;
++};
++
++int parse_system_log_mnits(struct dcp_parse_ctx *handle,
++			   struct dcp_system_ev_mnits *entry);
++
+ #endif
+diff --git a/drivers/gpu/drm/apple/systemep.c b/drivers/gpu/drm/apple/systemep.c
+index 5383a83f1e6c..9fe7a0ce495a 100644
+--- a/drivers/gpu/drm/apple/systemep.c
++++ b/drivers/gpu/drm/apple/systemep.c
+@@ -5,6 +5,7 @@
+ 
+ #include "afk.h"
+ #include "dcp.h"
++#include "parser.h"
+ 
+ static bool enable_verbose_logging;
+ module_param(enable_verbose_logging, bool, 0644);
+@@ -66,6 +67,41 @@ static void powerlog_init(struct apple_epic_service *service, const char *name,
+ {
+ }
+ 
++static int powerlog_report(struct apple_epic_service *service, enum epic_subtype type,
++			 const void *data, size_t data_size)
++{
++	struct dcp_system_ev_mnits mnits;
++	struct dcp_parse_ctx parse_ctx;
++	struct apple_dcp *dcp = service->ep->dcp;
++	int ret;
++
++	dev_dbg(dcp->dev, "systemep[ch:%u]: report type:%02x len:%zu\n",
++		service->channel, type, data_size);
++
++	if (type != EPIC_SUBTYPE_STD_SERVICE)
++		return 0;
++
++	ret = parse(data, data_size, &parse_ctx);
++	if (ret) {
++		dev_warn(service->ep->dcp->dev, "systemep: failed to parse report: %d\n", ret);
++		return ret;
++	}
++
++	ret = parse_system_log_mnits(&parse_ctx, &mnits);
++	if (ret) {
++		/* ignore parse errors in the case dcp sends unknown log events */
++		dev_dbg(dcp->dev, "systemep: failed to parse mNits event: %d\n", ret);
++		return 0;
++	}
++
++	dev_dbg(dcp->dev, "systemep: mNits event: Nits: %u.%03u, iDAC: %u\n",
++		mnits.millinits / 1000, mnits.millinits % 1000, mnits.idac);
++
++	dcp->brightness.nits = mnits.millinits / 1000;
++
++	return 0;
++}
++
+ static const struct apple_epic_service_ops systemep_ops[] = {
+ 	{
+ 		.name = "system",
+@@ -74,6 +110,7 @@ static const struct apple_epic_service_ops systemep_ops[] = {
+ 	{
+ 		.name = "powerlog-service",
+ 		.init = powerlog_init,
++		.report = powerlog_report,
+ 	},
+ 	{}
+ };

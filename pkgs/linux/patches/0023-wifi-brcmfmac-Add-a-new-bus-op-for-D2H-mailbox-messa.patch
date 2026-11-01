@@ -1,0 +1,49 @@
+From 2f9d912fa53e2a90bbb118cfdfa27404c39f746b Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 18 Oct 2022 21:56:53 +0900
+Subject: [PATCH] wifi: brcmfmac: Add a new bus op for D2H mailbox message
+ handling
+
+Newer firmware versions use the common ring for sending mailbox messages
+between the dongle and host, instead of the hardware mailboxes. This
+needs the protocol driver to call back into the bus driver, so add a
+callback for this to bus.h.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 8b6861c3a89a0d7495769ce01bc2f7cf47c78c88)
+
+Original-Commit: a7cfef0f3bdcf2335ae7011157b7a6f3b3e47453
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h
+index 9371c1489948..bd0bd41ca9db 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h
+@@ -108,6 +108,7 @@ struct brcmf_bus_ops {
+ 	void (*debugfs_create)(struct device *dev);
+ 	int (*reset)(struct device *dev);
+ 	void (*remove)(struct device *dev);
++	void (*d2h_mb_rx)(struct device *dev, u32 data);
+ };
+ 
+ 
+@@ -292,6 +293,15 @@ static inline void brcmf_bus_remove(struct brcmf_bus *bus)
+ 	bus->ops->remove(bus->dev);
+ }
+ 
++static inline
++void brcmf_bus_d2h_mb_rx(struct brcmf_bus *bus, u32 data)
++{
++	if (!bus->ops->d2h_mb_rx)
++		return;
++
++	return bus->ops->d2h_mb_rx(bus->dev, data);
++}
++
+ /*
+  * interface functions from common layer
+  */

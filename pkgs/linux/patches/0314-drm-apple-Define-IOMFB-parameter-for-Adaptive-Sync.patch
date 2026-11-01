@@ -1,0 +1,53 @@
+From 7c83741eea1d33a67d8d96d6d57ce87bd41b3685 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Mon, 6 Apr 2026 10:25:39 +1000
+Subject: [PATCH] drm: apple: Define IOMFB parameter for Adaptive Sync
+
+IOMFB exposes a method that allows firmware consumers to change
+display behaviour parameters at runtime. One such parameter is
+IOMFBParameter_adaptive_sync, which allows DCP to be informed
+of the desired minimum refresh rate, media target rate, and
+fractional rate.
+
+Add an enum to define the supported parameters, and add
+IOMFBPARAM_ADAPTIVE_SYNC to it as a starting point.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/iomfb.h          | 9 +++++++++
+ drivers/gpu/drm/apple/iomfb_template.c | 2 +-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index 579958610671..8a871db0b94a 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -46,6 +46,15 @@ enum dcpep_type {
+ 	IOMFB_MESSAGE_TYPE_MSG = 2,
+ };
+ 
++/*
++ * IOMFB supports the setting of a number of parameters
++ * that alter various aspects of the connected sink's
++ * behaviour at runtime.
++ */
++enum iomfb_parameter {
++	IOMFBPARAM_ADAPTIVE_SYNC = 14,
++};
++
+ #define IOMFB_MESSAGE_TYPE	GENMASK_ULL( 3,  0)
+ 
+ /* Message */
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index c85603e8ba2d..6ded6e1bed26 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -787,7 +787,7 @@ static void dcp_on_set_power_state(struct apple_dcp *dcp, void *out, void *cooki
+ static void dcp_on_set_parameter(struct apple_dcp *dcp, void *out, void *cookie)
+ {
+ 	struct dcp_set_parameter_dcp param = {
+-		.param = 14,
++		.param = IOMFBPARAM_ADAPTIVE_SYNC,
+ 		.value = { 0 },
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 		.count = 3,

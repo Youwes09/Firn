@@ -1,0 +1,38 @@
+From a560ca95148c7bd2d26caa05d1e6e32a38f5dc9a Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 7 Nov 2023 00:30:54 +0100
+Subject: [PATCH] drm: apple: dcp: Remove cargo-culted
+ devm_of_platform_populate
+
+It does not do anything for dcp and its iommu only child node.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 7 -------
+ 1 file changed, 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index cacfde09fdf9..1da361e7b8f3 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -601,7 +601,6 @@ static int dcp_platform_probe(struct platform_device *pdev)
+ 	enum dcp_firmware_version fw_compat;
+ 	struct device *dev = &pdev->dev;
+ 	struct apple_dcp *dcp;
+-	int ret;
+ 
+ 	fw_compat = dcp_check_firmware_version(dev);
+ 	if (fw_compat == DCP_FIRMWARE_UNKNOWN)
+@@ -616,12 +615,6 @@ static int dcp_platform_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, dcp);
+ 
+-	ret = devm_of_platform_populate(dev);
+-	if (ret) {
+-		dev_err(dev, "failed to populate child devices: %d\n", ret);
+-		return ret;
+-	}
+-
+ 	return component_add(&pdev->dev, &dcp_comp_ops);
+ }
+ 

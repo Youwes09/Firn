@@ -1,0 +1,131 @@
+From 73dc9a62ed34b77c86e4b3e8c4377674f944ee10 Mon Sep 17 00:00:00 2001
+From: Mark Kettenis <kettenis@openbsd.org>
+Date: Thu, 28 Dec 2023 11:41:55 +0100
+Subject: [PATCH] drm: apple: backlight: force backlight update after resume
+
+If the DCP firmware indicates that it didn't restore the
+brightness, schedule an update.  Wait for 1 frame duration and
+check if the brightness update has been taken care of by a swap
+that happened in the meantime.
+Fixes restoring the brightness after resume when running on a
+dumb framebuffer where swaps may not happen for a very long time.
+
+Signed-off-by: Mark Kettenis <kettenis@openbsd.org>
+---
+ drivers/gpu/drm/apple/dcp-internal.h   |  3 +++
+ drivers/gpu/drm/apple/dcp.c            | 10 +++++++++
+ drivers/gpu/drm/apple/dcp_backlight.c  | 31 +++++++++++++++-----------
+ drivers/gpu/drm/apple/iomfb_template.c |  1 +
+ 4 files changed, 32 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index b6fc500e7453..3e78435edbf5 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -212,6 +212,8 @@ struct apple_dcp {
+ 	/* Workqueue for updating the initial initial brightness */
+ 	struct work_struct bl_register_wq;
+ 	struct mutex bl_register_mutex;
++	/* Workqueue for updating the brightness */
++	struct work_struct bl_update_wq;
+ 
+ 	/* integrated panel if present */
+ 	struct dcp_panel panel;
+@@ -241,6 +243,7 @@ struct apple_dcp {
+ };
+ 
+ int dcp_backlight_register(struct apple_dcp *dcp);
++int dcp_backlight_update(struct apple_dcp *dcp);
+ bool dcp_has_panel(struct apple_dcp *dcp);
+ 
+ #define DCP_AUDIO_MAX_CHANS 15
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 0319d8feda1e..b2bc07867e6a 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -515,6 +515,15 @@ static void dcp_work_register_backlight(struct work_struct *work)
+ 	mutex_unlock(&dcp->bl_register_mutex);
+ }
+ 
++static void dcp_work_update_backlight(struct work_struct *work)
++{
++	struct apple_dcp *dcp;
++
++	dcp = container_of(work, struct apple_dcp, bl_update_wq);
++
++	dcp_backlight_update(dcp);
++}
++
+ static int dcp_create_piodma_iommu_dev(struct apple_dcp *dcp)
+ {
+ 	int ret;
+@@ -831,6 +840,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 		dcp->connector_type = DRM_MODE_CONNECTOR_eDP;
+ 		INIT_WORK(&dcp->bl_register_wq, dcp_work_register_backlight);
+ 		mutex_init(&dcp->bl_register_mutex);
++		INIT_WORK(&dcp->bl_update_wq, dcp_work_update_backlight);
+ 	} else if (of_property_match_string(dev->of_node, "apple,connector-type", "HDMI-A") >= 0)
+ 		dcp->connector_type = DRM_MODE_CONNECTOR_HDMIA;
+ 	else if (of_property_match_string(dev->of_node, "apple,connector-type", "DP") >= 0)
+diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
+index 0eeb3d6d92c5..dfc78f3ce37b 100644
+--- a/drivers/gpu/drm/apple/dcp_backlight.c
++++ b/drivers/gpu/drm/apple/dcp_backlight.c
+@@ -172,20 +172,8 @@ static int drm_crtc_set_brightness(struct apple_dcp *dcp)
+ 	return ret;
+ }
+ 
+-static int dcp_set_brightness(struct backlight_device *bd)
++int dcp_backlight_update(struct apple_dcp *dcp)
+ {
+-	int ret = 0;
+-	struct apple_dcp *dcp = bl_get_data(bd);
+-	struct drm_modeset_acquire_ctx ctx;
+-	int brightness = backlight_get_brightness(bd);
+-
+-	DRM_MODESET_LOCK_ALL_BEGIN(dcp->crtc->base.dev, ctx, 0, ret);
+-
+-	dcp->brightness.dac = calculate_dac(dcp, brightness);
+-	dcp->brightness.update = true;
+-
+-	DRM_MODESET_LOCK_ALL_END(dcp->crtc->base.dev, ctx, ret);
+-
+ 	/*
+ 	 * Do not actively try to change brightness if no mode is set.
+ 	 * TODO: should this be reflected the in backlight's power property?
+@@ -202,6 +190,23 @@ static int dcp_set_brightness(struct backlight_device *bd)
+ 	return drm_crtc_set_brightness(dcp);
+ }
+ 
++static int dcp_set_brightness(struct backlight_device *bd)
++{
++	int ret = 0;
++	struct apple_dcp *dcp = bl_get_data(bd);
++	struct drm_modeset_acquire_ctx ctx;
++	int brightness = backlight_get_brightness(bd);
++
++	DRM_MODESET_LOCK_ALL_BEGIN(dcp->crtc->base.dev, ctx, 0, ret);
++
++	dcp->brightness.dac = calculate_dac(dcp, brightness);
++	dcp->brightness.update = true;
++
++	DRM_MODESET_LOCK_ALL_END(dcp->crtc->base.dev, ctx, ret);
++
++	return dcp_backlight_update(dcp);
++}
++
+ static const struct backlight_ops dcp_backlight_ops = {
+ 	.options = BL_CORE_SUSPENDRESUME,
+ 	.get_brightness = dcp_get_brightness,
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index d01958aeca22..c5155efea838 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -497,6 +497,7 @@ static void iomfbep_cb_enable_backlight_message_ap_gated(struct apple_dcp *dcp,
+ 	 * syslog: "[BrightnessLCD.cpp:743][AFK]nitsToDBV: iDAC out of range"
+ 	 */
+ 	dcp->brightness.update = true;
++	schedule_work(&dcp->bl_update_wq);
+ }
+ 
+ /* Chunked data transfer for property dictionaries */

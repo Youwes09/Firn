@@ -1,0 +1,51 @@
+From 545c80597c31930bf3265d4f3bbb288d45c1481a Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 14:01:05 -0500
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the SMC hwmon sensors
+
+Add the laptop sensors and the CPU temperature and CPU rail sensors
+found on the MacBook Air (13-inch, M4, 2025).
+
+Tp0f is among the hottest Tp keys under an all-core load, and the P0b
+rail follows the load with V * I = P.
+
+Based on work by Niklas Sheth, as carried in Gravity Linux
+898c9da9c905f.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index eb9751b14cb9..ee6458d56622 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -41,3 +41,27 @@ &bluetooth0 {
+ &fpwm1 {
+ 	status = "okay";
+ };
++
++#include "hwmon-laptop.dtsi"
++
++&smc_hwmon {
++	current-IP0b {
++		label = "CPU Rail Current";
++		apple,key-id = "IP0b";
++	};
++
++	power-PP0b {
++		label = "CPU Rail Power";
++		apple,key-id = "PP0b";
++	};
++
++	temperature-Tp0f {
++		label = "CPU Temperature";
++		apple,key-id = "Tp0f";
++	};
++
++	voltage-VP0b {
++		label = "CPU Rail Voltage";
++		apple,key-id = "VP0b";
++	};
++};

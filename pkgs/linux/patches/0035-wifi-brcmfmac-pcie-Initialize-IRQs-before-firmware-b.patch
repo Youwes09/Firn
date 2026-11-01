@@ -1,0 +1,47 @@
+From 3cd1dcc2a9e8bc982205507786fab17dde18e07b Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Wed, 4 Oct 2023 05:08:25 +0900
+Subject: [PATCH] wifi: brcmfmac: pcie: Initialize IRQs before firmware boot
+
+Newer firmwares notify the host of boot completion via an MSI, so let's
+make sure that is initialized before booting the firmware.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit fabaf9216fb75b31d160052f76ec45919a913977)
+
+Original-Commit: e95e61946b538586eed57f0fc89a799fe93cd785
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../net/wireless/broadcom/brcm80211/brcmfmac/pcie.c   | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 9ce68a6ab3da..fabf7edab092 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -2488,6 +2488,14 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
+ 	 */
+ 	brcmf_pcie_adjust_ramsize(devinfo, (u8 *)fw->data, fw->size);
+ 
++	/* Newer firmwares will signal firmware boot via MSI, so make sure we
++	 * initialize that upfront.
++	 */
++	brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
++	ret = brcmf_pcie_request_irq(devinfo);
++	if (ret)
++		goto fail;
++
+ 	ret = brcmf_pcie_download_fw_nvram(devinfo, fw, fwsig, nvram, nvram_len);
+ 	if (ret)
+ 		goto fail;
+@@ -2503,9 +2511,6 @@ static void brcmf_pcie_setup(struct device *dev, int ret,
+ 		goto fail;
+ 
+ 	brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
+-	ret = brcmf_pcie_request_irq(devinfo);
+-	if (ret)
+-		goto fail;
+ 
+ 	/* hook the commonrings in the bus structure. */
+ 	for (i = 0; i < BRCMF_NROF_COMMON_MSGRINGS; i++)

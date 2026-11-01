@@ -1,0 +1,29 @@
+From 6a2332d3426294525504952d33b22d18d855564f Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 8 Jan 2023 21:30:22 +0100
+Subject: [PATCH] drm/apple: Add callbacks triggered by last_client_close_dcp()
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 545ef7d46971..35904d8511d4 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -1331,9 +1331,14 @@ bool (*const dcpep_cb_handlers[DCPEP_MAX_CB])(struct apple_dcp *, int, void *,
+ 	[576] = trampoline_hotplug,
+ 	[577] = trampoline_nop, /* powerstate_notify */
+ 	[582] = trampoline_true, /* create_default_fb_surface */
++	[584] = trampoline_nop, /* IOMobileFramebufferAP::clear_default_surface */
++	[588] = trampoline_nop, /* resize_default_fb_surface_gated */
+ 	[589] = trampoline_swap_complete,
+ 	[591] = trampoline_swap_complete_intent_gated,
+ 	[593] = trampoline_enable_backlight_message_ap_gated,
++	[594] = trampoline_nop, /* IOMobileFramebufferAP::setSystemConsoleMode */
++	[596] = trampoline_false, /* IOMobileFramebufferAP::isDFBAllocated */
++	[597] = trampoline_false, /* IOMobileFramebufferAP::preserveContents */
+ 	[598] = trampoline_nop, /* find_swap_function_gated */
+ };
+ 

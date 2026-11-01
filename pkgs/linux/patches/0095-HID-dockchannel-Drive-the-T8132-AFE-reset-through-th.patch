@@ -1,0 +1,201 @@
+From e243224dfd0af64907f3b6ef98ca8c264dc6eb7a Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 09:02:03 -0500
+Subject: [PATCH] HID: dockchannel: Drive the T8132 AFE reset through the SMC
+
+On T8132 the multi-touch AFE reset is an SMC board function (gP<pin>),
+not a host GPIO, so the driver refused the firmware's reset request and
+the AFE bootload failed. Look up the SMC from apple,afe-reset-gpios,
+pulse the reset when the firmware asks for it, and drive it between the
+two phases of each interface power request, reporting the result in the
+request's status word.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/hid/dockchannel-hid/Kconfig           |   2 +-
+ drivers/hid/dockchannel-hid/dockchannel-hid.c | 107 +++++++++++++++++-
+ 2 files changed, 102 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/hid/dockchannel-hid/Kconfig b/drivers/hid/dockchannel-hid/Kconfig
+index 254961ad15e1..0c77c79c382f 100644
+--- a/drivers/hid/dockchannel-hid/Kconfig
++++ b/drivers/hid/dockchannel-hid/Kconfig
+@@ -4,7 +4,7 @@ menu "DockChannel HID support"
+ 
+ config HID_DOCKCHANNEL
+ 	tristate "HID over DockChannel transport layer for Apple Silicon SoCs"
+-	depends on APPLE_DOCKCHANNEL && INPUT && OF && HID
++	depends on APPLE_DOCKCHANNEL && INPUT && OF && HID && MFD_MACSMC
+ 	help
+ 	  Say Y here if you use an M2 or later Apple Silicon based laptop.
+ 	  The keyboard and touchpad are HID based devices connected via the
+diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+index de678eaa9a06..8f71ac5c4b9a 100644
+--- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
++++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+@@ -11,8 +11,11 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/hex.h>
+ #include <linux/hid.h>
++#include <linux/mfd/macsmc.h>
+ #include <linux/mutex.h>
++#include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/sizes.h>
+@@ -202,6 +205,10 @@ struct dockchannel_hid {
+ 	struct dchid_iface *comm;
+ 	struct dchid_iface *ifaces[MAX_INTERFACES];
+ 
++	/* T8132: the AFE reset is an SMC board function, not a host GPIO */
++	struct apple_smc *afe_smc;
++	smc_key afe_key;
++
+ 	u8 pkt_buf[MAX_PKT_SIZE];
+ 
+ 	/* Workqueue to asynchronously create HID devices */
+@@ -381,25 +388,106 @@ static int dchid_enable_interface(struct dchid_iface *iface)
+ 	return dchid_comm_cmd(iface->dchid, msg, sizeof(msg));
+ }
+ 
++/* The multi-touch AFE, whether or not the firmware announces its reset GPIO */
++static bool dchid_uses_afe(struct dchid_iface *iface)
++{
++	return !strcmp(iface->name, "multi-touch") &&
++	       of_property_present(iface->dchid->dev->of_node, "apple,afe-reset-gpios");
++}
++
++static void dchid_put_afe_smc(void *data)
++{
++	put_device(data);
++}
++
++static int dchid_get_afe(struct dockchannel_hid *dchid)
++{
++	struct of_phandle_args args;
++	struct platform_device *pdev;
++	struct device_node *smc_node;
++	struct apple_smc *smc;
++	u32 pin;
++	int ret;
++
++	if (dchid->afe_smc)
++		return 0;
++
++	ret = of_parse_phandle_with_args(dchid->dev->of_node, "apple,afe-reset-gpios",
++					 "#gpio-cells", 0, &args);
++	if (ret)
++		return ret;
++
++	pin = args.args[0];
++	smc_node = of_get_parent(args.np);
++	of_node_put(args.np);
++	if (pin > 0xff || !smc_node)
++		return -EINVAL;
++
++	pdev = of_find_device_by_node(smc_node);
++	of_node_put(smc_node);
++	if (!pdev)
++		return -EPROBE_DEFER;
++
++	smc = platform_get_drvdata(pdev);
++	if (!smc) {
++		put_device(&pdev->dev);
++		return -EPROBE_DEFER;
++	}
++
++	ret = devm_add_action_or_reset(dchid->dev, dchid_put_afe_smc, &pdev->dev);
++	if (ret)
++		return ret;
++
++	dchid->afe_key = __SMC_KEY('g', 'P', hex_asc_lo(pin >> 4), hex_asc_lo(pin));
++	dchid->afe_smc = smc;
++	return 0;
++}
++
++/* gP<pin> = 0x10001 asserts the AFE reset, 0x10000 releases it. */
++static int dchid_set_afe(struct dockchannel_hid *dchid, bool assert)
++{
++	int ret;
++
++	ret = apple_smc_write_u32(dchid->afe_smc, dchid->afe_key, 0x10000 | assert);
++	if (ret < 0)
++		dev_err(dchid->dev, "Failed to %s the AFE reset: %d\n",
++			assert ? "assert" : "release", ret);
++	else if (assert)
++		msleep(50);
++
++	return ret;
++}
++
+ static int dchid_reset_interface(struct dchid_iface *iface, int state)
+ {
+ 	u8 msg[] = { CMD_RESET_INTERFACE, 1, iface->index, state };
+ 	u8 msg2[] = { CMD_RESET_INTERFACE, 2, iface->index, state, 0, 0, 0, 0, 0 };
+-	int ret;
++	int ret, afe_ret = 0;
+ 
+ 	if (!iface->dchid->use_ring)
+ 		return dchid_comm_cmd(iface->dchid, msg, sizeof(msg));
+ 
+ 	/*
+ 	 * T8132 boot capture: state 0 then 2, each with byte 4 equal to 0
+-	 * then 1. This is only the observed provisioning sequence, not a
+-	 * contract for suspend, wake, or arbitrary interface power changes.
++	 * then 1. Between the two the host drives the AFE reset, asserted for
++	 * state 0 and released for state 2, and reports the result in the
++	 * status word of the second request.
+ 	 */
+ 	ret = dchid_comm_cmd(iface->dchid, msg2, sizeof(msg2));
+ 	if (ret < 0)
+ 		return ret;
++
++	if (dchid_uses_afe(iface)) {
++		afe_ret = dchid_get_afe(iface->dchid);
++		if (!afe_ret)
++			afe_ret = dchid_set_afe(iface->dchid, state == 0);
++		if (afe_ret < 0)
++			put_unaligned_le32(0xe00002bc, &msg2[5]);
++	}
++
+ 	msg2[4] = 1;
+-	return dchid_comm_cmd(iface->dchid, msg2, sizeof(msg2));
++	ret = dchid_comm_cmd(iface->dchid, msg2, sizeof(msg2));
++	return afe_ret < 0 ? afe_ret : ret;
+ }
+ 
+ static int dchid_register_ring(struct dockchannel_hid *dchid)
+@@ -523,7 +611,9 @@ static int dchid_request_gpio(struct dchid_iface *iface)
+ 	char prop_name[MAX_GPIO_NAME + 16];
+ 
+ 	if (iface->dchid->use_ring) {
+-		dev_err_once(iface->dchid->dev, "T8132 SMC reset GPIO operation is not established\n");
++		if (dchid_uses_afe(iface))
++			return dchid_get_afe(iface->dchid);
++		dev_err(iface->dchid->dev, "No T8132 operation for GPIO %s\n", iface->gpio_name);
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+@@ -952,7 +1042,7 @@ static void dchid_handle_gpio(struct dockchannel_hid *dchid, void *data, size_t
+ 	if (dchid_request_gpio(iface) < 0)
+ 		goto err;
+ 
+-	if (!iface->gpio || cmd->gpio != iface->gpio_id) {
++	if ((!iface->gpio && !dchid->use_ring) || cmd->gpio != iface->gpio_id) {
+ 		dev_err(dchid->dev, "Got GPIO command for bad GPIO %s#%d\n",
+ 			iface->name, cmd->gpio);
+ 		goto err;
+@@ -963,6 +1053,11 @@ static void dchid_handle_gpio(struct dockchannel_hid *dchid, void *data, size_t
+ 	switch (cmd->cmd) {
+ 	case 3:
+ 		/* Pulse.  */
++		if (dchid->use_ring) {
++			if (!dchid_set_afe(dchid, true) && !dchid_set_afe(dchid, false))
++				retcode = 0;
++			break;
++		}
+ 		gpiod_set_value_cansleep(iface->gpio, 1);
+ 		msleep(10); /* Random guess... */
+ 		gpiod_set_value_cansleep(iface->gpio, 0);

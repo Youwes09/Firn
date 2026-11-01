@@ -1,0 +1,45 @@
+From 1f186654f1af502a8c495271090c5629169596b5 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 21 Jan 2025 23:35:27 +0100
+Subject: [PATCH] drm: apple: dptx: Configure number of lanes for dptx-phy
+
+Configuring the number of lanes is required for M2* desktop devices
+either if those were not initialized by m1n1 or after hotplug.
+
+Fixes: 07e4bfb1599bc ("drm: apple: dptx: Tidy up lane count handling")
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dptxep.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index e3cbfa61abc0..09357d4d0b88 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -306,6 +306,9 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
+ 	case 0 ... 2:
+ 	case 4:
+ 		dptx->phy_ops.dp.lanes = lane_count;
++		// Use dptx phy index > 3 as indication for dptx-phy or
++		// lpdptx-phy and configure the number of lanes for those
++		dptx->phy_ops.dp.set_lanes = (dcp->dptx_phy > 3);
+ 		break;
+ 	default:
+ 		dev_err(dcp->dev, "set_active_lane_count: invalid lane count:%llu\n", lane_count);
+@@ -314,6 +317,16 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
+ 		break;
+ 	}
+ 
++	if (dptx->phy_ops.dp.set_lanes) {
++		if (dptx->atcphy) {
++			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
++			if (ret)
++				return ret;
++		}
++		dptx->phy_ops.dp.set_lanes = 0;
++		dptx->lane_count = lane_count;
++	}
++
+ 	reply->retcode = cpu_to_le32(retcode);
+ 	reply->lane_count = cpu_to_le64(lane_count);
+ 

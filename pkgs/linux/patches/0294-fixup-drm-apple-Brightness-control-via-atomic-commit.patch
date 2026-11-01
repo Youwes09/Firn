@@ -1,0 +1,22 @@
+From f0ef4fa73a092129e2dbf5cffa65a976d2814efc Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 27 Dec 2025 11:42:53 +0100
+Subject: [PATCH] fixup! drm: apple: Brightness control via atomic commits
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/apple/Kconfig b/drivers/gpu/drm/apple/Kconfig
+index 9828a5fa1932..df247b6ed77d 100644
+--- a/drivers/gpu/drm/apple/Kconfig
++++ b/drivers/gpu/drm/apple/Kconfig
+@@ -10,6 +10,7 @@ config DRM_APPLE
+ 	select DRM_KMS_DMA_HELPER
+ 	select DRM_GEM_DMA_HELPER
+ 	select VIDEOMODE_HELPERS
++	select BACKLIGHT_CLASS_DEVICE
+ 	select MULTIPLEXER
+ 	help
+ 	  Say Y if you have an Apple Silicon chipset.

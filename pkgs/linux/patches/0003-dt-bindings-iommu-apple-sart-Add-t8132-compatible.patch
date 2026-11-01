@@ -1,0 +1,24 @@
+From d4a53be624e1e8fdcb68efc285463babebd6082c Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 12:13:13 -0500
+Subject: [PATCH] dt-bindings: iommu: apple,sart: Add t8132 compatible
+
+The M4 (t8132) SART is compatible with the t6000 SART3.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/iommu/apple,sart.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/iommu/apple,sart.yaml b/Documentation/devicetree/bindings/iommu/apple,sart.yaml
+index 88e66d4b13c6..6119e8fa2e32 100644
+--- a/Documentation/devicetree/bindings/iommu/apple,sart.yaml
++++ b/Documentation/devicetree/bindings/iommu/apple,sart.yaml
+@@ -33,6 +33,7 @@ properties:
+           - enum:
+               - apple,t6020-sart
+               - apple,t8112-sart
++              - apple,t8132-sart
+           - const: apple,t6000-sart
+       - enum:
+           - apple,t6000-sart

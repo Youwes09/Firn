@@ -1,0 +1,61 @@
+From 814ab9b4c4e86007be20a3365aba4dfdb68d094c Mon Sep 17 00:00:00 2001
+From: Patrick Blass <patrickblass.dev@gmail.com>
+Date: Sun, 3 Sep 2023 15:34:06 +0200
+Subject: [PATCH] brcmfmac: Fix AP mode
+
+Fix access point mode by bringing firmware into appropriate state before setting up the device.
+
+Signed-off-by: Patrick Blass <patrickblass.dev@gmail.com>
+(cherry picked from commit 8efe37de73af9faaed2c8fb82cf8bc55a95a941f)
+
+Original-Commit: 73d59000a58c53cf17afa3767345ce23e2fc8f29
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    | 19 +++++++++++++++++++
+ .../broadcom/brcm80211/include/brcmu_wifi.h   |  2 ++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index e2e96bbdd3d7..f977cc0a5b15 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -5294,6 +5294,25 @@ brcmf_cfg80211_start_ap(struct wiphy *wiphy, struct net_device *ndev,
+ 		  settings->inactivity_timeout);
+ 	dev_role = ifp->vif->wdev.iftype;
+ 	mbss = ifp->vif->mbss;
++	/* Bring firmware into correct state for AP mode*/
++	if (dev_role == NL80211_IFTYPE_AP) {
++		brcmf_dbg(TRACE, "set AP mode\n");
++		err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_AP, 1);
++		if (err < 0) {
++			bphy_err(drvr, "setting AP mode failed %d\n",
++				err);
++			goto exit;
++		}
++
++		bss_enable.bsscfgidx = cpu_to_le32(ifp->bsscfgidx);
++		bss_enable.enable = cpu_to_le32(WLC_AP_IOV_OP_MANUAL_AP_BSSCFG_CREATE);
++		err = brcmf_fil_iovar_data_set(ifp, "bss", &bss_enable,
++							sizeof(bss_enable));
++		if (err < 0) {
++			bphy_err(drvr, "AP role set error, %d\n", err);
++			goto exit;
++		}
++	}
+ 
+ 	/* store current 11d setting */
+ 	if (brcmf_fil_cmd_int_get(ifp, BRCMF_C_GET_REGULATORY,
+diff --git a/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h b/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h
+index c465208c4331..3c10e93b215e 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h
++++ b/drivers/net/wireless/broadcom/brcm80211/include/brcmu_wifi.h
+@@ -94,6 +94,8 @@
+ #define	WLC_BAND_2G			2	/* 2.4 Ghz */
+ #define	WLC_BAND_ALL			3	/* all bands */
+ 
++#define WLC_AP_IOV_OP_MANUAL_AP_BSSCFG_CREATE	2
++
+ #define CHSPEC_CHANNEL(chspec)	((u8)((chspec) & WL_CHANSPEC_CHAN_MASK))
+ #define CHSPEC_BAND(chspec)	((chspec) & WL_CHANSPEC_BAND_MASK)
+ 

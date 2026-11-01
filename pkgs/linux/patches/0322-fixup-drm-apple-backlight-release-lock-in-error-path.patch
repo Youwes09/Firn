@@ -1,0 +1,24 @@
+From c63b7e033937586ef6ff7bcd3c7a8a40e110c43e Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 23 Aug 2026 22:56:48 +0200
+Subject: [PATCH] fixup! drm: apple: backlight: release lock in error path
+
+---
+ drivers/gpu/drm/apple/dcp_backlight.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
+index b4a046c7c145..4b3e47e0ba73 100644
+--- a/drivers/gpu/drm/apple/dcp_backlight.c
++++ b/drivers/gpu/drm/apple/dcp_backlight.c
+@@ -156,8 +156,8 @@ static int drm_crtc_set_brightness(struct apple_dcp *dcp)
+ 	if (!dcp->brightness.update)
+ 		goto done;
+ 
+-	state = drm_atomic_state_alloc(crtc->dev);
+-	if (!state) {
++	commit = drm_atomic_commit_alloc(crtc->dev);
++	if (!commit) {
+ 		ret = -ENOMEM;
+ 		goto done;
+ 	}

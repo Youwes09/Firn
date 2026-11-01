@@ -1,0 +1,276 @@
+From ac2bf59f1dd7de0b6999204b9093e41ac59fab46 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 12 Nov 2023 10:06:45 +0100
+Subject: [PATCH] drm: apple: Move offsets for rt_bandwidth callback to DT
+
+The offsets differ for every DCP instance. Instead of hardcoding offsets
+for each SoC family offsets and calculate the instance offset move
+everything to the device tree. This helps multi die SoCs since there is
+and unexpected offset between both dies.
+On multi die SoCs device tree changes were necessary to avoid
+translating the PMGR reg via the seconds die "ranges" property.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp-internal.h   |   8 ++
+ drivers/gpu/drm/apple/dcp.c            | 122 ++++++++++++++++++++++++-
+ drivers/gpu/drm/apple/iomfb_template.c |  51 +++++------
+ 3 files changed, 151 insertions(+), 30 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index b7b5c9dcc046..d7ffb8146e42 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -6,6 +6,7 @@
+ 
+ #include <linux/backlight.h>
+ #include <linux/device.h>
++#include <linux/ioport.h>
+ #include <linux/mutex.h>
+ #include <linux/mux/consumer.h>
+ #include <linux/phy/phy.h>
+@@ -136,6 +137,13 @@ struct apple_dcp {
+ 	struct resource *disp_registers[MAX_DISP_REGISTERS];
+ 	unsigned int nr_disp_registers;
+ 
++	struct resource disp_bw_scratch_res;
++	struct resource disp_bw_doorbell_res;
++	u32 disp_bw_scratch_index;
++	u32 disp_bw_scratch_offset;
++	u32 disp_bw_doorbell_index;
++	u32 disp_bw_doorbell_offset;
++
+ 	u32 index;
+ 
+ 	/* Bitmap of memory descriptors used for mappings made by the DCP */
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 96dfb0a8a5c1..09f9bda27500 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -13,6 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
++#include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_platform.h>
+ #include <linux/slab.h>
+@@ -471,11 +472,108 @@ static int dcp_create_piodma_iommu_dev(struct apple_dcp *dcp)
+ 	return ret;
+ }
+ 
++static int dcp_get_bw_scratch_reg(struct apple_dcp *dcp, u32 expected)
++{
++	struct of_phandle_args ph_args;
++	u32 addr_idx, disp_idx, offset;
++	int ret;
++
++	ret = of_parse_phandle_with_args(dcp->dev->of_node, "apple,bw-scratch",
++				   "#apple,bw-scratch-cells", 0, &ph_args);
++	if (ret < 0) {
++		dev_err(dcp->dev, "Failed to read 'apple,bw-scratch': %d\n", ret);
++		return ret;
++	}
++
++	if (ph_args.args_count != 3) {
++		dev_err(dcp->dev, "Unexpected 'apple,bw-scratch' arg count %d\n",
++			ph_args.args_count);
++		ret = -EINVAL;
++		goto err_of_node_put;
++	}
++
++	addr_idx = ph_args.args[0];
++	disp_idx = ph_args.args[1];
++	offset = ph_args.args[2];
++
++	if (disp_idx != expected || disp_idx >= MAX_DISP_REGISTERS) {
++		dev_err(dcp->dev, "Unexpected disp_reg value in 'apple,bw-scratch': %d\n",
++			disp_idx);
++		ret = -EINVAL;
++		goto err_of_node_put;
++	}
++
++	ret = of_address_to_resource(ph_args.np, addr_idx, &dcp->disp_bw_scratch_res);
++	if (ret < 0) {
++		dev_err(dcp->dev, "Failed to get 'apple,bw-scratch' resource %d from %pOF\n",
++			addr_idx, ph_args.np);
++		goto err_of_node_put;
++	}
++	if (offset > resource_size(&dcp->disp_bw_scratch_res) - 4) {
++		ret = -EINVAL;
++		goto err_of_node_put;
++	}
++
++	dcp->disp_registers[disp_idx] = &dcp->disp_bw_scratch_res;
++	dcp->disp_bw_scratch_index = disp_idx;
++	dcp->disp_bw_scratch_offset = offset;
++	ret = 0;
++
++err_of_node_put:
++	of_node_put(ph_args.np);
++	return ret;
++}
++
++static int dcp_get_bw_doorbell_reg(struct apple_dcp *dcp, u32 expected)
++{
++	struct of_phandle_args ph_args;
++	u32 addr_idx, disp_idx;
++	int ret;
++
++	ret = of_parse_phandle_with_args(dcp->dev->of_node, "apple,bw-doorbell",
++				   "#apple,bw-doorbell-cells", 0, &ph_args);
++	if (ret < 0) {
++		dev_err(dcp->dev, "Failed to read 'apple,bw-doorbell': %d\n", ret);
++		return ret;
++	}
++
++	if (ph_args.args_count != 2) {
++		dev_err(dcp->dev, "Unexpected 'apple,bw-doorbell' arg count %d\n",
++			ph_args.args_count);
++		ret = -EINVAL;
++		goto err_of_node_put;
++	}
++
++	addr_idx = ph_args.args[0];
++	disp_idx = ph_args.args[1];
++
++	if (disp_idx != expected || disp_idx >= MAX_DISP_REGISTERS) {
++		dev_err(dcp->dev, "Unexpected disp_reg value in 'apple,bw-doorbell': %d\n",
++			disp_idx);
++		ret = -EINVAL;
++		goto err_of_node_put;
++	}
++
++	ret = of_address_to_resource(ph_args.np, addr_idx, &dcp->disp_bw_doorbell_res);
++	if (ret < 0) {
++		dev_err(dcp->dev, "Failed to get 'apple,bw-doorbell' resource %d from %pOF\n",
++			addr_idx, ph_args.np);
++		goto err_of_node_put;
++	}
++	dcp->disp_bw_doorbell_index = disp_idx;
++	dcp->disp_registers[disp_idx] = &dcp->disp_bw_doorbell_res;
++	ret = 0;
++
++err_of_node_put:
++	of_node_put(ph_args.np);
++	return ret;
++}
++
+ static int dcp_get_disp_regs(struct apple_dcp *dcp)
+ {
+ 	struct platform_device *pdev = to_platform_device(dcp->dev);
+ 	int count = pdev->num_resources - 1;
+-	int i;
++	int i, ret;
+ 
+ 	if (count <= 0 || count > MAX_DISP_REGISTERS)
+ 		return -EINVAL;
+@@ -485,6 +583,20 @@ static int dcp_get_disp_regs(struct apple_dcp *dcp)
+ 			platform_get_resource(pdev, IORESOURCE_MEM, 1 + i);
+ 	}
+ 
++	/* load pmgr bandwidth scratch resource and offset */
++	ret = dcp_get_bw_scratch_reg(dcp, count);
++	if (ret < 0)
++		return ret;
++	count += 1;
++
++	/* load pmgr bandwidth doorbell resource if present (only on t8103) */
++	if (of_property_present(dcp->dev->of_node, "apple,bw-doorbell")) {
++		ret = dcp_get_bw_doorbell_reg(dcp, count);
++		if (ret < 0)
++			return ret;
++		count += 1;
++	}
++
+ 	dcp->nr_disp_registers = count;
+ 	return 0;
+ }
+@@ -723,6 +835,14 @@ static int dcp_platform_probe(struct platform_device *pdev)
+ 	if (fw_compat == DCP_FIRMWARE_UNKNOWN)
+ 		return -ENODEV;
+ 
++	/* Check for "apple,bw-scratch" to avoid probing appledrm with outdated
++	 * device trees. This prevents replacing simpledrm and ending up without
++	 * display.
++	 */
++	if (!of_property_present(dev->of_node, "apple,bw-scratch"))
++		return dev_err_probe(dev, -ENODEV, "Incompatible devicetree! "
++			"Use devicetree matching this kernel.\n");
++
+ 	dcp = devm_kzalloc(dev, sizeof(*dcp), GFP_KERNEL);
+ 	if (!dcp)
+ 		return -ENOMEM;
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 1b27c9fd7607..cbd22184baaa 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -33,11 +33,7 @@
+ #include "version_utils.h"
+ 
+ /* Register defines used in bandwidth setup structure */
+-#define REG_SCRATCH (0x14)
+-#define REG_SCRATCH_T600X (0x988)
+-#define REG_SCRATCH_T602X (0x1208)
+-#define REG_DOORBELL (0x0)
+-#define REG_DOORBELL_BIT (2)
++#define REG_DOORBELL_BIT(idx) (2 + (idx))
+ 
+ struct dcp_wait_cookie {
+ 	struct kref refcount;
+@@ -665,34 +661,31 @@ static struct dcp_allocate_bandwidth_resp dcpep_cb_allocate_bandwidth(struct app
+ 
+ static struct dcp_rt_bandwidth dcpep_cb_rt_bandwidth(struct apple_dcp *dcp)
+ {
+-	if (dcp->disp_registers[5] && dcp->disp_registers[6]) {
+-		return (struct dcp_rt_bandwidth){
+-			.reg_scratch =
+-				dcp->disp_registers[5]->start + REG_SCRATCH,
+-			.reg_doorbell =
+-				dcp->disp_registers[6]->start + REG_DOORBELL,
+-			.doorbell_bit = REG_DOORBELL_BIT,
+-
+-			.padding[3] = 0x4, // XXX: required by 11.x firmware
+-		};
+-	} else if (dcp->disp_registers[4]) {
+-		u32 offset = REG_SCRATCH_T600X;
+-		if (of_device_is_compatible(dcp->dev->of_node, "apple,t6020-dcp"))
+-			offset = REG_SCRATCH_T602X;
+-
+-		return (struct dcp_rt_bandwidth){
+-			.reg_scratch = dcp->disp_registers[4]->start +
+-				       offset,
+-			.reg_doorbell = 0,
+-			.doorbell_bit = 0,
+-		};
+-	} else {
+-		return (struct dcp_rt_bandwidth){
++	struct dcp_rt_bandwidth rt_bw = (struct dcp_rt_bandwidth){
+ 			.reg_scratch = 0,
+ 			.reg_doorbell = 0,
+ 			.doorbell_bit = 0,
+-		};
++	};
++
++	if (dcp->disp_bw_scratch_index) {
++		u32 offset = dcp->disp_bw_scratch_offset;
++		u32 index = dcp->disp_bw_scratch_index;
++		rt_bw.reg_scratch = dcp->disp_registers[index]->start + offset;
+ 	}
++
++	if (dcp->disp_bw_doorbell_index) {
++		u32 index = dcp->disp_bw_doorbell_index;
++		rt_bw.reg_doorbell = dcp->disp_registers[index]->start;
++		rt_bw.doorbell_bit = REG_DOORBELL_BIT(dcp->index);
++		/*
++		 * This is most certainly not padding. t8103-dcp crashes without
++		 * setting this immediately during modeset on 12.3 and 13.5
++		 * firmware.
++		 */
++		rt_bw.padding[3] = 0x4;
++	}
++
++	return rt_bw;
+ }
+ 
+ static struct dcp_set_frame_sync_props_resp

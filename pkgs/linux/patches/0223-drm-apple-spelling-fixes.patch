@@ -1,0 +1,102 @@
+From 5740637b205076843198ef498cc1dc9039ab4d49 Mon Sep 17 00:00:00 2001
+From: Jonathan Gray <jsg@jsg.id.au>
+Date: Mon, 22 Jan 2024 18:54:31 +1100
+Subject: [PATCH] drm/apple: spelling fixes
+
+Signed-off-by: Jonathan Gray <jsg@jsg.id.au>
+---
+ drivers/gpu/drm/apple/apple_drv.c      | 2 +-
+ drivers/gpu/drm/apple/dcp-internal.h   | 2 +-
+ drivers/gpu/drm/apple/dcp.c            | 4 ++--
+ drivers/gpu/drm/apple/iomfb.c          | 2 +-
+ drivers/gpu/drm/apple/iomfb_template.c | 2 +-
+ drivers/gpu/drm/apple/iomfb_v13_3.c    | 2 +-
+ 6 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 6dcebb5c6220..3483a30f6f28 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -459,7 +459,7 @@ static int apple_drm_init_dcp(struct device *dev)
+ 		ret = dcp_wait_ready(dcp[i], wait);
+ 		/* There is nothing we can do if a dcp/dcpext does not boot
+ 		 * (successfully). Ignoring it should not do any harm now.
+-		 * Needs to reevaluated whenn adding dcpext support.
++		 * Needs to reevaluated when adding dcpext support.
+ 		 */
+ 		if (ret)
+ 			dev_warn(dev, "DCP[%d] not ready: %d\n", i, ret);
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 72b4ca86ed31..b6fc500e7453 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -95,7 +95,7 @@ struct dcp_panel {
+ 	int width_mm;
+ 	/// panel height in millimeter
+ 	int height_mm;
+-	/// panel has a mini-LED backllight
++	/// panel has a mini-LED backlight
+ 	bool has_mini_led;
+ };
+ 
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 0aa4d27343f8..0319d8feda1e 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -804,7 +804,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 	if (dcp->notch_height > 0)
+ 		dev_info(dev, "Detected display with notch of %u pixel\n", dcp->notch_height);
+ 
+-	/* intialize brightness scale to a sensible default to avoid divide by 0*/
++	/* initialize brightness scale to a sensible default to avoid divide by 0*/
+ 	dcp->brightness.scale = 65536;
+ 	panel_np = of_get_compatible_child(dev->of_node, "apple,panel-mini-led");
+ 	if (panel_np)
+@@ -873,7 +873,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 	dcp->rtk = devm_apple_rtkit_init(dev, dcp, "mbox", 0, &rtkit_ops);
+ 	if (IS_ERR(dcp->rtk))
+ 		return dev_err_probe(dev, PTR_ERR(dcp->rtk),
+-				     "Failed to intialize RTKit");
++				     "Failed to initialize RTKit");
+ 
+ 	ret = apple_rtkit_wake(dcp->rtk);
+ 	if (ret)
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index e3b9abebe5ed..1d5e0bf4b197 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -274,7 +274,7 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
+ 	out = in + hdr->in_len;
+ 
+ 	// TODO: verify that in_len and out_len match our prototypes
+-	// for now just clear the out data to have at least consistant results
++	// for now just clear the out data to have at least consistent results
+ 	if (hdr->out_len)
+ 		memset(out, 0, hdr->out_len);
+ 
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 4639f774ba49..d01958aeca22 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -326,7 +326,7 @@ static void dcpep_cb_unmap_piodma(struct apple_dcp *dcp,
+ 
+ /*
+  * Allocate an IOVA contiguous buffer mapped to the DCP. The buffer need not be
+- * physically contigiuous, however we should save the sgtable in case the
++ * physically contiguous, however we should save the sgtable in case the
+  * buffer needs to be later mapped for PIODMA.
+  */
+ static struct dcp_allocate_buffer_resp
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_3.c b/drivers/gpu/drm/apple/iomfb_v13_3.c
+index 1ee29112be45..115490fd9cc6 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_3.c
+@@ -53,7 +53,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[110] = trampoline_true, /* create_pmu_service */
+ 	[111] = trampoline_true, /* create_iomfb_service */
+ 	[112] = trampoline_create_backlight_service,
+-	[113] = trampoline_true, /* create_nvram_servce? */
++	[113] = trampoline_true, /* create_nvram_service? */
+ 	[114] = trampoline_get_tiling_state,
+ 	[115] = trampoline_false, /* set_tiling_state */
+ 	[120] = dcpep_cb_boot_1,

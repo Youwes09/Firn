@@ -11,6 +11,9 @@ in
   config = lib.mkIf cfg.enable {
     # /run survives switch-root; activation links it before udev loads drivers.
     boot.initrd.systemd.tmpfiles.settings."10-firn-vendorfw"."/run/vendorfw".C.argument = "/vendorfw";
+    # Drivers that bind in the initrd, such as the trackpad's, find it here.
+    # Stage 2 sets its own path and keeps /lib/firmware.
+    boot.kernelParams = [ "firmware_class.path=/vendorfw" ];
     system.activationScripts.firn-vendorfw = ''
       mkdir -p /lib
       ln -sfn /run/vendorfw /lib/firmware
@@ -23,7 +26,8 @@ in
       '')
     ];
 
-    hardware.wirelessRegulatoryDatabase = cfg.wifiRegion != null;
+    # cfg80211 loads it at boot, region set or not.
+    hardware.wirelessRegulatoryDatabase = true;
     boot.extraModprobeConfig = lib.mkIf (cfg.wifiRegion != null) ''
       options cfg80211 ieee80211_regdom="${cfg.wifiRegion}"
     '';

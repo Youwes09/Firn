@@ -1,0 +1,29 @@
+From fa9661cdbe5b5d498765931b9b194933b7571858 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 18 Aug 2026 05:57:36 -0400
+Subject: [PATCH] wifi: brcmfmac: Accept bss_info up to v116
+
+The BCM4388 firmware on M4 (t8132) Macs reports a bss_info version
+above 112, and scan results with an unsupported version are dropped.
+Accept versions up to 116.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+[Youwes09: split from Gravity Linux 877c574dfa4f3]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index 7b8f809cdc41..b37f59ca75f8 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -19,7 +19,7 @@
+ #define BRCMF_ARP_OL_PEER_AUTO_REPLY	0x00000008
+ 
+ #define	BRCMF_BSS_INFO_MIN_VERSION	109 /* min ver of brcmf_bss_info_le struct */
+-#define	BRCMF_BSS_INFO_MAX_VERSION	112 /* max ver of brcmf_bss_info_le struct */
++#define	BRCMF_BSS_INFO_MAX_VERSION	116 /* max ver of brcmf_bss_info_le struct */
+ #define BRCMF_BSS_RSSI_ON_CHANNEL	0x0004
+ 
+ #define BRCMF_STA_BRCM			0x00000001	/* Running a Broadcom driver */

@@ -1,0 +1,101 @@
+From 1651d1043bd454d0b8a6ab7132ff31b9b426538c Mon Sep 17 00:00:00 2001
+From: Sven Peter <sven@svenpeter.dev>
+Date: Sat, 5 Nov 2022 13:15:34 +0100
+Subject: [PATCH] drm: apple: Add oob hotplug event
+
+Signed-off-by: Sven Peter <sven@svenpeter.dev>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 17 +++++++++++++++++
+ drivers/gpu/drm/apple/dcp.c       | 22 ++++++++++++++++++++++
+ drivers/gpu/drm/apple/dcp.h       |  3 +++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index e3988701e0cc..613856d0af58 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -190,6 +190,22 @@ apple_connector_detect(struct drm_connector *connector, bool force)
+ 						  connector_status_disconnected;
+ }
+ 
++static void apple_connector_oob_hotplug(struct drm_connector *connector,
++					enum drm_connector_status status)
++{
++	struct apple_connector *apple_connector = to_apple_connector(connector);
++
++	printk("#### oob_hotplug status:0x%x ####\n", (u32)status);
++
++	if (status == connector_status_connected)
++		dcp_dptx_connect_oob(apple_connector->dcp, 0);
++	else if (status == connector_status_disconnected)
++		dcp_dptx_disconnect_oob(apple_connector->dcp, 0);
++	else
++		dev_err(&apple_connector->dcp->dev, "unexpected connector status"
++			":0x%x in oob_hotplug event\n", (u32)status);
++}
++
+ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+ 				     struct drm_atomic_state *state)
+ {
+@@ -278,6 +294,7 @@ static const struct drm_connector_funcs apple_connector_funcs = {
+ 	.atomic_destroy_state	= drm_atomic_helper_connector_destroy_state,
+ 	.detect			= apple_connector_detect,
+ 	.debugfs_init		= apple_connector_debugfs_init,
++	.oob_hotplug_event	= apple_connector_oob_hotplug,
+ };
+ 
+ static const struct drm_connector_helper_funcs apple_connector_helper_funcs = {
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 8ee980bfc6af..7973bcc52575 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -397,6 +397,17 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 	return ret;
+ }
+ 
++int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++	int err = dcp_dptx_connect(dcp, port);
++	if (err < 0)
++		return err;
++	dptxport_set_hpd(dcp->dptxport[port].service, true);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dcp_dptx_connect_oob);
++
+ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ {
+ 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
+@@ -411,6 +422,17 @@ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ 	return 0;
+ }
+ 
++int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	if (dcp->dptxport[port].enabled)
++		dptxport_set_hpd(dcp->dptxport[port].service, false);
++
++	return dcp_dptx_disconnect(dcp, port);
++}
++EXPORT_SYMBOL_GPL(dcp_dptx_disconnect_oob);
++
+ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
+ {
+ 	struct apple_dcp *dcp = data;
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 866a1a87d3fd..df3d767ac4ba 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -52,6 +52,9 @@ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ void dcp_set_dimensions(struct apple_dcp *dcp);
+ void dcp_send_message(struct apple_dcp *dcp, u8 endpoint, u64 message);
+ 
++int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port);
++int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port);
++
+ int iomfb_start_rtkit(struct apple_dcp *dcp);
+ void iomfb_shutdown(struct apple_dcp *dcp);
+ /* rtkit message handler for IOMFB messages */

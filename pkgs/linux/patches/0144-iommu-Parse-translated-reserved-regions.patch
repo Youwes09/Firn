@@ -1,0 +1,64 @@
+From 3b7c6bbfc57661d0b18b350dc82e691c8ad1dc66 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 22 Oct 2022 12:24:54 +0200
+Subject: [PATCH] iommu: Parse translated reserved regions
+
+These regions are setup by the boot loader and require an iommu to
+translate arbitray physical to device VA mappings.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/iommu/dma-iommu.c |  9 +++++++--
+ drivers/iommu/of_iommu.c  | 11 +++++++----
+ 2 files changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/iommu/dma-iommu.c b/drivers/iommu/dma-iommu.c
+index 78742aeba932..29cc54a1d416 100644
+--- a/drivers/iommu/dma-iommu.c
++++ b/drivers/iommu/dma-iommu.c
+@@ -574,8 +574,13 @@ static int iova_reserve_iommu_regions(struct device *dev,
+ 		if (region->type == IOMMU_RESV_SW_MSI)
+ 			continue;
+ 
+-		lo = iova_pfn(iovad, region->start);
+-		hi = iova_pfn(iovad, region->start + region->length - 1);
++		if (region->type == IOMMU_RESV_TRANSLATED) {
++			lo = iova_pfn(iovad, region->dva);
++			hi = iova_pfn(iovad, region->dva + region->length - 1);
++		} else {
++			lo = iova_pfn(iovad, region->start);
++			hi = iova_pfn(iovad, region->start + region->length - 1);
++		}
+ 		reserve_iova(iovad, lo, hi);
+ 
+ 		if (region->type == IOMMU_RESV_MSI)
+diff --git a/drivers/iommu/of_iommu.c b/drivers/iommu/of_iommu.c
+index a18bb60f6f3d..a77ec6c3f9b8 100644
+--- a/drivers/iommu/of_iommu.c
++++ b/drivers/iommu/of_iommu.c
+@@ -185,9 +185,7 @@ iommu_resv_region_get_type(struct device *dev,
+ 	if (start == phys->start && end == phys->end)
+ 		return IOMMU_RESV_DIRECT;
+ 
+-	dev_warn(dev, "treating non-direct mapping [%pr] -> [%pap-%pap] as reservation\n", phys,
+-		 &start, &end);
+-	return IOMMU_RESV_RESERVED;
++	return IOMMU_RESV_TRANSLATED;
+ }
+ 
+ /**
+@@ -258,8 +256,13 @@ void of_iommu_get_resv_regions(struct device *dev, struct list_head *list)
+ 				}
+ 				type = iommu_resv_region_get_type(dev, &phys, iova, length);
+ 
+-				region = iommu_alloc_resv_region(iova, length, prot, type,
++				if (type == IOMMU_RESV_TRANSLATED)
++					region = iommu_alloc_resv_region_tr(phys.start, iova, length, prot, type,
++								    GFP_KERNEL);
++				else
++					region = iommu_alloc_resv_region(iova, length, prot, type,
+ 								 GFP_KERNEL);
++
+ 				if (region)
+ 					list_add_tail(&region->list, list);
+ 			}

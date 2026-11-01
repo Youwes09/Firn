@@ -1,0 +1,83 @@
+From 97f57450e3ffee021790949e159f5f8d60874492 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 23 Nov 2023 22:58:16 +0100
+Subject: [PATCH] drm: apple: Move modeset into drm_crtc's atomic_enable
+
+squash! drm: apple: Extract modeset crtc's atomic_flush()
+Fixes: 99d7bb861908 ("drm: apple: Extract modeset crtc's atomic_flush()")
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c |  5 +++--
+ drivers/gpu/drm/apple/dcp.h       |  4 ++--
+ drivers/gpu/drm/apple/iomfb.c     | 12 +++++-------
+ 3 files changed, 10 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 93c1c1038ae1..51f3e873a1e2 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -200,6 +200,9 @@ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+ 		dcp_poweron(apple_crtc->dcp);
+ 		dev_dbg(&apple_crtc->dcp->dev, "%s finished", __func__);
+ 	}
++
++	if (crtc_state->active)
++		dcp_crtc_atomic_modeset(crtc, state);
+ }
+ 
+ static void apple_crtc_atomic_disable(struct drm_crtc *crtc,
+@@ -301,8 +304,6 @@ static const struct drm_connector_funcs apple_connector_funcs = {
+ static const struct drm_connector_helper_funcs apple_connector_helper_funcs = {
+ 	.get_modes		= dcp_get_modes,
+ 	.mode_valid		= dcp_mode_valid,
+-	.atomic_check		= dcp_connector_atomic_check,
+-
+ };
+ 
+ static const struct drm_crtc_helper_funcs apple_crtc_helper_funcs = {
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 4fa76418802b..268bda8fa3bf 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -57,8 +57,8 @@ void dcp_drm_crtc_vblank(struct apple_crtc *crtc);
+ int dcp_get_modes(struct drm_connector *connector);
+ int dcp_mode_valid(struct drm_connector *connector,
+ 		   struct drm_display_mode *mode);
+-int dcp_connector_atomic_check(struct drm_connector *connector,
+-			       struct drm_atomic_state *state);
++int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
++			    struct drm_atomic_state *state);
+ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ 			 const struct drm_display_mode *mode,
+ 			 struct drm_display_mode *adjusted_mode);
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 3ca3563ee250..f2a17c1b92c2 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -422,13 +422,11 @@ int dcp_mode_valid(struct drm_connector *connector,
+ }
+ EXPORT_SYMBOL_GPL(dcp_mode_valid);
+ 
+-int dcp_connector_atomic_check(struct drm_connector *connector,
+-			       struct drm_atomic_state *state)
++int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
++			    struct drm_atomic_state *state)
+ {
+-	struct apple_connector *apple_connector = to_apple_connector(connector);
+-	struct platform_device *pdev = apple_connector->dcp;
+-	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+-	struct drm_crtc *crtc = &dcp->crtc->base;
++	struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
++	struct apple_dcp *dcp = platform_get_drvdata(apple_crtc->dcp);
+ 	struct drm_crtc_state *crtc_state;
+ 	int ret = -EIO;
+ 	bool modeset;
+@@ -461,7 +459,7 @@ int dcp_connector_atomic_check(struct drm_connector *connector,
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL_GPL(dcp_connector_atomic_check);
++EXPORT_SYMBOL_GPL(dcp_crtc_atomic_modeset);
+ 
+ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ 			 const struct drm_display_mode *mode,

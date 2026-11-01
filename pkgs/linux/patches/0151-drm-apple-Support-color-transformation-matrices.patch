@@ -1,0 +1,111 @@
+From 3ee7824871b67669db6448592ff7c719a4f3d986 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 12 Mar 2023 21:38:50 +0100
+Subject: [PATCH] drm/apple: Support color transformation matrices
+
+kwin 5.27.3 adds support for "Night Color" via drm "CTM" properties.
+Wire CTM support up via the "set_matrix" iomfb call.
+
+Link: https://bugs.kde.org/show_bug.cgi?id=455720
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c      |  1 +
+ drivers/gpu/drm/apple/iomfb.h          | 12 ++++++++++++
+ drivers/gpu/drm/apple/iomfb_template.c | 11 ++++++++++-
+ drivers/gpu/drm/apple/iomfb_v12_3.c    |  1 +
+ drivers/gpu/drm/apple/iomfb_v13_2.c    |  1 +
+ 5 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index f4da8b3f8ec4..1fb2a70fd888 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -336,6 +336,7 @@ static int apple_probe_per_dcp(struct device *dev,
+ 		return ret;
+ 
+ 	drm_crtc_helper_add(&crtc->base, &apple_crtc_helper_funcs);
++	drm_crtc_enable_color_mgmt(&crtc->base, 0, true, 0);
+ 
+ 	enc = drmm_simple_encoder_alloc(drm, struct apple_encoder, base,
+ 					DRM_MODE_ENCODER_TMDS);
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index dd69e510d6fb..ebb5079d407d 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -160,6 +160,7 @@ enum dcpep_method {
+ 	iomfbep_a358_vi_set_temperature_hint,
+ 	iomfbep_get_color_remap_mode,
+ 	iomfbep_last_client_close,
++	iomfbep_set_matrix,
+ 	dcpep_num_methods
+ };
+ 
+@@ -350,4 +351,15 @@ struct iomfb_last_client_close_resp {
+ 	u32 unkint;
+ } __packed;
+ 
++struct iomfb_set_matrix_req {
++	u32 location;
++	u64 matrix[9];
++	u8 matrix_null;
++	u8 padding[3];
++} __packed;
++
++struct iomfb_set_matrix_resp {
++	u32 ret;
++} __packed;
++
+ #endif
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index a23593237a39..65079d5b4600 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -55,6 +55,7 @@ DCP_THUNK_OUT(iomfb_a131_pmu_service_matched, iomfbep_a131_pmu_service_matched,
+ DCP_THUNK_OUT(iomfb_a132_backlight_service_matched, iomfbep_a132_backlight_service_matched, u32);
+ DCP_THUNK_OUT(iomfb_a358_vi_set_temperature_hint, iomfbep_a358_vi_set_temperature_hint, u32);
+ 
++IOMFB_THUNK_INOUT(set_matrix);
+ IOMFB_THUNK_INOUT(get_color_remap_mode);
+ IOMFB_THUNK_INOUT(last_client_close);
+ 
+@@ -1285,7 +1286,15 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 		dcp->brightness.update = false;
+ 	}
+ 
+-	do_swap(dcp, NULL, NULL);
++	if (crtc_state->color_mgmt_changed && crtc_state->ctm) {
++		struct drm_color_ctm *ctm = (struct drm_color_ctm *)crtc_state->ctm->data;
++		struct iomfb_set_matrix_req mat = {
++			.location = 9,
++		};
++		memcpy(mat.matrix, ctm->matrix, sizeof(mat.matrix));
++		iomfb_set_matrix(dcp, false, &mat, do_swap, NULL);
++	} else
++		do_swap(dcp, NULL, NULL);
+ }
+ 
+ static void res_is_main_display(struct apple_dcp *dcp, void *out, void *cookie)
+diff --git a/drivers/gpu/drm/apple/iomfb_v12_3.c b/drivers/gpu/drm/apple/iomfb_v12_3.c
+index 354abbfdb24c..c226a1139a84 100644
+--- a/drivers/gpu/drm/apple/iomfb_v12_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v12_3.c
+@@ -18,6 +18,7 @@ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+ 	IOMFB_METHOD("A410", dcpep_set_display_device),
+ 	IOMFB_METHOD("A411", dcpep_is_main_display),
+ 	IOMFB_METHOD("A412", dcpep_set_digital_out_mode),
++	IOMFB_METHOD("A422", iomfbep_set_matrix),
+ 	IOMFB_METHOD("A426", iomfbep_get_color_remap_mode),
+ 	IOMFB_METHOD("A439", dcpep_set_parameter_dcp),
+ 	IOMFB_METHOD("A443", dcpep_create_default_fb),
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_2.c b/drivers/gpu/drm/apple/iomfb_v13_2.c
+index 27f1d84e928a..63ae1e79adda 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_2.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_2.c
+@@ -18,6 +18,7 @@ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+ 	IOMFB_METHOD("A410", dcpep_set_display_device),
+ 	IOMFB_METHOD("A411", dcpep_is_main_display),
+ 	IOMFB_METHOD("A412", dcpep_set_digital_out_mode),
++	IOMFB_METHOD("A422", iomfbep_set_matrix),
+ 	IOMFB_METHOD("A426", iomfbep_get_color_remap_mode),
+ 	IOMFB_METHOD("A441", dcpep_set_parameter_dcp),
+ 	IOMFB_METHOD("A445", dcpep_create_default_fb),

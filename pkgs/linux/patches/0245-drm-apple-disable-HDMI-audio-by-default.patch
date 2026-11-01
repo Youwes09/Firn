@@ -1,0 +1,61 @@
+From cfb5463b8acfdffc4823ef42b97221f65d5a410b Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Wed, 8 May 2024 16:55:11 +0200
+Subject: [PATCH] drm: apple: disable HDMI audio by default
+
+Can be still enabled by adding `apple_dcp.hdmi_audio` the kernel command
+line.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/audio.c | 5 +++++
+ drivers/gpu/drm/apple/dcp.c   | 8 ++++----
+ 2 files changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/audio.c b/drivers/gpu/drm/apple/audio.c
+index 9266af803808..923f54212983 100644
+--- a/drivers/gpu/drm/apple/audio.c
++++ b/drivers/gpu/drm/apple/audio.c
+@@ -494,11 +494,16 @@ static void dcpaud_set_card_names(struct dcp_audio *dcpaud)
+ 	strscpy(card->shortname, "Apple DisplayPort", sizeof(card->shortname));
+ }
+ 
++extern bool hdmi_audio;
++
+ static int dcpaud_init_snd_card(struct dcp_audio *dcpaud)
+ {
+ 	int ret;
+ 	struct dma_chan *chan;
+ 
++	if (!hdmi_audio)
++		return -ENODEV;
++
+ 	chan = of_dma_request_slave_channel(dcpaud->dev->of_node, "tx");
+ 	/* squelch dma channel request errors, the driver will try again alter */
+ 	if (!chan) {
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index f81d05c47af1..f110ee6bf879 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -46,9 +46,9 @@ static bool show_notch;
+ module_param(show_notch, bool, 0644);
+ MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
+ 
+-static bool noaudio;
+-module_param(noaudio, bool, 0644);
+-MODULE_PARM_DESC(noaudio, "Skip audio support");
++bool hdmi_audio;
++module_param(hdmi_audio, bool, 0644);
++MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
+ 
+ /* HACK: moved here to avoid circular dependency between apple_drv and dcp */
+ void dcp_drm_crtc_vblank(struct apple_crtc *crtc)
+@@ -413,7 +413,7 @@ int dcp_start(struct platform_device *pdev)
+ 		dev_err(dcp->dev, "Failed to start IOMFB endpoint: %d\n", ret);
+ 
+ #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+-	if (!noaudio) {
++	if (hdmi_audio) {
+ 		ret = avep_init(dcp);
+ 		if (ret)
+ 			dev_warn(dcp->dev, "Failed to start AV endpoint: %d", ret);

@@ -1,0 +1,70 @@
+From 8e62e930f1e378844a94993db8d36ee48732926e Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 28 Feb 2023 20:34:03 +0100
+Subject: [PATCH] drm/apple: purge unused dcp_update_notify_clients_dcp
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb.c |  5 -----
+ drivers/gpu/drm/apple/iomfb.h | 18 ------------------
+ 2 files changed, 23 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 237d3a628a41..545ef7d46971 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -171,7 +171,6 @@ static u8 dcp_pop_depth(u8 *depth)
+ const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+ 	DCP_METHOD("A000", dcpep_late_init_signal),
+ 	DCP_METHOD("A029", dcpep_setup_video_limits),
+-	DCP_METHOD("A034", dcpep_update_notify_clients_dcp),
+ 	DCP_METHOD("A131", iomfbep_a131_pmu_service_matched),
+ 	DCP_METHOD("A132", iomfbep_a132_backlight_service_matched),
+ 	DCP_METHOD("A357", dcpep_set_create_dfb),
+@@ -306,10 +305,6 @@ DCP_THUNK_VOID(dcp_setup_video_limits, dcpep_setup_video_limits);
+ DCP_THUNK_VOID(dcp_set_create_dfb, dcpep_set_create_dfb);
+ DCP_THUNK_VOID(dcp_first_client_open, dcpep_first_client_open);
+ 
+-__attribute__((unused))
+-DCP_THUNK_IN(dcp_update_notify_clients_dcp, dcpep_update_notify_clients_dcp,
+-	     struct dcp_update_notify_clients_dcp);
+-
+ DCP_THUNK_INOUT(dcp_set_parameter_dcp, dcpep_set_parameter_dcp,
+ 		struct dcp_set_parameter_dcp, u32);
+ 
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index 554be323ed50..fb301eaca4f3 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -211,7 +211,6 @@ enum dcpep_method {
+ 	dcpep_flush_supports_power,
+ 	dcpep_set_power_state,
+ 	dcpep_first_client_open,
+-	dcpep_update_notify_clients_dcp,
+ 	dcpep_set_parameter_dcp,
+ 	dcpep_enable_disable_video_power_savings,
+ 	dcpep_is_main_display,
+@@ -395,23 +394,6 @@ struct dcp_set_dcpav_prop_end_req {
+ 	char key[0x40];
+ } __packed;
+ 
+-struct dcp_update_notify_clients_dcp {
+-	u32 client_0;
+-	u32 client_1;
+-	u32 client_2;
+-	u32 client_3;
+-	u32 client_4;
+-	u32 client_5;
+-	u32 client_6;
+-	u32 client_7;
+-	u32 client_8;
+-	u32 client_9;
+-	u32 client_a;
+-	u32 client_b;
+-	u32 client_c;
+-	u32 client_d;
+-} __packed;
+-
+ struct dcp_set_parameter_dcp {
+ 	u32 param;
+ 	u32 value[8];

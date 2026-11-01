@@ -1,0 +1,123 @@
+From bee7837890fe324d39a83a135f1291a9c417f274 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 30 Apr 2023 16:01:01 +0200
+Subject: [PATCH] drm: apple: Only match backlight service on DCP with panel
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp-internal.h   |  1 +
+ drivers/gpu/drm/apple/dcp.c            |  5 +++++
+ drivers/gpu/drm/apple/iomfb_template.c | 24 +++++++++++++++++++-----
+ drivers/gpu/drm/apple/iomfb_v12_3.c    |  2 +-
+ drivers/gpu/drm/apple/iomfb_v13_3.c    |  2 +-
+ 5 files changed, 27 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index a58435e19be2..ffb6984af69f 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -195,5 +195,6 @@ struct apple_dcp {
+ };
+ 
+ int dcp_backlight_register(struct apple_dcp *dcp);
++bool dcp_has_panel(struct apple_dcp *dcp);
+ 
+ #endif /* __APPLE_DCP_INTERNAL_H__ */
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index c5f53b313d80..19c1f4f4e6cf 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -85,6 +85,11 @@ void dcp_set_dimensions(struct apple_dcp *dcp)
+ 	}
+ }
+ 
++bool dcp_has_panel(struct apple_dcp *dcp)
++{
++	return dcp->panel.width_mm > 0;
++}
++
+ /*
+  * Helper to send a DRM vblank event. We do not know how call swap_submit_dcp
+  * without surfaces. To avoid timeouts in drm_atomic_helper_wait_for_vblanks
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index add3691ccba0..e9b5eb3ff6ea 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -183,6 +183,12 @@ static bool iomfbep_cb_match_backlight_service(struct apple_dcp *dcp, int tag, v
+ {
+ 	trace_iomfb_callback(dcp, tag, __func__);
+ 
++	if (!dcp_has_panel(dcp)) {
++		u8 *succ = out;
++		*succ = true;
++		return true;
++	}
++
+ 	iomfb_a132_backlight_service_matched(dcp, false, complete_backlight_service_matched, out);
+ 
+ 	// return false for deferred ACK
+@@ -194,11 +200,13 @@ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *pr
+ 	switch (prop->id) {
+ 	case IOMFB_PROPERTY_NITS:
+ 	{
+-		dcp->brightness.nits = prop->value / dcp->brightness.scale;
+-		/* notify backlight device of the initial brightness */
+-		if (!dcp->brightness.bl_dev && dcp->brightness.maximum > 0)
+-			schedule_work(&dcp->bl_register_wq);
+-		trace_iomfb_brightness(dcp, prop->value);
++		if (dcp_has_panel(dcp)) {
++			dcp->brightness.nits = prop->value / dcp->brightness.scale;
++			/* notify backlight device of the initial brightness */
++			if (!dcp->brightness.bl_dev && dcp->brightness.maximum > 0)
++				schedule_work(&dcp->bl_register_wq);
++			trace_iomfb_brightness(dcp, prop->value);
++		}
+ 		break;
+ 	}
+ 	default:
+@@ -1003,6 +1011,11 @@ dcpep_cb_get_tiling_state(struct apple_dcp *dcp,
+ 	};
+ }
+ 
++static u8 dcpep_cb_create_backlight_service(struct apple_dcp *dcp)
++{
++	return dcp_has_panel(dcp);
++}
++
+ TRAMPOLINE_VOID(trampoline_nop, dcpep_cb_nop);
+ TRAMPOLINE_OUT(trampoline_true, dcpep_cb_true, u8);
+ TRAMPOLINE_OUT(trampoline_false, dcpep_cb_false, u8);
+@@ -1053,6 +1066,7 @@ TRAMPOLINE_IN(trampoline_pr_publish, iomfb_cb_pr_publish,
+ 	      struct iomfb_property);
+ TRAMPOLINE_INOUT(trampoline_get_tiling_state, dcpep_cb_get_tiling_state,
+ 		 struct dcpep_get_tiling_state_req, struct dcpep_get_tiling_state_resp);
++TRAMPOLINE_OUT(trampoline_create_backlight_service, dcpep_cb_create_backlight_service, u8);
+ 
+ /*
+  * Callback for swap requests. If a swap failed, we'll never get a swap
+diff --git a/drivers/gpu/drm/apple/iomfb_v12_3.c b/drivers/gpu/drm/apple/iomfb_v12_3.c
+index 8188321004a6..5bc8bc2f8bd2 100644
+--- a/drivers/gpu/drm/apple/iomfb_v12_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v12_3.c
+@@ -49,7 +49,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[108] = trampoline_true, /* create_product_service */
+ 	[109] = trampoline_true, /* create_pmu_service */
+ 	[110] = trampoline_true, /* create_iomfb_service */
+-	[111] = trampoline_true, /* create_backlight_service */
++	[111] = trampoline_create_backlight_service,
+ 	[116] = dcpep_cb_boot_1,
+ 	[117] = trampoline_false, /* is_dark_boot */
+ 	[118] = trampoline_false, /* is_dark_boot / is_waking_from_hibernate*/
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_3.c b/drivers/gpu/drm/apple/iomfb_v13_3.c
+index 18020c6cd394..b82ed1f32e0e 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_3.c
+@@ -51,7 +51,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[109] = trampoline_true, /* create_product_service */
+ 	[110] = trampoline_true, /* create_pmu_service */
+ 	[111] = trampoline_true, /* create_iomfb_service */
+-	[112] = trampoline_true, /* create_backlight_service */
++	[112] = trampoline_create_backlight_service,
+ 	[113] = trampoline_true, /* create_nvram_servce? */
+ 	[114] = trampoline_get_tiling_state,
+ 	[115] = trampoline_false, /* set_tiling_state */

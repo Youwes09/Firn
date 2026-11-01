@@ -1,0 +1,50 @@
+From 3d615d1fad1fb7f893a509066259a220bea43500 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 11 Apr 2023 21:57:22 +0900
+Subject: [PATCH] dcp: Allow unused trampolines
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+---
+ drivers/gpu/drm/apple/iomfb_internal.h | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_internal.h b/drivers/gpu/drm/apple/iomfb_internal.h
+index 401b6ec32848..09f8857d30c3 100644
+--- a/drivers/gpu/drm/apple/iomfb_internal.h
++++ b/drivers/gpu/drm/apple/iomfb_internal.h
+@@ -57,7 +57,7 @@ typedef void (*dcp_callback_t)(struct apple_dcp *, void *, void *);
+  */
+ 
+ #define TRAMPOLINE_VOID(func, handler)                                        \
+-	static bool func(struct apple_dcp *dcp, int tag, void *out, void *in) \
++	static bool __maybe_unused func(struct apple_dcp *dcp, int tag, void *out, void *in) \
+ 	{                                                                     \
+ 		trace_iomfb_callback(dcp, tag, #handler);                     \
+ 		handler(dcp);                                                 \
+@@ -67,7 +67,7 @@ typedef void (*dcp_callback_t)(struct apple_dcp *, void *, void *);
+ #define TRAMPOLINE_IN(func, handler, T_in)                                    \
+ 	typedef void (*callback_##handler)(struct apple_dcp *, T_in *);       \
+                                                                               \
+-	static bool func(struct apple_dcp *dcp, int tag, void *out, void *in) \
++	static bool __maybe_unused func(struct apple_dcp *dcp, int tag, void *out, void *in) \
+ 	{                                                                     \
+ 		callback_##handler cb = handler;                              \
+                                                                               \
+@@ -79,7 +79,7 @@ typedef void (*dcp_callback_t)(struct apple_dcp *, void *, void *);
+ #define TRAMPOLINE_INOUT(func, handler, T_in, T_out)                          \
+ 	typedef T_out (*callback_##handler)(struct apple_dcp *, T_in *);      \
+                                                                               \
+-	static bool func(struct apple_dcp *dcp, int tag, void *out, void *in) \
++	static bool __maybe_unused func(struct apple_dcp *dcp, int tag, void *out, void *in) \
+ 	{                                                                     \
+ 		T_out *typed_out = out;                                       \
+ 		callback_##handler cb = handler;                              \
+@@ -90,7 +90,7 @@ typedef void (*dcp_callback_t)(struct apple_dcp *, void *, void *);
+ 	}
+ 
+ #define TRAMPOLINE_OUT(func, handler, T_out)                                  \
+-	static bool func(struct apple_dcp *dcp, int tag, void *out, void *in) \
++	static bool __maybe_unused func(struct apple_dcp *dcp, int tag, void *out, void *in) \
+ 	{                                                                     \
+ 		T_out *typed_out = out;                                       \
+                                                                               \

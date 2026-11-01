@@ -1,0 +1,66 @@
+From f14f93d5b4a62c7e5b357be517117638ecddd025 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Sat, 15 Jun 2024 21:12:46 +0900
+Subject: [PATCH] drm/apple: audio: Fix hotplug notifications
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+---
+ drivers/gpu/drm/apple/audio.c |  4 ++--
+ drivers/gpu/drm/apple/av.c    | 15 +++++++++++++++
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/audio.c b/drivers/gpu/drm/apple/audio.c
+index eee1109780b0..b78e38959871 100644
+--- a/drivers/gpu/drm/apple/audio.c
++++ b/drivers/gpu/drm/apple/audio.c
+@@ -500,7 +500,8 @@ static void dcpaud_report_hotplug(struct dcp_audio *dcpaud, bool connected)
+ 
+ 	if (!connected) {
+ 		snd_pcm_stream_lock(substream);
+-		snd_pcm_stop(substream, SNDRV_PCM_STATE_DISCONNECTED);
++		if (substream->runtime)
++			snd_pcm_stop(substream, SNDRV_PCM_STATE_DISCONNECTED);
+ 		snd_pcm_stream_unlock(substream);
+ 	}
+ }
+@@ -592,7 +593,6 @@ void dcpaud_disconnect(struct platform_device *pdev)
+ 
+ 	mutex_lock(&dcpaud->data_lock);
+ 
+-	dcpaud->dcp_connected = false;
+ 	dcpaud_report_hotplug(dcpaud, false);
+ }
+ 
+diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
+index 8a2c1126f5ad..586f39cc11ca 100644
+--- a/drivers/gpu/drm/apple/av.c
++++ b/drivers/gpu/drm/apple/av.c
+@@ -69,6 +69,20 @@ static void av_interface_init(struct apple_epic_service *service, const char *na
+ {
+ }
+ 
++static void av_interface_teardown(struct apple_epic_service *service)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	struct audiosrv_data *asrv = dcp->audiosrv;
++
++	mutex_lock(&asrv->plug_lock);
++
++	asrv->plugged = false;
++	if (asrv->audio_dev)
++		dcpaud_disconnect(asrv->audio_dev);
++
++	mutex_unlock(&asrv->plug_lock);
++}
++
+ static void av_audiosrv_init(struct apple_epic_service *service, const char *name,
+ 			     const char *class, s64 unit)
+ {
+@@ -258,6 +272,7 @@ static const struct apple_epic_service_ops avep_ops[] = {
+ 	{
+ 		.name = "DCPAVSimpleVideoInterface",
+ 		.init = av_interface_init,
++		.teardown = av_interface_teardown,
+ 	},
+ 	{
+ 		.name = "DCPAVAudioInterface",

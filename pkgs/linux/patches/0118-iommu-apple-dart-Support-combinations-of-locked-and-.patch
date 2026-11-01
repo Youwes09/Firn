@@ -1,0 +1,47 @@
+From 9b5c0fbcc4112154d4d9eecf1ee0612805a6e4b8 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Wed, 9 Apr 2025 18:08:08 +0200
+Subject: [PATCH] iommu: apple-dart: Support combinations of locked and
+ unlocked DARTs
+
+This is required for the display sub-system. m1n1 locks the DART of the
+boot framebuffer to minimize the blackout for the transition from boot
+framebuffer to the full display driver. The display blacks out when the
+bootloader setup mapping of the framebuffer vanishes during
+dart_reset(). Under certain circumstances this results in an
+unrecoverable crash of display coprocessor.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/iommu/apple-dart.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/iommu/apple-dart.c b/drivers/iommu/apple-dart.c
+index d426e945b278..37d19145c347 100644
+--- a/drivers/iommu/apple-dart.c
++++ b/drivers/iommu/apple-dart.c
+@@ -293,6 +293,7 @@ struct apple_dart_domain {
+ struct apple_dart_master_cfg {
+ 	/* Intersection of DART capabilitles */
+ 	u32 supports_bypass : 1;
++	u32 locked : 1;
+ 
+ 	/*
+ 	 * DMA aperture start and end to be overridden by "iommus"' phandle
+@@ -1029,6 +1030,8 @@ static int apple_dart_of_xlate(struct device *dev,
+ 			return -ENOMEM;
+ 		/* Will be ANDed with DART capabilities */
+ 		cfg->supports_bypass = true;
++		/* Will be ORed with DART capabilities*/
++		cfg->locked = false;
+ 		/* Will be merged with other DARTs to the common range. */
+ 		cfg->dma_min = dma_min;
+ 		cfg->dma_max = dma_max;
+@@ -1053,6 +1056,7 @@ static int apple_dart_of_xlate(struct device *dev,
+ 	}
+ 
+ 	cfg->supports_bypass &= dart->supports_bypass;
++	cfg->locked |= dart->locked;
+ 
+ 	for (i = 0; i < MAX_DARTS_PER_DEVICE; ++i) {
+ 		if (cfg->stream_maps[i].dart == dart) {

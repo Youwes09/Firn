@@ -1,0 +1,35 @@
+From afd526ef3b90cb938ba57b669014c8f4d57a67ce Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 30 Apr 2023 15:04:35 +0200
+Subject: [PATCH] mux: apple dp crossbar: Support t8112 varient
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/mux/apple-display-crossbar.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/mux/apple-display-crossbar.c b/drivers/mux/apple-display-crossbar.c
+index a241cba718c8..0801c12949e3 100644
+--- a/drivers/mux/apple-display-crossbar.c
++++ b/drivers/mux/apple-display-crossbar.c
+@@ -269,6 +269,11 @@ const static struct apple_dpxbar_hw apple_dpxbar_hw_t8103 = {
+ 	.tunable = 0,
+ };
+ 
++const static struct apple_dpxbar_hw apple_dpxbar_hw_t8112 = {
++	.n_ufp = 4,
++	.tunable = 4278196325,
++};
++
+ const static struct apple_dpxbar_hw apple_dpxbar_hw_t6000 = {
+ 	.n_ufp = 9,
+ 	.tunable = 5,
+@@ -281,7 +286,7 @@ static const struct of_device_id apple_dpxbar_ids[] = {
+ 	},
+ 	{
+ 		.compatible = "apple,t8112-display-crossbar",
+-		.data = &apple_dpxbar_hw_t8103,
++		.data = &apple_dpxbar_hw_t8112,
+ 	},
+ 	{
+ 		.compatible = "apple,t6000-display-crossbar",

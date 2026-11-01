@@ -1,0 +1,54 @@
+From b4a6992400b9d274d9d656efcad00b9fb06af01b Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 20 Aug 2024 23:04:29 +0200
+Subject: [PATCH] drm: apple: afk: Optionally match against EPICName
+
+The dpavserv endpoint uses various EPICProviderClass depending on the
+connected display.
+
+Observed values:
+- "AppleDCPAgileCDIDPDisplay" (j134c, dcp, panel)
+- "AppleDCPMCDP29XX" (j274, dcp, hdmi)
+- "AppleDCPPS190" (j474s, dcpext0, hdmi)
+- "DCPDPService" (j474s, dcpext1, typec)
+
+So match against against EPICName which is consistent in all cases.
+This also allows the distinction between 'dcpav-service-epic' and
+'dcpdp-service-epic'. Not sure what the second EPIC service is used for.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/afk.c | 6 +++++-
+ drivers/gpu/drm/apple/afk.h | 2 ++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index af3e0a7ac713..534a036a6a64 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -293,7 +293,11 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
+             service_name = name;
+         }
+ 
+-	ops = afk_match_service(ep, service_name);
++	if (ep->match_epic_name)
++		ops = afk_match_service(ep, epic_name);
++	else
++		ops = afk_match_service(ep, service_name);
++
+ 	if (!ops) {
+ 		dev_err(ep->dcp->dev,
+ 			"AFK[ep:%02x]: unable to match service %s on channel %d\n",
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index be3f0b105de5..5a2867998352 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -182,6 +182,8 @@ struct apple_dcp_afkep {
+ 	u32 num_channels;
+ 
+ 	struct dentry *debugfs_entry;
++
++	bool match_epic_name;
+ };
+ 
+ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,

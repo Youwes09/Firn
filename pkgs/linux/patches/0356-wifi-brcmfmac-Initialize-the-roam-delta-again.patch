@@ -1,0 +1,28 @@
+From 88b3858ff03c056f406220256e45fba3c4831aec Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sat, 31 Oct 2026 14:20:35 -0500
+Subject: [PATCH] wifi: brcmfmac: Initialize the roam delta again
+
+The interface creation cleanup dropped the two lines that fill in the
+roam delta, so the firmware gets whatever is on the stack. The BCM4388
+rejects the garbage band with BCME_NOTBANDLOCKED.
+
+Fixes: e66047b8072e ("[brcmfmac] Clean up and common interface creation handling")
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 029d2407f184..97e0cbf093ce 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -6958,6 +6958,8 @@ static s32 brcmf_dongle_roam(struct brcmf_if *ifp)
+ 	if (err)
+ 		bphy_err(drvr, "WLC_SET_ROAM_TRIGGER error (%d)\n", err);
+ 
++	roam_delta[0] = cpu_to_le32(WL_ROAM_DELTA);
++	roam_delta[1] = cpu_to_le32(BRCM_BAND_ALL);
+ 	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_ROAM_DELTA,
+ 				     (void *)roam_delta, sizeof(roam_delta));
+ 	if (err)

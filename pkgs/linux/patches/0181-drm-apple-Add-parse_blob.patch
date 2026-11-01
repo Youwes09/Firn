@@ -1,0 +1,44 @@
+From 0cfcc2df5307513f9e3b5abc22e8811fbd212196 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
+Date: Thu, 23 Feb 2023 13:07:49 +0100
+Subject: [PATCH] drm: apple: Add 'parse_blob'
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Martin Povišer <povik+lin@cutebit.org>
+---
+ drivers/gpu/drm/apple/parser.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index 484441415e9d..0f4a510a57e6 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -199,6 +199,26 @@ static int parse_bool(struct dcp_parse_ctx *handle, bool *b)
+ 	return 0;
+ }
+ 
++static int parse_blob(struct dcp_parse_ctx *handle, size_t size, u8 **blob)
++{
++	struct dcp_parse_tag *tag = parse_tag_of_type(handle, DCP_TYPE_BLOB);
++	u8 *out;
++
++	if (IS_ERR(tag))
++		return PTR_ERR(tag);
++
++	if (tag->size < size)
++		return -EINVAL;
++
++	out = parse_bytes(handle, tag->size);
++
++	if (IS_ERR(out))
++		return PTR_ERR(out);
++
++	*blob = out;
++	return 0;
++}
++
+ struct iterator {
+ 	struct dcp_parse_ctx *handle;
+ 	u32 idx, len;

@@ -1,0 +1,35 @@
+From 5b789c78ccfde4b79f131aa7619ba5b7048e90c2 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 09:05:18 -0500
+Subject: [PATCH] HID: dockchannel: Check init blocks against their own length
+
+A GPIO request was checked against the rest of the packet rather than
+its block, and an empty product-name block read the byte before it.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/hid/dockchannel-hid/dockchannel-hid.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+index 8f71ac5c4b9a..76bb5f70f368 100644
+--- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
++++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
+@@ -970,7 +970,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
+ 		case INIT_GPIO_REQUEST: {
+ 			struct dchid_gpio_request *req = data;
+ 
+-			if (sizeof(*req) > length)
++			if (sizeof(*req) > blk->length)
+ 				break;
+ 
+ 			if (iface->gpio_id) {
+@@ -990,7 +990,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
+ 		case INIT_PRODUCT_NAME: {
+ 			char *product = data;
+ 
+-			if (product[blk->length - 1] != 0) {
++			if (!blk->length || product[blk->length - 1] != 0) {
+ 				dev_warn(dchid->dev, "Unterminated product name for %s\n",
+ 					 iface->name);
+ 			} else {

@@ -1,0 +1,69 @@
+From 99f19a1835d8d2f883a7e4fc4ac603f3d8e98d5f Mon Sep 17 00:00:00 2001
+From: Josh Rodd <josh@rodd.us>
+Date: Mon, 21 Sep 2026 07:42:37 -0400
+Subject: [PATCH] dt-bindings: iommu: apple,dart: Add apple,sid-remap
+
+Some DART integrations issue DMA from several requestor SIDs that must
+translate through one context; the M4 (t8132) MTP's requestors 1-3 use
+SID 0's. Describe such aliases for T8110-compatible DARTs.
+
+Signed-off-by: Josh Rodd <josh@rodd.us>
+Assisted-by: oh-my-pi:gpt-6-astra
+[Youwes09: split from Gravity Linux 3f56fba5e1c3f]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../devicetree/bindings/iommu/apple,dart.yaml | 34 +++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/iommu/apple,dart.yaml b/Documentation/devicetree/bindings/iommu/apple,dart.yaml
+index 53069716c558..21c9c7a04e23 100644
+--- a/Documentation/devicetree/bindings/iommu/apple,dart.yaml
++++ b/Documentation/devicetree/bindings/iommu/apple,dart.yaml
+@@ -53,6 +53,29 @@ properties:
+       aperture start of a master's DMA window and fourth and fifth cell describe
+       the size of DMA window.
+ 
++  apple,sid-remap:
++    $ref: /schemas/types.yaml#/definitions/uint32-matrix
++    description: |
++      Hardware requestor SID aliases required by this DART's integration.
++      Each pair contains a source requestor SID followed by the target
++      translation SID whose page tables and access controls it must use.
++      Only T8110-compatible DARTs support this mapping; target SIDs are
++      limited to the four-bit TCR remap field.
++
++      Aliased requestors cannot be isolated from their target and must share
++      its translation context and IOMMU group. A source SID must not also
++      appear as a target; self-maps, chains and cycles are not supported.
++      SIDs not listed as sources retain identity mapping. Omit this property
++      when no hardware requestor aliases are required.
++    minItems: 1
++    maxItems: 255
++    items:
++      items:
++        - description: Source requestor SID
++          maximum: 255
++        - description: Target translation SID
++          maximum: 15
++
+   power-domains:
+     maxItems: 1
+ 
+@@ -62,6 +85,17 @@ required:
+   - '#iommu-cells'
+   - interrupts
+ 
++allOf:
++  - if:
++      not:
++        properties:
++          compatible:
++            contains:
++              const: apple,t8110-dart
++    then:
++      properties:
++        apple,sid-remap: false
++
+ additionalProperties: false
+ 
+ examples:

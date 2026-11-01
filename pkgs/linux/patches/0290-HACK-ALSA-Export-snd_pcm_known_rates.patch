@@ -1,0 +1,25 @@
+From 2b5e18ad34c157d992b0e9c2986f2153998d09a4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
+Date: Thu, 23 Feb 2023 17:57:56 +0100
+Subject: [PATCH] HACK: ALSA: Export 'snd_pcm_known_rates'
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Martin Povišer <povik+lin@cutebit.org>
+---
+ sound/core/pcm_native.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/sound/core/pcm_native.c b/sound/core/pcm_native.c
+index 5cbf88da7626..fbde89889b7a 100644
+--- a/sound/core/pcm_native.c
++++ b/sound/core/pcm_native.c
+@@ -2573,6 +2573,7 @@ const struct snd_pcm_hw_constraint_list snd_pcm_known_rates = {
+ 	.count = ARRAY_SIZE(rates),
+ 	.list = rates,
+ };
++EXPORT_SYMBOL_GPL(snd_pcm_known_rates);
+ 
+ static int snd_pcm_hw_rule_rate(struct snd_pcm_hw_params *params,
+ 				struct snd_pcm_hw_rule *rule)

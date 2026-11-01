@@ -1,0 +1,72 @@
+From 7cbd191e484ab7a6e1d2d50930e77b0b8856d58a Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Mon, 2 Oct 2023 22:55:08 +0900
+Subject: [PATCH] wifi: brcmfmac: Add support for SYSMEM corerev >= 12 & fix <
+ 12
+
+SYSMEM corerev 12+ uses different coreinfo masks for the ROM/RAM sizes.
+The masks for cores <12 also look like they were wrong all along, since
+the register layout is not the same as for SOCRAM (even though it was
+sharing the defines). Plus we need to skip the ROM banks, which we
+weren't doing.
+
+So it looks like this was always wrong for SYSMEM chips. Fix it and add
+support for the new revisions.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 8a7380c71751458178aedc5ff5f32de1f0139157)
+
+Original-Commit: 0ffc7950aa7327014bcb78055bc9d523ef26ae15
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/chip.c        | 20 +++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
+index 4adc0d0e4251..53eb271924de 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/chip.c
+@@ -162,6 +162,15 @@ struct sbconfig {
+ #define	SRCI_SRBSZ_SHIFT	0
+ #define SR_BSZ_BASE		14
+ 
++#define SYSMEM_SRCI_ROMNB_MASK		0x3e0
++#define SYSMEM_SRCI_ROMNB_SHIFT		5
++#define SYSMEM_SRCI_SRNB_MASK		0x1f
++#define SYSMEM_SRCI_SRNB_SHIFT		0
++#define SYSMEM_SRCI_NEW_ROMNB_MASK	0xff000000
++#define SYSMEM_SRCI_NEW_ROMNB_SHIFT	24
++#define SYSMEM_SRCI_NEW_SRNB_MASK	0xff0000
++#define SYSMEM_SRCI_NEW_SRNB_SHIFT	16
++
+ struct sbsocramregs {
+ 	u32 coreinfo;
+ 	u32 bwalloc;
+@@ -659,6 +668,7 @@ static u32 brcmf_chip_sysmem_ramsize(struct brcmf_core_priv *sysmem)
+ 	u32 memsize = 0;
+ 	u32 coreinfo;
+ 	u32 idx;
++	u32 nrb;
+ 	u32 nb;
+ 	u32 banksize;
+ 
+@@ -666,10 +676,16 @@ static u32 brcmf_chip_sysmem_ramsize(struct brcmf_core_priv *sysmem)
+ 		brcmf_chip_resetcore(&sysmem->pub, 0, 0, 0);
+ 
+ 	coreinfo = brcmf_chip_core_read32(sysmem, SYSMEMREGOFFS(coreinfo));
+-	nb = (coreinfo & SRCI_SRNB_MASK) >> SRCI_SRNB_SHIFT;
++	if (sysmem->pub.rev >= 12) {
++		nrb = (coreinfo & SYSMEM_SRCI_NEW_ROMNB_MASK) >> SYSMEM_SRCI_NEW_ROMNB_SHIFT;
++		nb = (coreinfo & SYSMEM_SRCI_NEW_SRNB_MASK) >> SYSMEM_SRCI_NEW_SRNB_SHIFT;
++	} else {
++		nrb = (coreinfo & SYSMEM_SRCI_ROMNB_MASK) >> SYSMEM_SRCI_ROMNB_SHIFT;
++		nb = (coreinfo & SYSMEM_SRCI_SRNB_MASK) >> SYSMEM_SRCI_SRNB_SHIFT;
++	}
+ 
+ 	for (idx = 0; idx < nb; idx++) {
+-		brcmf_chip_socram_banksize(sysmem, idx, &banksize);
++		brcmf_chip_socram_banksize(sysmem, idx + nrb, &banksize);
+ 		memsize += banksize;
+ 	}
+ 

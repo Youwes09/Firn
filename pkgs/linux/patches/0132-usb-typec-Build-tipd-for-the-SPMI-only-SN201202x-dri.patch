@@ -1,0 +1,29 @@
+From 419c2295599a0212ed7531033b2d1902d618258b Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 3 Oct 2026 21:11:14 -0400
+Subject: [PATCH] usb: typec: Build tipd/ for the SPMI-only SN201202x driver
+
+The tipd directory was only entered for the I2C TYPEC_TPS6598X driver, so
+a configuration with only TYPEC_SN201202X (as on M3/M4 Macs) never built
+the PD controller driver. Enter it for the shared TYPEC_TPS6598X_CORE.
+
+Split out of 877c574dfa4f ("drm/apple: bring up T8132 DCP hotplug").
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+---
+ drivers/usb/typec/Makefile | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/usb/typec/Makefile b/drivers/usb/typec/Makefile
+index 8a6a1c663eb6..eebe658de6f8 100644
+--- a/drivers/usb/typec/Makefile
++++ b/drivers/usb/typec/Makefile
+@@ -5,7 +5,7 @@ typec-$(CONFIG_ACPI)		+= port-mapper.o
+ obj-$(CONFIG_TYPEC)		+= altmodes/
+ obj-$(CONFIG_TYPEC_TCPM)	+= tcpm/
+ obj-$(CONFIG_TYPEC_UCSI)	+= ucsi/
+-obj-$(CONFIG_TYPEC_TPS6598X)	+= tipd/
++obj-$(CONFIG_TYPEC_TPS6598X_CORE)	+= tipd/
+ obj-$(CONFIG_TYPEC_ANX7411)	+= anx7411.o
+ obj-$(CONFIG_TYPEC_HD3SS3220)	+= hd3ss3220.o
+ obj-$(CONFIG_TYPEC_STUSB160X) 	+= stusb160x.o

@@ -1,0 +1,52 @@
+From 378a6d3a2ae17935799870d631fc4801bbaf8afb Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Wed, 4 Oct 2023 05:27:54 +0900
+Subject: [PATCH] wifi: brcmfmac: Mask all IRQs before starting firmware
+
+Make sure the firmware can't get any early notifications by masking all
+IRQs explicitly before loading the firmware.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 46b6e3370023861a9963a48e495e6e3a149914de)
+
+Original-Commit: 33951771fb6406411386f3be975b9382ec831462
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../wireless/broadcom/brcm80211/brcmfmac/pcie.c  | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 603b31661002..21ab4933776a 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -338,6 +338,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
+ #define BRCMF_PCIE_CFGREG_PML1_SUB_CTRL1	0x248
+ #define BRCMF_PCIE_CFGREG_REG_BAR2_CONFIG	0x4E0
+ #define BRCMF_PCIE_CFGREG_REG_BAR3_CONFIG	0x4F4
++#define BRCMF_PCIE_CFGREG_TLCNTRL_5		0x814
+ #define BRCMF_PCIE_LINK_STATUS_CTRL_ASPM_ENAB	3
+ 
+ /* Magic number at a magic location to find RAM size */
+@@ -832,6 +833,21 @@ static int brcmf_pcie_enter_download_state(struct brcmf_pciedev_info *devinfo)
+ 		brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_ARMCR4REG_BANKPDA,
+ 				       0);
+ 	}
++
++	/* Ensure all IRQs are masked so the firmware doesn't get
++	 * a hostready notification too early.
++	 */
++
++	brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxmask, 0);
++	brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxint,
++				0xffffffff);
++
++	pci_write_config_dword(devinfo->pdev, BRCMF_PCIE_REG_INTMASK, 0);
++
++	brcmf_pcie_write_pcie32(devinfo, BRCMF_PCIE_PCIE2REG_CONFIGADDR,
++				BRCMF_PCIE_CFGREG_TLCNTRL_5);
++	brcmf_pcie_write_pcie32(devinfo, BRCMF_PCIE_PCIE2REG_CONFIGDATA,
++				0xffffffff);
+ 	return 0;
+ }
+ 

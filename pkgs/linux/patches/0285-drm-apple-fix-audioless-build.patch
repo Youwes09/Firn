@@ -1,0 +1,27 @@
+From 6abb7e6b9682edaebf5bedac794be3837f82d89b Mon Sep 17 00:00:00 2001
+From: Alyssa Rosenzweig <alyssa@rosenzweig.io>
+Date: Mon, 17 Feb 2025 11:45:49 -0500
+Subject: [PATCH] drm/apple: fix audioless build
+
+Signed-off-by: Alyssa Rosenzweig <alyssa@rosenzweig.io>
+---
+ drivers/gpu/drm/apple/av.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/av.h b/drivers/gpu/drm/apple/av.h
+index baeefeca0a33..c00cbef549fd 100644
+--- a/drivers/gpu/drm/apple/av.h
++++ b/drivers/gpu/drm/apple/av.h
+@@ -6,7 +6,12 @@
+ //int avep_audiosrv_startlink(struct apple_dcp *dcp, struct dcp_sound_cookie *cookie);
+ //int avep_audiosrv_stoplink(struct apple_dcp *dcp);
+ 
++#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+ void av_service_connect(struct apple_dcp *dcp);
+ void av_service_disconnect(struct apple_dcp *dcp);
++#else
++static inline void av_service_connect(struct apple_dcp *dcp) { }
++static inline void av_service_disconnect(struct apple_dcp *dcp) { }
++#endif
+ 
+ #endif /* __AV_H__ */

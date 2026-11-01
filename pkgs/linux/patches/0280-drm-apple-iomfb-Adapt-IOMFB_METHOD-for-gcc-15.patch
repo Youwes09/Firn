@@ -1,0 +1,29 @@
+From 417d063badfce7f1ebd0a61d5f6d3d5210c4cb8e Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 27 Jan 2025 22:47:06 +0100
+Subject: [PATCH] drm: apple: iomfb: Adapt `IOMFB_METHOD` for gcc 15
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fixes "error: initializer-string for array of ‘char’ is too long" errors
+while compiling with Fedora's gcc 15.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index 3ae4fb46ff64..aea66fa2040a 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -199,7 +199,7 @@ enum dcpep_method {
+ 	dcpep_num_methods
+ };
+ 
+-#define IOMFB_METHOD(tag, name) [name] = { #name, tag }
++#define IOMFB_METHOD(tag, name) [name] = { #name, { tag[0], tag[1], tag[2], tag[3] } }
+ 
+ struct dcp_method_entry {
+ 	const char *name;

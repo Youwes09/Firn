@@ -1,0 +1,30 @@
+From 3afb3d1de6cccdecf2b0ef3ea3289f429622e345 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Fri, 17 Nov 2023 00:02:27 +0900
+Subject: [PATCH] drm: apple: Fix missing unlock path in dcp_dptx_connect
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+---
+ drivers/gpu/drm/apple/dcp.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 09f9bda27500..05f88a83dd60 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -269,12 +269,14 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 	}
+ 
+ 	if (dcp->dptxport[port].connected)
+-		return 0;
++		goto ret;
+ 
+ 	dcp->dptxport[port].atcphy = dcp->phy;
+ 	dptxport_connect(dcp->dptxport[port].service, 0, dcp->dptx_phy, dcp->dptx_die);
+ 	dptxport_request_display(dcp->dptxport[port].service);
+ 	dcp->dptxport[port].connected = true;
++
++ret:
+ 	mutex_unlock(&dcp->hpd_mutex);
+ 
+ 	return 0;

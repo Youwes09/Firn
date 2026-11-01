@@ -1,0 +1,101 @@
+From 244c331b150dfcad244787c9be4b47630105f9b7 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 18 Jan 2025 10:04:57 +0100
+Subject: [PATCH] drm: apple: afk: Allow replies after service 'teardown'
+
+'teardown' on DCP's 'av' endpoint's DCPAVAudioInterface is send during
+the close afk_service_call.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/afk.c             | 14 +++++++++++++-
+ drivers/gpu/drm/apple/afk.h             |  1 +
+ drivers/gpu/drm/apple/av.c              |  2 ++
+ drivers/gpu/drm/apple/epic/dpavservep.c |  3 +++
+ 4 files changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index 534a036a6a64..b7f162988269 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -308,6 +308,7 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
+ 	ch_idx = ep->num_channels++;
+ 	spin_lock_init(&ep->services[ch_idx].lock);
+ 	ep->services[ch_idx].enabled = true;
++	ep->services[ch_idx].torndown = false;
+ 	ep->services[ch_idx].ops = ops;
+ 	ep->services[ch_idx].ep = ep;
+ 	ep->services[ch_idx].channel = channel;
+@@ -340,7 +341,12 @@ static void afk_recv_handle_teardown(struct apple_dcp_afkep *ep, u32 channel)
+ 
+ 	// TODO: think through what locking is necessary
+ 	spin_lock_irqsave(&service->lock, flags);
+-	service->enabled = false;
++	/*
++	 * teardown must not disable the service since since it may be sent as
++	 * side effect of a COMMAND which for which a reply is expected.
++	 * Seen with DCP's "av" endpoint during the close afk_service_call.
++	 */
++	service->torndown = true;
+ 	ops = service->ops;
+ 	spin_unlock_irqrestore(&service->lock, flags);
+ 
+@@ -445,6 +451,12 @@ static void afk_recv_handle_std_service(struct apple_dcp_afkep *ep, u32 channel,
+ 			 ep->endpoint, channel);
+ 		return;
+ 	}
++	if (service->torndown) {
++		dev_warn(ep->dcp->dev,
++			 "AFK[ep:%02x]: std service notify on torn down service "
++			 "(chan:%u)\n", ep->endpoint, channel);
++		return;
++	}
+ 
+ 	if (type == EPIC_TYPE_NOTIFY && eshdr->category == EPIC_CAT_NOTIFY) {
+ 		struct epic_std_service_ap_call *call = payload;
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index 5a2867998352..a339c00a2a01 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -46,6 +46,7 @@ struct apple_epic_service {
+ 
+ 	u32 channel;
+ 	bool enabled;
++	bool torndown;
+ 
+ 	void *cookie;
+ 
+diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
+index 586f39cc11ca..f498271da908 100644
+--- a/drivers/gpu/drm/apple/av.c
++++ b/drivers/gpu/drm/apple/av.c
+@@ -74,6 +74,8 @@ static void av_interface_teardown(struct apple_epic_service *service)
+ 	struct apple_dcp *dcp = service->ep->dcp;
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+ 
++	service->enabled = false;
++
+ 	mutex_lock(&asrv->plug_lock);
+ 
+ 	asrv->plugged = false;
+diff --git a/drivers/gpu/drm/apple/epic/dpavservep.c b/drivers/gpu/drm/apple/epic/dpavservep.c
+index aa2cbc729a37..2de9d2fe4c24 100644
+--- a/drivers/gpu/drm/apple/epic/dpavservep.c
++++ b/drivers/gpu/drm/apple/epic/dpavservep.c
+@@ -36,6 +36,8 @@ static void dcpavserv_init(struct apple_epic_service *service, const char *name,
+ static void dcpavserv_teardown(struct apple_epic_service *service)
+ {
+ 	struct apple_dcp *dcp = service->ep->dcp;
++	service->enabled = false;
++
+ 	if (dcp->dcpavserv.enabled) {
+ 		dcp->dcpavserv.enabled = false;
+ 		dcp->dcpavserv.service = NULL;
+@@ -51,6 +53,7 @@ static void dcpdpserv_init(struct apple_epic_service *service, const char *name,
+ 
+ static void dcpdpserv_teardown(struct apple_epic_service *service)
+ {
++	service->enabled = false;
+ }
+ 
+ struct dcpavserv_status_report {

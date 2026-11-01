@@ -1,0 +1,30 @@
+From c5b883145fe53cfbea28086eaf6a77f29ad597c2 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Wed, 22 Nov 2023 09:53:09 +0100
+Subject: [PATCH] drm: apple: dptx: Log connect/disconnect calls
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 22ff9fc97d1f..698723f118a5 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -262,6 +262,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 		dev_warn(dcp->dev, "dcp_dptx_connect: missing phy\n");
+ 		return -ENODEV;
+ 	}
++	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
+ 
+ 	mutex_lock(&dcp->hpd_mutex);
+ 	if (!dcp->dptxport[port].enabled) {
+@@ -292,6 +293,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ {
+ 	struct apple_connector *connector = dcp->connector;
++	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
+ 
+ 	mutex_lock(&dcp->hpd_mutex);
+ 

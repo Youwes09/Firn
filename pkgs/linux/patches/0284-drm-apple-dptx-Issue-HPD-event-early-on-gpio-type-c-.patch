@@ -1,0 +1,65 @@
+From 03553ede84c93b6292ac436359373bf1dd8343b6 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 9 Feb 2025 21:29:55 +0100
+Subject: [PATCH] drm: apple: dptx: Issue HPD event early on gpio/type-c
+ disconnect
+
+Atomic modesets during a display disconnect may result in unrecoverable
+state if the set_digital_out_mode() DCP firmware call fails. Mark the
+connector as early as possible as disconnected to make this more
+unlikely.
+TODO: investigate set_digital_out_mode() failure handling
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 9dfd5cbcdad2..ab7eead4fd19 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -424,6 +424,14 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 	return ret;
+ }
+ 
++static void disconnected_hpd_event(struct apple_connector *con)
++{
++	if (con) {
++		con->connected = 0;
++		drm_kms_helper_connector_hotplug_event(&con->base);
++	}
++}
++
+ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ {
+ 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
+@@ -449,6 +457,8 @@ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
+ {
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+ 
++	disconnected_hpd_event(dcp->connector);
++
+ 	if (dcp->avep)
+ 		av_service_disconnect(dcp);
+ 
+@@ -675,8 +685,10 @@ void dcp_poweroff(struct platform_device *pdev)
+ 
+ 	if (dcp->hdmi_hpd) {
+ 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
+-		if (!connected)
++		if (!connected) {
++			disconnected_hpd_event(dcp->connector);
+ 			dcp_dptx_disconnect(dcp, 0);
++		}
+ 	}
+ }
+ EXPORT_SYMBOL(dcp_poweroff);
+@@ -1257,6 +1269,7 @@ static int dcp_platform_suspend(struct device *dev)
+ 
+ 	if (dcp->hdmi_hpd_irq) {
+ 		disable_irq(dcp->hdmi_hpd_irq);
++		disconnected_hpd_event(dcp->connector);
+ 		dcp_dptx_disconnect(dcp, 0);
+ 	}
+ 	/*

@@ -1,0 +1,456 @@
+From 5cc1127495d49ec715be1a69b9535a3934c205eb Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 3 Dec 2023 23:24:11 +0100
+Subject: [PATCH] drm: apple: Add dcpav-service-ep
+
+Known uses EDID retrieval and raw I2C access.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/Makefile          |   2 +
+ drivers/gpu/drm/apple/connector.c       |   3 +-
+ drivers/gpu/drm/apple/connector.h       |   2 +
+ drivers/gpu/drm/apple/dcp-internal.h    |   6 +
+ drivers/gpu/drm/apple/dcp.c             |  19 ++
+ drivers/gpu/drm/apple/dcp.h             |   1 +
+ drivers/gpu/drm/apple/epic/dpavservep.c | 230 ++++++++++++++++++++++++
+ drivers/gpu/drm/apple/epic/dpavservep.h |  22 +++
+ drivers/gpu/drm/apple/trace.h           |  12 ++
+ 9 files changed, 296 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/gpu/drm/apple/epic/dpavservep.c
+ create mode 100644 drivers/gpu/drm/apple/epic/dpavservep.h
+
+diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
+index b3b3026fdc60..4f78757829ea 100644
+--- a/drivers/gpu/drm/apple/Makefile
++++ b/drivers/gpu/drm/apple/Makefile
+@@ -11,6 +11,8 @@ apple_dcp-y += connector.o
+ apple_dcp-y += ibootep.o
+ apple_dcp-y += iomfb_v12_3.o
+ apple_dcp-y += iomfb_v13_3.o
++apple_dcp-y += epic/dpavservep.o
++
+ apple_dcp-$(CONFIG_TRACING) += trace.o
+ 
+ obj-$(CONFIG_DRM_APPLE) += appledrm.o
+diff --git a/drivers/gpu/drm/apple/connector.c b/drivers/gpu/drm/apple/connector.c
+index 46de8e8756f1..9e7866708933 100644
+--- a/drivers/gpu/drm/apple/connector.c
++++ b/drivers/gpu/drm/apple/connector.c
+@@ -3,6 +3,8 @@
+  * Copyright (C) The Asahi Linux Contributors
+  */
+ 
++#include "connector.h"
++
+ #include "linux/err.h"
+ #include <linux/debugfs.h>
+ #include <linux/module.h>
+@@ -12,7 +14,6 @@
+ 
+ #include <drm/drm_managed.h>
+ 
+-#include "connector.h"
+ #include "dcp-internal.h"
+ 
+ enum dcp_chunk_type {
+diff --git a/drivers/gpu/drm/apple/connector.h b/drivers/gpu/drm/apple/connector.h
+index 5324b1b81f49..02f2d3904b09 100644
+--- a/drivers/gpu/drm/apple/connector.h
++++ b/drivers/gpu/drm/apple/connector.h
+@@ -9,6 +9,8 @@
+ #include <drm/drm_atomic.h>
+ #include "drm/drm_connector.h"
+ 
++struct apple_connector;
++
+ #include "dcp-internal.h"
+ 
+ void dcp_hotplug(struct work_struct *work);
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 0eb8227ef816..d678a1965b5f 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -17,12 +17,15 @@
+ #include "iomfb.h"
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "epic/dpavservep.h"
+ 
+ #define DCP_MAX_PLANES 2
+ 
+ struct apple_dcp;
+ struct apple_dcp_afkep;
+ 
++struct dcpav_service_epic;
++
+ enum dcp_firmware_version {
+ 	DCP_FIRMWARE_UNKNOWN,
+ 	DCP_FIRMWARE_V_12_3,
+@@ -34,6 +37,7 @@ enum {
+ 	TEST_ENDPOINT = 0x21,
+ 	DCP_EXPERT_ENDPOINT = 0x22,
+ 	DISP0_ENDPOINT = 0x23,
++	DPAVSERV_ENDPOINT = 0x28,
+ 	AV_ENDPOINT = 0x29,
+ 	DPTX_ENDPOINT = 0x2a,
+ 	HDCP_ENDPOINT = 0x2b,
+@@ -228,6 +232,8 @@ struct apple_dcp {
+ 	struct completion systemep_done;
+ 
+ 	struct apple_dcp_afkep *ibootep;
++	struct apple_dcp_afkep *dcpavservep;
++	struct dcpavserv dcpavserv;
+ 
+ 	struct apple_dcp_afkep *avep;
+ 	struct audiosrv_data *audiosrv;
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 7973bcc52575..5c07a70c8a0a 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -50,6 +50,10 @@ bool hdmi_audio;
+ module_param(hdmi_audio, bool, 0644);
+ MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
+ 
++static bool unstable_edid;
++module_param(unstable_edid, bool, 0644);
++MODULE_PARM_DESC(unstable_edid, "Enable unstable EDID retrival support");
++
+ /* copied and simplified from drm_vblank.c */
+ static void send_vblank_event(struct drm_device *dev,
+ 		struct drm_pending_vblank_event *e,
+@@ -219,6 +223,9 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
+ 	case DISP0_ENDPOINT:
+ 		afk_receive_message(dcp->ibootep, message);
+ 		return;
++	case DPAVSERV_ENDPOINT:
++		afk_receive_message(dcp->dcpavservep, message);
++		return;
+ 	case DPTX_ENDPOINT:
+ 		afk_receive_message(dcp->dptxep, message);
+ 		return;
+@@ -480,6 +487,13 @@ int dcp_start(struct platform_device *pdev)
+ 	if (ret)
+ 		dev_warn(dcp->dev, "Failed to start system endpoint: %d\n", ret);
+ 
++	if (unstable_edid && !dcp_has_panel(dcp)) {
++		ret = dpavservep_init(dcp);
++		if (ret)
++			dev_warn(dcp->dev, "Failed to start DPAVSERV endpoint: %d",
++				 ret);
++	}
++
+ 	if (dcp->phy && dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
+ 		ret = ibootep_init(dcp);
+ 		if (ret)
+@@ -1066,6 +1080,11 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ 		dcp->systemep = NULL;
+ 	}
+ 
++	if (dcp->dcpavservep) {
++		afk_shutdown(dcp->dcpavservep);
++		dcp->dcpavservep = NULL;
++	}
++
+ 	if (dcp->shmem)
+ 		iomfb_shutdown(dcp);
+ 
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index df3d767ac4ba..b1a151140c90 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -63,6 +63,7 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message);
+ int systemep_init(struct apple_dcp *dcp);
+ int dptxep_init(struct apple_dcp *dcp);
+ int ibootep_init(struct apple_dcp *dcp);
++int dpavservep_init(struct apple_dcp *dcp);
+ int avep_init(struct apple_dcp *dcp);
+ 
+ 
+diff --git a/drivers/gpu/drm/apple/epic/dpavservep.c b/drivers/gpu/drm/apple/epic/dpavservep.c
+new file mode 100644
+index 000000000000..aa2cbc729a37
+--- /dev/null
++++ b/drivers/gpu/drm/apple/epic/dpavservep.c
+@@ -0,0 +1,230 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright The Asahi Linux Contributors */
++
++#include "dpavservep.h"
++
++#include <drm/drm_edid.h>
++
++#include <linux/completion.h>
++#include <linux/device.h>
++#include <linux/types.h>
++
++#include "../afk.h"
++#include "../dcp.h"
++#include "../dcp-internal.h"
++#include "../trace.h"
++
++static void dcpavserv_init(struct apple_epic_service *service, const char *name,
++			  const char *class, s64 unit)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	trace_dcpavserv_init(dcp, unit);
++
++	if (unit == 0 && name && !strcmp(name, "dcpav-service-epic")) {
++		if (dcp->dcpavserv.enabled) {
++			dev_err(dcp->dev,
++				"DCPAVSERV: unit %lld already exists\n", unit);
++			return;
++		}
++		dcp->dcpavserv.service = service;
++		dcp->dcpavserv.enabled = true;
++		service->cookie = &dcp->dcpavserv;
++		complete(&dcp->dcpavserv.enable_completion);
++	}
++}
++
++static void dcpavserv_teardown(struct apple_epic_service *service)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	if (dcp->dcpavserv.enabled) {
++		dcp->dcpavserv.enabled = false;
++		dcp->dcpavserv.service = NULL;
++		service->cookie = NULL;
++		reinit_completion(&dcp->dcpavserv.enable_completion);
++	}
++}
++
++static void dcpdpserv_init(struct apple_epic_service *service, const char *name,
++			  const char *class, s64 unit)
++{
++}
++
++static void dcpdpserv_teardown(struct apple_epic_service *service)
++{
++}
++
++struct dcpavserv_status_report {
++	u32 unk00[4];
++	u8 flag0;
++	u8 flag1;
++	u8 flag2;
++	u8 flag3;
++	u32 unk14[3];
++	u32 status;
++	u32 unk24[3];
++} __packed;
++
++struct dpavserv_copy_edid_cmd {
++	__le64 max_size;
++	u8 _pad1[24];
++	__le64 used_size;
++	u8 _pad2[8];
++} __packed;
++
++#define EDID_LEADING_DATA_SIZE		8
++#define EDID_BLOCK_SIZE			128
++#define EDID_EXT_BLOCK_COUNT_OFFSET	0x7E
++#define EDID_MAX_SIZE			SZ_32K
++#define EDID_BUF_SIZE			(EDID_LEADING_DATA_SIZE + EDID_MAX_SIZE)
++
++struct dpavserv_copy_edid_resp {
++	__le64 max_size;
++	u8 _pad1[24];
++	__le64 used_size;
++	u8 _pad2[8];
++	u8 data[];
++} __packed;
++
++static int parse_report(struct apple_epic_service *service, enum epic_subtype type,
++			 const void *data, size_t data_size)
++{
++#if defined(DEBUG)
++	struct apple_dcp *dcp = service->ep->dcp;
++	const struct epic_service_call *call;
++	const void *payload;
++	size_t payload_size;
++
++	dev_dbg(dcp->dev, "dcpavserv[ch:%u]: report type:%02x len:%zu\n",
++		service->channel, type, data_size);
++
++	if (type != EPIC_SUBTYPE_STD_SERVICE)
++		return 0;
++
++	if (data_size < sizeof(*call))
++		return 0;
++
++	call = data;
++
++	if (le32_to_cpu(call->magic) != EPIC_SERVICE_CALL_MAGIC) {
++		dev_warn(dcp->dev, "dcpavserv[ch:%u]: report magic 0x%08x != 0x%08x\n",
++			service->channel, le32_to_cpu(call->magic), EPIC_SERVICE_CALL_MAGIC);
++		return 0;
++	}
++
++	payload_size = data_size - sizeof(*call);
++	if (payload_size < le32_to_cpu(call->data_len)) {
++		dev_warn(dcp->dev, "dcpavserv[ch:%u]: report payload size %zu call len %u\n",
++			service->channel, payload_size, le32_to_cpu(call->data_len));
++		return 0;
++	}
++	payload_size = le32_to_cpu(call->data_len);
++	payload = data + sizeof(*call);
++
++	if (le16_to_cpu(call->group) == 2 && le16_to_cpu(call->command) == 0) {
++		if (payload_size == sizeof(struct dcpavserv_status_report)) {
++			const struct dcpavserv_status_report *stat = payload;
++			dev_info(dcp->dev, "dcpavserv[ch:%u]: flags: 0x%02x,0x%02x,0x%02x,0x%02x status:%u\n",
++				service->channel, stat->flag0, stat->flag1,
++				stat->flag2, stat->flag3, stat->status);
++		} else {
++			dev_dbg(dcp->dev, "dcpavserv[ch:%u]: report payload size %zu\n", service->channel, payload_size);
++		}
++	} else {
++		print_hex_dump(KERN_DEBUG, "dcpavserv report: ", DUMP_PREFIX_NONE,
++			       16, 1, payload, payload_size, true);
++	}
++#endif
++
++	return 0;
++}
++
++static int dcpavserv_report(struct apple_epic_service *service,
++			    enum epic_subtype type, const void *data,
++			    size_t data_size)
++{
++	return parse_report(service, type, data, data_size);
++}
++
++static int dcpdpserv_report(struct apple_epic_service *service,
++			    enum epic_subtype type, const void *data,
++			    size_t data_size)
++{
++	return parse_report(service, type, data, data_size);
++}
++
++const struct drm_edid *dcpavserv_copy_edid(struct apple_epic_service *service)
++{
++	struct dpavserv_copy_edid_cmd cmd;
++	struct dpavserv_copy_edid_resp *resp __free(kfree) = NULL;
++	int num_blocks;
++	u64 data_size;
++	int ret;
++
++	memset(&cmd, 0, sizeof(cmd));
++	cmd.max_size = cpu_to_le64(EDID_BUF_SIZE);
++	resp = kzalloc(sizeof(*resp) + EDID_BUF_SIZE, GFP_KERNEL);
++	if (!resp)
++		return ERR_PTR(-ENOMEM);
++
++	ret = afk_service_call(service, 1, 7, &cmd, sizeof(cmd), EDID_BUF_SIZE, resp,
++			       sizeof(resp) + EDID_BUF_SIZE, 0);
++	if (ret < 0)
++		return ERR_PTR(ret);
++
++	if (le64_to_cpu(resp->max_size) != EDID_BUF_SIZE)
++		return ERR_PTR(-EIO);
++
++	// print_hex_dump(KERN_DEBUG, "dpavserv EDID cmd: ", DUMP_PREFIX_NONE,
++	// 	       16, 1, resp, 192, true);
++
++	data_size = le64_to_cpu(resp->used_size);
++	if (data_size < EDID_LEADING_DATA_SIZE + EDID_BLOCK_SIZE)
++		return ERR_PTR(-EIO);
++
++	num_blocks = resp->data[EDID_LEADING_DATA_SIZE + EDID_EXT_BLOCK_COUNT_OFFSET];
++	if ((1 + num_blocks) * EDID_BLOCK_SIZE != data_size - EDID_LEADING_DATA_SIZE)
++		return ERR_PTR(-EIO);
++
++	return drm_edid_alloc(resp->data + EDID_LEADING_DATA_SIZE,
++			      data_size - EDID_LEADING_DATA_SIZE);
++}
++
++static const struct apple_epic_service_ops dpavservep_ops[] = {
++	{
++		.name = "dcpav-service-epic",
++		.init = dcpavserv_init,
++		.teardown = dcpavserv_teardown,
++		.report = dcpavserv_report,
++	},
++	{
++		.name = "dcpdp-service-epic",
++		.init = dcpdpserv_init,
++		.teardown = dcpdpserv_teardown,
++		.report = dcpdpserv_report,
++	},
++	{},
++};
++
++int dpavservep_init(struct apple_dcp *dcp)
++{
++	int ret;
++
++	init_completion(&dcp->dcpavserv.enable_completion);
++
++	dcp->dcpavservep = afk_init(dcp, DPAVSERV_ENDPOINT, dpavservep_ops);
++	if (IS_ERR(dcp->dcpavservep))
++		return PTR_ERR(dcp->dcpavservep);
++
++	dcp->dcpavservep->match_epic_name = true;
++
++	ret = afk_start(dcp->dcpavservep);
++	if (ret)
++		return ret;
++
++	ret = wait_for_completion_timeout(&dcp->dcpavserv.enable_completion,
++					  msecs_to_jiffies(1000));
++	if (ret >= 0)
++		return 0;
++
++	return ret;
++}
+diff --git a/drivers/gpu/drm/apple/epic/dpavservep.h b/drivers/gpu/drm/apple/epic/dpavservep.h
+new file mode 100644
+index 000000000000..858ff14b0bd7
+--- /dev/null
++++ b/drivers/gpu/drm/apple/epic/dpavservep.h
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright The Asahi Linux Contributors */
++
++#ifndef _DRM_APPLE_EPIC_DPAVSERV_H
++#define _DRM_APPLE_EPIC_DPAVSERV_H
++
++#include <linux/completion.h>
++#include <linux/types.h>
++
++struct drm_edid;
++struct apple_epic_service;
++
++struct dcpavserv {
++	bool enabled;
++	struct completion enable_completion;
++	u32 unit;
++	struct apple_epic_service *service;
++};
++
++const struct drm_edid *dcpavserv_copy_edid(struct apple_epic_service *service);
++
++#endif /* _DRM_APPLE_EPIC_DPAVSERV_H */
+diff --git a/drivers/gpu/drm/apple/trace.h b/drivers/gpu/drm/apple/trace.h
+index e03bf8b199c8..a13dd34fb7aa 100644
+--- a/drivers/gpu/drm/apple/trace.h
++++ b/drivers/gpu/drm/apple/trace.h
+@@ -351,6 +351,18 @@ DEFINE_EVENT(iomfb_parse_mode_template, iomfb_parse_mode_fail,
+ 	    TP_PROTO(s64 id, struct dimension *horiz, struct dimension *vert, s64 best_color_mode, bool is_virtual, s64 score),
+ 	    TP_ARGS(id, horiz, vert, best_color_mode, is_virtual, score));
+ 
++TRACE_EVENT(dcpavserv_init, TP_PROTO(struct apple_dcp *dcp, u64 unit),
++	    TP_ARGS(dcp, unit),
++
++	    TP_STRUCT__entry(__string(devname, dev_name(dcp->dev))
++				     __field(u64, unit)),
++
++	    TP_fast_assign(__assign_str(devname);
++			   __entry->unit = unit;),
++
++	    TP_printk("%s: dcpav-service unit %lld initialized", __get_str(devname),
++		      __entry->unit));
++
+ TRACE_EVENT(dptxport_init, TP_PROTO(struct apple_dcp *dcp, u64 unit),
+ 	    TP_ARGS(dcp, unit),
+ 

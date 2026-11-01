@@ -1,0 +1,39 @@
+From 7ee239fc21b4c51cac1508aee96f2a34a373cf2f Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 19:24:56 -0400
+Subject: [PATCH] drm/apple: don't start the DPTX endpoint for internal panels
+
+On the M4 MacBook Air (J713) the internal eDP panel is driven through
+the DPTX PHY, so the DCP node needs the PHY (phy_init/phy_power_on at
+probe); without it the panel stays dark with the backlight on, the DCP
+reports DPTX FIFO errors and crashes touching the unpowered PHY on
+power-off. With a 'phys' property the driver also assumes an external
+DP port and waits for dcpdptx-port services, but the firmware runs the
+internal panel as disp0 and never offers them, so the wait times out
+(-110) on every boot. Skip dptxep_init() when the DCP drives a panel.
+
+dcp->dptxep then stays NULL and dptxport[0].enabled false, as on
+panel boots without a PHY, and every other user checks those first.
+---
+ drivers/gpu/drm/apple/dcp.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index be83e7d4f3c5..615264e70b2b 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -1146,7 +1146,13 @@ int dcp_start(struct platform_device *pdev)
+ 						     "Failed to start EPIC25 endpoint\n");
+ 		}
+ 
+-		ret = dptxep_init(dcp);
++		/*
++		 * An internal eDP panel driven through the DPTX PHY (M4 MacBook
++		 * Air) needs the PHY powered, but its firmware runs the panel as
++		 * disp0 and offers no dcpdptx-port services: waiting for them
++		 * only times out.
++		 */
++		ret = dcp_has_panel(dcp) ? 0 : dptxep_init(dcp);
+ 		if (ret) {
+ 			dev_warn(dcp->dev, "Failed to start DPTX endpoint: %d\n",
+ 				 ret);

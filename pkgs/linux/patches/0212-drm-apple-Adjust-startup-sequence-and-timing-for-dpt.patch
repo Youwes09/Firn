@@ -1,0 +1,135 @@
+From 1e75acd03b3f2380aeab08a8dd8d781fd837c982 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 27 Nov 2023 00:11:12 +0100
+Subject: [PATCH] drm: apple: Adjust startup sequence and timing for dptx
+
+DPTX setup from an initialized connection and display with sleeping and
+reset dcp is unfortunately quite fragile. The display connection has to
+be stopped and reestablished. Goodbye flicker free boot.
+If the IOMFB endpoint is started too early dcp might provide incomplete
+timing modes which prevent modesets.
+On display standby a HPD is triggered should result in a fully
+initialized dcp. If not a display cable unplug and plug should help.
+MacOS doesn't handle this at all and just gives up.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c |  8 +++-
+ drivers/gpu/drm/apple/dcp.c       | 64 +++++++++++++++++--------------
+ 2 files changed, 43 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 51f3e873a1e2..6dcebb5c6220 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/aperture.h>
+ #include <linux/component.h>
++#include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/jiffies.h>
+ #include <linux/module.h>
+@@ -445,7 +446,10 @@ static int apple_drm_init_dcp(struct device *dev)
+ 	if (num_dcp < 1)
+ 		return -ENODEV;
+ 
+-	timeout = get_jiffies_64() + msecs_to_jiffies(500);
++	/*
++	 * Starting DPTX might take some time.
++	 */
++	timeout = get_jiffies_64() + msecs_to_jiffies(3000);
+ 
+ 	for (i = 0; i < num_dcp; ++i) {
+ 		u64 jiffies = get_jiffies_64();
+@@ -460,6 +464,8 @@ static int apple_drm_init_dcp(struct device *dev)
+ 		if (ret)
+ 			dev_warn(dev, "DCP[%d] not ready: %d\n", i, ret);
+ 	}
++	/* HACK: Wait for dcp* to settle before a modeset */
++	msleep(100);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 64d33c9f6b58..d233e4d9208d 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -345,23 +345,40 @@ int dcp_start(struct platform_device *pdev)
+ 	if (ret)
+ 		dev_warn(dcp->dev, "Failed to start system endpoint: %d", ret);
+ 
+-	if (dcp->phy) {
+-		if (dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
+-			ret = ibootep_init(dcp);
+-			if (ret)
+-				dev_warn(dcp->dev,
+-					 "Failed to start IBOOT endpoint: %d",
+-					 ret);
+-
+-			ret = dptxep_init(dcp);
+-			if (ret)
+-				dev_warn(dcp->dev,
+-					 "Failed to start DPTX endpoint: %d",
+-					 ret);
+-		} else
+-			dev_warn(dcp->dev,
+-				 "OS firmware incompatible with dptxport EP\n");
+-	}
++	if (dcp->phy && dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
++		ret = ibootep_init(dcp);
++		if (ret)
++			dev_warn(dcp->dev, "Failed to start IBOOT endpoint: %d",
++				 ret);
++
++		ret = dptxep_init(dcp);
++		if (ret)
++			dev_warn(dcp->dev, "Failed to start DPTX endpoint: %d",
++				 ret);
++		else if (dcp->dptxport[0].enabled) {
++			bool connected;
++			/* force disconnect on start - necessary if the display
++			 * is already up from m1n1
++			 */
++			dptxport_set_hpd(dcp->dptxport[0].service, false);
++			dptxport_release_display(dcp->dptxport[0].service);
++			usleep_range(10 * USEC_PER_MSEC, 25 * USEC_PER_MSEC);
++
++			connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
++			dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
++
++			// necessary on j473/j474 but not on j314c
++			if (connected)
++				dcp_dptx_connect(dcp, 0);
++			/*
++			 * Long sleep necessary to ensure dcp delivers timing
++			 * modes with matched color modes.
++			 * 400ms was sufficient on j473
++			 */
++			msleep(500);
++		}
++	} else if (dcp->phy)
++		dev_warn(dcp->dev, "OS firmware incompatible with dptxport EP\n");
+ 
+ 	ret = iomfb_start_rtkit(dcp);
+ 	if (ret)
+@@ -373,17 +390,8 @@ EXPORT_SYMBOL(dcp_start);
+ 
+ static int dcp_enable_dp2hdmi_hpd(struct apple_dcp *dcp)
+ {
+-	if (dcp->hdmi_hpd) {
+-		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
+-		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
+-
+-		// necessary on j473/j474 but not on j314c
+-		if (connected)
+-			dcp_dptx_connect(dcp, 0);
+-
+-		if (dcp->hdmi_hpd_irq)
+-			enable_irq(dcp->hdmi_hpd_irq);
+-	}
++	if (dcp->hdmi_hpd_irq)
++		enable_irq(dcp->hdmi_hpd_irq);
+ 
+ 	return 0;
+ }

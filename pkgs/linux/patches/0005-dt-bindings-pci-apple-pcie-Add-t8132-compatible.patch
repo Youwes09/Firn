@@ -1,0 +1,109 @@
+From f5be9c79007c77fc8f8d01d08f687fcbf5d0473a Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 12:17:40 -0500
+Subject: [PATCH] dt-bindings: pci: apple,pcie: Add t8132 compatible
+
+The M4 (t8132) PCIe controller works like t6020's but has three root
+ports, so its PHY ranges follow port2. Add the compatible and give it
+its own reg-names list.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../devicetree/bindings/pci/apple,pcie.yaml   | 58 +++++++++++++++----
+ 1 file changed, 46 insertions(+), 12 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/pci/apple,pcie.yaml b/Documentation/devicetree/bindings/pci/apple,pcie.yaml
+index c0852be04f6d..86ad71be593c 100644
+--- a/Documentation/devicetree/bindings/pci/apple,pcie.yaml
++++ b/Documentation/devicetree/bindings/pci/apple,pcie.yaml
+@@ -19,7 +19,8 @@ description: |
+ 
+   On systems derived from T602x, the PHY registers are in a region
+   separate from the port registers. In that case, there is one PHY
+-  register range per port register range.
++  register range per port register range. T8132 has three root ports,
++  so its PHY ranges follow the third port range.
+ 
+   All root ports share a single ECAM space, but separate GPIOs are
+   used to take the PCI devices on those ports out of reset.  Therefore
+@@ -42,6 +43,9 @@ properties:
+               - apple,t6000-pcie
+           - const: apple,pcie
+       - const: apple,t6020-pcie
++      - items:
++          - const: apple,t8132-pcie
++          - const: apple,t6020-pcie
+ 
+   reg:
+     minItems: 3
+@@ -49,17 +53,7 @@ properties:
+ 
+   reg-names:
+     minItems: 3
+-    items:
+-      - const: config
+-      - const: rc
+-      - const: port0
+-      - const: port1
+-      - const: port2
+-      - const: port3
+-      - const: phy0
+-      - const: phy1
+-      - const: phy2
+-      - const: phy3
++    maxItems: 10
+ 
+   ranges:
+     minItems: 2
+@@ -108,11 +102,51 @@ allOf:
+           maxItems: 5
+         interrupts:
+           maxItems: 3
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: apple,t8132-pcie
++    then:
++      properties:
++        reg:
++          minItems: 8
++          maxItems: 8
++        reg-names:
++          items:
++            - const: config
++            - const: rc
++            - const: port0
++            - const: port1
++            - const: port2
++            - const: phy0
++            - const: phy1
++            - const: phy2
++        interrupts:
++          maxItems: 3
++    else:
++      properties:
++        reg-names:
++          minItems: 3
++          items:
++            - const: config
++            - const: rc
++            - const: port0
++            - const: port1
++            - const: port2
++            - const: port3
++            - const: phy0
++            - const: phy1
++            - const: phy2
++            - const: phy3
+   - if:
+       properties:
+         compatible:
+           contains:
+             const: apple,t6020-pcie
++          not:
++            contains:
++              const: apple,t8132-pcie
+     then:
+       properties:
+         reg-names:

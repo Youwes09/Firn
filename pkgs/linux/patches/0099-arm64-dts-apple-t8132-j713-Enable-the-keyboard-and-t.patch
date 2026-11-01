@@ -1,0 +1,86 @@
+From 70a6a5c3702b2553cf3ce8f001a196ba6d1a84cb Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 18:42:35 -0500
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Enable the keyboard and
+ trackpad
+
+Enable the MTP with its multi-touch firmware, the HID interfaces it
+announces, and the AFE reset on SMC GPIO 28. m1n1 fills in the
+keyboard layout and maps the MTP firmware through the keyboard and mtp
+aliases.
+
+Based on Josh Rodd's J715 enablement and Firn's AFE reset, as carried
+in Gravity Linux.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 49 ++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index ee6458d56622..f95aff4902ad 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -17,6 +17,12 @@ / {
+ 	compatible = "apple,j713", "apple,t8132", "apple,arm-platform";
+ 	model = "Apple MacBook Air (13-inch, M4, 2025)";
+ 
++	aliases {
++		/* m1n1 fills in the layout and maps the MTP firmware through these. */
++		keyboard = &keyboard;
++		mtp = &mtp;
++	};
++
+ 	led-controller {
+ 		compatible = "pwm-leds";
+ 		led-0 {
+@@ -42,6 +48,49 @@ &fpwm1 {
+ 	status = "okay";
+ };
+ 
++&mtp {
++	status = "okay";
++};
++
++&mtp_dart {
++	status = "okay";
++};
++
++&mtp_dockchannel {
++	status = "okay";
++};
++
++&mtp_hid {
++	apple,afe-reset-gpios = <&smc_gpio 28 GPIO_ACTIVE_LOW>;
++
++	status = "okay";
++
++	actuator {
++	};
++
++	keyboard: keyboard {
++		hid-country-code = <0>;
++		apple,keyboard-layout-id = <0>;
++	};
++
++	mtp {
++	};
++
++	multi-touch {
++		firmware-name = "apple/tpmtfw-j713.bin";
++	};
++
++	stm {
++	};
++
++	tp-accel {
++	};
++};
++
++&mtp_mbox {
++	status = "okay";
++};
++
+ #include "hwmon-laptop.dtsi"
+ 
+ &smc_hwmon {

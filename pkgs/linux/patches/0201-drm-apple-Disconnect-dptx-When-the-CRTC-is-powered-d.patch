@@ -1,0 +1,160 @@
+From b4e58516a73b189af20df4db23f63d603f721825 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 20 Nov 2023 22:56:43 +0100
+Subject: [PATCH] drm: apple: Disconnect dptx When the CRTC is powered down
+
+Seems to make disconnect / reconnect more reliable and almost fixes
+suspend/resume. The drm device tries to modeset too early on resume
+which leaves the screen blank.
+This should reduce power consumption after disconnecting the HDMI port.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c   | 64 +++++++++++++++++++++++++++++++++++
+ drivers/gpu/drm/apple/iomfb.c | 51 ----------------------------
+ 2 files changed, 64 insertions(+), 51 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 05f88a83dd60..9d5c07bd0857 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -287,6 +287,7 @@ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ 	struct apple_connector *connector = dcp->connector;
+ 
+ 	mutex_lock(&dcp->hpd_mutex);
++
+ 	if (connector && connector->connected) {
+ 		dcp->valid_mode = false;
+ 		schedule_work(&connector->hotplug_wq);
+@@ -407,6 +408,69 @@ int dcp_wait_ready(struct platform_device *pdev, u64 timeout)
+ }
+ EXPORT_SYMBOL(dcp_wait_ready);
+ 
++static void __maybe_unused dcp_sleep(struct apple_dcp *dcp)
++{
++	switch (dcp->fw_compat) {
++	case DCP_FIRMWARE_V_12_3:
++		iomfb_sleep_v12_3(dcp);
++		break;
++	case DCP_FIRMWARE_V_13_5:
++		iomfb_sleep_v13_3(dcp);
++		break;
++	default:
++		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
++		break;
++	}
++}
++
++void dcp_poweron(struct platform_device *pdev)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	if (dcp->hdmi_hpd) {
++		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
++		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
++
++		if (connected)
++			dcp_dptx_connect(dcp, 0);
++	}
++
++	switch (dcp->fw_compat) {
++	case DCP_FIRMWARE_V_12_3:
++		iomfb_poweron_v12_3(dcp);
++		break;
++	case DCP_FIRMWARE_V_13_5:
++		iomfb_poweron_v13_3(dcp);
++		break;
++	default:
++		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
++		break;
++	}
++}
++EXPORT_SYMBOL(dcp_poweron);
++
++void dcp_poweroff(struct platform_device *pdev)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	switch (dcp->fw_compat) {
++	case DCP_FIRMWARE_V_12_3:
++		iomfb_poweroff_v12_3(dcp);
++		break;
++	case DCP_FIRMWARE_V_13_5:
++		iomfb_poweroff_v13_3(dcp);
++		break;
++	default:
++		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
++		break;
++	}
++
++	if (dcp->phy)
++		dcp_dptx_disconnect(dcp, 0);
++
++}
++EXPORT_SYMBOL(dcp_poweroff);
++
+ static void dcp_work_register_backlight(struct work_struct *work)
+ {
+ 	int ret;
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index af61d74ca443..d6af92637355 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -219,57 +219,6 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context)
+ 			 dcpep_ack(context));
+ }
+ 
+-void dcp_sleep(struct apple_dcp *dcp)
+-{
+-	switch (dcp->fw_compat) {
+-	case DCP_FIRMWARE_V_12_3:
+-		iomfb_sleep_v12_3(dcp);
+-		break;
+-	case DCP_FIRMWARE_V_13_5:
+-		iomfb_sleep_v13_3(dcp);
+-		break;
+-	default:
+-		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+-		break;
+-	}
+-}
+-
+-void dcp_poweron(struct platform_device *pdev)
+-{
+-	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+-
+-	switch (dcp->fw_compat) {
+-	case DCP_FIRMWARE_V_12_3:
+-		iomfb_poweron_v12_3(dcp);
+-		break;
+-	case DCP_FIRMWARE_V_13_5:
+-		iomfb_poweron_v13_3(dcp);
+-		break;
+-	default:
+-		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+-		break;
+-	}
+-}
+-EXPORT_SYMBOL(dcp_poweron);
+-
+-void dcp_poweroff(struct platform_device *pdev)
+-{
+-	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+-
+-	switch (dcp->fw_compat) {
+-	case DCP_FIRMWARE_V_12_3:
+-		iomfb_poweroff_v12_3(dcp);
+-		break;
+-	case DCP_FIRMWARE_V_13_5:
+-		iomfb_poweroff_v13_3(dcp);
+-		break;
+-	default:
+-		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+-		break;
+-	}
+-}
+-EXPORT_SYMBOL(dcp_poweroff);
+-
+ /*
+  * Helper to send a DRM hotplug event. The DCP is accessed from a single
+  * (RTKit) thread. To handle hotplug callbacks, we need to call

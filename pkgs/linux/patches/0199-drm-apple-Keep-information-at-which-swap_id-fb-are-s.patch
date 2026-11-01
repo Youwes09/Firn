@@ -1,0 +1,72 @@
+From 97d6b071217b3b8b79747769d226ed3d9dab1653 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 19 Nov 2023 18:25:22 +0100
+Subject: [PATCH] drm: apple: Keep information at which swap_id fb are still
+ referenced
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp-internal.h   | 4 ++++
+ drivers/gpu/drm/apple/iomfb_template.c | 6 ++++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index d7ffb8146e42..4817412edf64 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -75,6 +75,7 @@ struct dcp_channel {
+ struct dcp_fb_reference {
+ 	struct list_head head;
+ 	struct drm_framebuffer *fb;
++	u32 swap_id;
+ };
+ 
+ #define MAX_NOTCH_HEIGHT 160
+@@ -167,6 +168,9 @@ struct apple_dcp {
+ 		struct dcp_swap_submit_req_v13_3 v13_3;
+ 	} swap;
+ 
++	/* swap id of the last completed swap */
++	u32 last_swap_id;
++
+ 	/* Current display mode */
+ 	bool valid_mode;
+ 	struct dcp_set_digital_out_mode_req mode;
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index cb954b25ccdb..d3587068f7e7 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -121,6 +121,7 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
+ 				   struct DCP_FW_NAME(dc_swap_complete_resp) *resp)
+ {
+ 	trace_iomfb_swap_complete(dcp, resp->swap_id);
++	dcp->last_swap_id = resp->swap_id;
+ 
+ 	dcp_drm_crtc_vblank(dcp->crtc);
+ }
+@@ -736,6 +737,8 @@ static void dcp_swap_cleared(struct apple_dcp *dcp, void *data, void *cookie)
+ 		struct dcp_fb_reference *entry;
+ 		entry = list_first_entry(&dcp->swapped_out_fbs,
+ 					 struct dcp_fb_reference, head);
++		if (entry->swap_id == dcp->last_swap_id)
++			break;
+ 		if (entry->fb)
+ 			drm_framebuffer_put(entry->fb);
+ 		list_del(&entry->head);
+@@ -1129,6 +1132,8 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
+ 		struct dcp_fb_reference *entry;
+ 		entry = list_first_entry(&dcp->swapped_out_fbs,
+ 					 struct dcp_fb_reference, head);
++		if (entry->swap_id == dcp->last_swap_id)
++			break;
+ 		if (entry->fb)
+ 			drm_framebuffer_put(entry->fb);
+ 		list_del(&entry->head);
+@@ -1236,6 +1241,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 				kzalloc(sizeof(*entry), GFP_KERNEL);
+ 			if (entry) {
+ 				entry->fb = old_state->fb;
++				entry->swap_id = dcp->last_swap_id;
+ 				list_add_tail(&entry->head,
+ 					      &dcp->swapped_out_fbs);
+ 			}

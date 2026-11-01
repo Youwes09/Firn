@@ -1,0 +1,22 @@
+From ed24e97e6fdf30887d6144780ee8a0a9f1dcd5ca Mon Sep 17 00:00:00 2001
+From: Alyssa Ross <hi@alyssa.is>
+Date: Thu, 11 Jan 2024 11:39:10 +0100
+Subject: [PATCH] drm/apple: Add missing RTKit Kconfig dependency
+
+Signed-off-by: Alyssa Ross <hi@alyssa.is>
+---
+ drivers/gpu/drm/apple/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/apple/Kconfig b/drivers/gpu/drm/apple/Kconfig
+index b28b84cef961..e2d424b98331 100644
+--- a/drivers/gpu/drm/apple/Kconfig
++++ b/drivers/gpu/drm/apple/Kconfig
+@@ -3,6 +3,7 @@ config DRM_APPLE
+ 	tristate "DRM Support for Apple display controllers"
+ 	depends on DRM && OF && ARM64
+ 	depends on ARCH_APPLE || COMPILE_TEST
++	depends on APPLE_RTKIT
+ 	depends on OF_ADDRESS
+ 	select DRM_CLIENT_SELECTION
+ 	select DRM_KMS_HELPER

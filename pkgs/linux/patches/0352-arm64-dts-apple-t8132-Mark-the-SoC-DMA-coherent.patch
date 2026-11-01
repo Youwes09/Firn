@@ -1,0 +1,29 @@
+From a581adc79c1f0448dcff40a740928452fadcab8d Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sat, 31 Oct 2026 14:11:12 -0500
+Subject: [PATCH] arm64: dts: apple: t8132: Mark the SoC DMA-coherent
+
+The T8132 cores report CLIDR_EL1.LoC == 0, so DMA needs no cache
+maintenance and arm64 already treats every device as coherent, warning
+for each one the devicetree leaves non-coherent; that is every device,
+on every probe attempt. Say so in the devicetree instead.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index ec2ff1f0dc62..51d6197d2640 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -15,6 +15,9 @@
+ / {
+ 	compatible = "apple,t8132", "apple,arm-platform";
+ 
++	/* The cores report CLIDR_EL1.LoC == 0: no DMA needs cache maintenance. */
++	dma-coherent;
++
+ 	#address-cells = <2>;
+ 	#size-cells = <2>;
+ 

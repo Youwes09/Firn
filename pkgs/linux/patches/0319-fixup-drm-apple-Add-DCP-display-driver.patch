@@ -1,0 +1,122 @@
+From ddc944cf8edfdd4ec2eb32d1f88e452e77b0b171 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 23 Aug 2026 22:56:48 +0200
+Subject: [PATCH] fixup! drm/apple: Add DCP display driver
+
+---
+ drivers/gpu/drm/apple/apple_drv.c     | 10 +++++-----
+ drivers/gpu/drm/apple/dcp.c           |  4 ++--
+ drivers/gpu/drm/apple/dcp.h           |  2 +-
+ drivers/gpu/drm/apple/dcp_backlight.c |  4 ++--
+ drivers/gpu/drm/apple/iomfb.c         |  2 +-
+ 5 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 17b59033f12d..8f0845050146 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -101,10 +101,10 @@ static void apple_connector_oob_hotplug(struct drm_connector *connector,
+ }
+ 
+ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+-				     struct drm_atomic_state *state)
++				     struct drm_atomic_commit *commit)
+ {
+ 	struct drm_crtc_state *crtc_state;
+-	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
+ 
+ 	if (crtc_state->active_changed && crtc_state->active) {
+ 		struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
+@@ -118,10 +118,10 @@ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+ }
+ 
+ static void apple_crtc_atomic_disable(struct drm_crtc *crtc,
+-				      struct drm_atomic_state *state)
++				      struct drm_atomic_commit *commit)
+ {
+ 	struct drm_crtc_state *crtc_state;
+-	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
+ 
+ 	if (crtc_state->active_changed && !crtc_state->active) {
+ 		struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
+@@ -138,7 +138,7 @@ static void apple_crtc_atomic_disable(struct drm_crtc *crtc,
+ }
+ 
+ static void apple_crtc_atomic_begin(struct drm_crtc *crtc,
+-				    struct drm_atomic_state *state)
++				    struct drm_atomic_commit *commit)
+ {
+ 	struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
+ 	unsigned long flags;
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index ddd413fdeab2..5529a277a193 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -327,7 +327,7 @@ void dcp_send_message(struct apple_dcp *dcp, u8 endpoint, u64 message)
+ 				 true);
+ }
+ 
+-int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
++int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+ {
+ 	struct platform_device *pdev = to_apple_crtc(crtc)->dcp;
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+@@ -337,7 +337,7 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ 	if (dcp->crashed)
+ 		return -EINVAL;
+ 
+-	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
+ 
+ 	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state) || !dcp->valid_mode;
+ 	if (!needs_modeset && !dcp->connector->connected) {
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 2b421772bf5d..61df0b0e0889 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -40,7 +40,7 @@ void dcp_link(struct platform_device *pdev, struct apple_crtc *apple,
+ 	      struct apple_connector *connector);
+ int dcp_start(struct platform_device *pdev);
+ int dcp_wait_ready(struct platform_device *pdev, u64 timeout);
+-void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state);
++void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit);
+ bool dcp_is_initialized(struct platform_device *pdev);
+ void apple_crtc_vblank(struct apple_crtc *apple);
+ void dcp_drm_crtc_vblank(struct apple_crtc *crtc);
+diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
+index 9eb0c7d4eb53..b4a046c7c145 100644
+--- a/drivers/gpu/drm/apple/dcp_backlight.c
++++ b/drivers/gpu/drm/apple/dcp_backlight.c
+@@ -138,7 +138,7 @@ static u32 calculate_dac(struct apple_dcp *dcp, int val)
+ 
+ static int drm_crtc_set_brightness(struct apple_dcp *dcp)
+ {
+-	struct drm_atomic_state *state;
++	struct drm_atomic_commit *commit;
+ 	struct drm_crtc_state *crtc_state;
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	struct drm_crtc *crtc = &dcp->crtc->base;
+@@ -171,7 +171,7 @@ static int drm_crtc_set_brightness(struct apple_dcp *dcp)
+ 
+ 	crtc_state->color_mgmt_changed |= true;
+ 
+-	ret = drm_atomic_commit(state);
++	ret = drm_atomic_commit(commit);
+ 
+ fail:
+ 	drm_atomic_state_put(state);
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 1d9448f0f4dc..a5d8b9e49124 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -458,7 +458,7 @@ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ }
+ 
+ 
+-void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
++void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+ {
+ 	struct platform_device *pdev = to_apple_crtc(crtc)->dcp;
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);

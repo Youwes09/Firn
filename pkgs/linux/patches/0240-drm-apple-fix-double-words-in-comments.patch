@@ -1,0 +1,46 @@
+From 01e1ea673baf5a913df5294d7ae1e572ef8e7d08 Mon Sep 17 00:00:00 2001
+From: Jonathan Gray <jsg@jsg.id.au>
+Date: Sun, 21 Apr 2024 11:15:04 +1000
+Subject: [PATCH] drm/apple: fix double words in comments
+
+Signed-off-by: Jonathan Gray <jsg@jsg.id.au>
+---
+ drivers/gpu/drm/apple/afk.c          | 2 +-
+ drivers/gpu/drm/apple/dcp-internal.h | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index bb65b24fcc1a..5e3b5d392f94 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -641,7 +641,7 @@ static bool afk_recv(struct apple_dcp_afkep *ep)
+ 	 * TODO: this is theoretically unsafe since DCP could overwrite data
+ 	 *       after the read pointer was updated above. Do it anyway since
+ 	 *       it avoids 2 problems in the DCP tracer:
+-	 *       1. the tracer sees replies before the the notifies from dcp
++	 *       1. the tracer sees replies before the notifies from dcp
+ 	 *       2. the tracer tries to read buffers after they are unmapped.
+ 	 */
+ 	afk_recv_handle(ep, channel, type, hdr->data, size);
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index b8df2f5c6e02..c1d6da9a433d 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -128,7 +128,7 @@ struct apple_dcp {
+ 
+ 	/************* IOMFB **************************************************
+ 	 * everything below is mostly used inside IOMFB but it could make     *
+-	 * sense keep some of the the members in apple_dcp.                   *
++	 * sense to keep some of the members in apple_dcp.                    *
+ 	 **********************************************************************/
+ 
+ 	/* clock rate request by dcp in */
+@@ -212,7 +212,7 @@ struct apple_dcp {
+ 	struct list_head swapped_out_fbs;
+ 
+ 	struct dcp_brightness brightness;
+-	/* Workqueue for updating the initial initial brightness */
++	/* Workqueue for updating the initial brightness */
+ 	struct work_struct bl_register_wq;
+ 	struct mutex bl_register_mutex;
+ 	/* Workqueue for updating the brightness */

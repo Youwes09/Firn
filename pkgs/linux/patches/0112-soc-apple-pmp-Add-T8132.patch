@@ -1,0 +1,212 @@
+From b2dbb644e219fcf34414141f45885112ea5d2d5c Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 26 Oct 2026 19:30:00 -0400
+Subject: [PATCH] soc: apple: pmp: Add T8132
+
+On T8132 each register descriptor carries the key SetIOReg later looks
+it up by, at offset 0x48, and descriptors may reuse a key, so keep the
+latest size per key and reply without an index. The firmware also sends
+AdvertiseDone, acknowledged with 8, and the four display monitors take
+an initial value of 1 from the value buffer; left at zero, PMP silently
+disables their policy. PMP's DART maps buffers above 4 GiB, so use a
+42-bit DMA mask.
+
+[Youwes09: split from niklassheth/linux 874b03ddd4ce and 97aff83ccc85;
+ keys checked against the 16-bit SetIOReg index; descriptor logging
+ left out]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/soc/apple/pmp.rs | 99 ++++++++++++++++++++++++++++++++++------
+ 1 file changed, 85 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/soc/apple/pmp.rs b/drivers/soc/apple/pmp.rs
+index 02ab0a5a4eac..ec7dc26761c8 100644
+--- a/drivers/soc/apple/pmp.rs
++++ b/drivers/soc/apple/pmp.rs
+@@ -9,7 +9,11 @@
+         Bound,
+         Core, //
+     },
+-    dma::Coherent,
++    dma::{
++        Coherent,
++        Device as _,
++        DmaMask, //
++    },
+     io::{
+         io_project,
+         Io, //
+@@ -36,12 +40,33 @@
+ const OPC_SET_BUF: u64 = 0x30;
+ const OPC_REGISTER_IOREG: u64 = 0x32;
+ const OPC_SET_IOREG: u64 = 0x34;
++const OPC_ADVERTISE_DONE: u64 = 0x36;
+ const OPC_ACK_MASK: u64 = 0x1;
+ const OPC_SHIFT: u32 = 48;
+ const MALLOC_SIZE_MASK: u64 = 0xFFFFFF;
+ const MSG_IOVA_MASK: u64 = 0xFFFFFFFFFFFF;
+ const SET_IOREG_INDEX_MASK: u64 = 0xFFFF;
+ 
++/// Registers that take their initial value from the value buffer.
++const DISPLAY_MONITORS: [&CStr; 4] = [
++    c"dcs-monitor",
++    c"disp-monitor",
++    c"dispext0-monitor",
++    c"dispext1-monitor",
++];
++
++struct PmpHwConfig {
++    /// Register descriptors carry their own SetIOReg key, rather than
++    /// being numbered in the order they arrive.
++    keyed_ioregs: bool,
++}
++
++const PMP_T6000: PmpHwConfig = PmpHwConfig {
++    keyed_ioregs: false,
++};
++
++const PMP_T8132: PmpHwConfig = PmpHwConfig { keyed_ioregs: true };
++
+ const fn fourcc(b: &[u8; 4]) -> u32 {
+     u32::from_be_bytes(*b)
+ }
+@@ -82,12 +107,16 @@ fn get_buf(&self, addr: u64) -> Option<&Coherent<'a, [u8]>> {
+ #[pin_data]
+ struct Pmp<'a> {
+     pdev: &'a platform::Device<Bound>,
++    cfg: &'a PmpHwConfig,
+     #[pin]
+     state: Mutex<PmpState<'a>>,
+ }
+ 
+ impl<'a> Pmp<'a> {
+-    fn new(pdev: &'a platform::Device<Bound>) -> Result<impl PinInit<Self, Error> + 'a> {
++    fn new(
++        pdev: &'a platform::Device<Bound>,
++        cfg: &'a PmpHwConfig,
++    ) -> Result<impl PinInit<Self, Error> + 'a> {
+         let state = PmpState {
+             allocs: KVec::with_capacity(10, GFP_KERNEL)?,
+             value_buf: None,
+@@ -96,6 +125,7 @@ fn new(pdev: &'a platform::Device<Bound>) -> Result<impl PinInit<Self, Error> +
+ 
+         Ok(try_pin_init!(Self {
+             pdev,
++            cfg,
+             state <- new_mutex!(state),
+         }))
+     }
+@@ -160,16 +190,47 @@ fn register_ioreg(&self, addr: u64) -> Result<u64> {
+         let mut state = self.state.lock();
+         let desc = state.get_buf(addr).ok_or(EIO)?;
+ 
++        let mut name = [0; 0x31];
++        name[..0x30].copy_from_slice(&read_bytes::<0x30>(desc, 0)?);
++        let name = CStr::from_bytes_until_nul(&name).map_err(|_| EIO)?;
+         let mut size = u32::from_le_bytes(read_bytes(desc, 0x40)?);
+-        if size == 0 {
+-            let mut name = [0; 0x31];
+-            name[..0x30].copy_from_slice(&read_bytes::<0x30>(desc, 0)?);
+-            let name = CStr::from_bytes_until_nul(&name).map_err(|_| EIO)?;
++        let key = if self.cfg.keyed_ioregs {
++            let key = u32::from_le_bytes(read_bytes(desc, 0x48)?);
++            // SetIOReg looks the key up by a 16-bit index.
++            if u64::from(key) > SET_IOREG_INDEX_MASK {
++                return Err(EINVAL);
++            }
++            Some(key as usize)
++        } else {
++            None
++        };
++
++        if size == 4 && DISPLAY_MONITORS.contains(&name) {
++            // Left at zero, PMP silently disables the monitor's policy.
++            let buf = state
++                .value_buf
++                .and_then(|addr| state.get_buf(addr))
++                .ok_or(EIO)?;
++            io_project!(buf, [try: 0..4]).copy_from_slice(&1u32.to_le_bytes());
++        } else if size == 0 {
+             size = self.load_tunable(&state, name)?;
+         }
+ 
+-        state.ioreg_entries.push(size, GFP_KERNEL)?;
+-        let index = state.ioreg_entries.len() as u64;
++        let index = match key {
++            // Descriptors may reuse a key; the latest size wins, and the
++            // reply carries no index.
++            Some(key) => {
++                if state.ioreg_entries.len() <= key {
++                    state.ioreg_entries.resize(key + 1, 0, GFP_KERNEL)?;
++                }
++                state.ioreg_entries[key] = size;
++                0
++            }
++            None => {
++                state.ioreg_entries.push(size, GFP_KERNEL)?;
++                state.ioreg_entries.len() as u64
++            }
++        };
+         Ok(ack(OPC_REGISTER_IOREG) | (index << 32) | u64::from(size))
+     }
+ 
+@@ -188,6 +249,8 @@ fn handle(&self, msg: u64) -> Result<u64> {
+             OPC_SET_BUF => self.set_buf(msg & MSG_IOVA_MASK),
+             OPC_REGISTER_IOREG => self.register_ioreg(msg & MSG_IOVA_MASK),
+             OPC_SET_IOREG => self.set_ioreg(msg & SET_IOREG_INDEX_MASK),
++            // The firmware expects 8, not the count of registers it sent.
++            OPC_ADVERTISE_DONE => Ok(ack(OPC_ADVERTISE_DONE) | 8),
+             _ => {
+                 dev_err!(self.pdev, "Unknown message {msg:#x}\n");
+                 Err(EIO)
+@@ -257,7 +320,12 @@ fn start_cpu(pdev: &platform::Device<Bound>) -> Result {
+ 
+ type PmpData<'a> = Pin<KBox<rtkit::Registration<'a, Pmp<'a>>>>;
+ 
+-fn start<'a>(pdev: &'a platform::Device<Bound>) -> Result<PmpData<'a>> {
++fn start<'a>(pdev: &'a platform::Device<Core<'_>>, cfg: &'a PmpHwConfig) -> Result<PmpData<'a>> {
++    // PMP's DART maps buffers above 4 GiB, at 0x100_0000_0000 on T8132.
++    // SAFETY: Nothing has allocated or mapped DMA memory for the device yet.
++    unsafe { pdev.dma_set_mask_and_coherent(DmaMask::new::<42>())? };
++
++    let pdev: &'a platform::Device<Bound> = pdev;
+     let dev = pdev.as_ref();
+     let node = dev.fwnode().ok_or(EINVAL)?;
+ 
+@@ -277,7 +345,7 @@ fn start<'a>(pdev: &'a platform::Device<Bound>) -> Result<PmpData<'a>> {
+ 
+     let mut rtk = KBox::pin_init(
+         // SAFETY: The registration is the driver data, which is dropped on unbind.
+-        unsafe { rtkit::Registration::new(dev, None, Pmp::new(pdev)?) },
++        unsafe { rtkit::Registration::new(dev, None, Pmp::new(pdev, cfg)?) },
+         GFP_KERNEL,
+     )?;
+ 
+@@ -292,20 +360,23 @@ fn start<'a>(pdev: &'a platform::Device<Bound>) -> Result<PmpData<'a>> {
+ kernel::of_device_table!(
+     OF_TABLE,
+     <PmpDriver as platform::Driver>::IdInfo,
+-    [(of::DeviceId::new(c"apple,t6000-pmp-v2"), ())]
++    [
++        (of::DeviceId::new(c"apple,t8132-pmp-v2"), PMP_T8132),
++        (of::DeviceId::new(c"apple,t6000-pmp-v2"), PMP_T6000),
++    ]
+ );
+ 
+ impl platform::Driver for PmpDriver {
+-    type IdInfo = ();
++    type IdInfo = PmpHwConfig;
+     type Data<'bound> = PmpData<'bound>;
+ 
+     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
+ 
+     fn probe<'bound>(
+         pdev: &'bound platform::Device<Core<'_>>,
+-        _info: Option<&'bound Self::IdInfo>,
++        info: Option<&'bound Self::IdInfo>,
+     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+-        start(pdev)
++        start(pdev, info.ok_or(ENODEV)?)
+     }
+ }
+ 

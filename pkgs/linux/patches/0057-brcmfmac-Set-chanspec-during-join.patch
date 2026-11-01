@@ -1,0 +1,30 @@
+From 662677d227f8eb0d201c22a8a4694700aa83e296 Mon Sep 17 00:00:00 2001
+From: Daniel Berlin <dberlin@dberlin.org>
+Date: Sun, 29 Oct 2023 16:22:24 -0400
+Subject: [PATCH] [brcmfmac] Set chanspec during join.
+
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+(cherry picked from commit 2417677b7a46c9623263975e5aa0cea18b580eae)
+
+Original-Commit: 96bd3c5e8162285d5b407a22f187495b044b5492
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index c5b51ff5d14a..712a0b389dbe 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -1794,9 +1794,8 @@ static s32 brcmf_cfg80211_join_ibss(struct wiphy *wiphy,
+ 
+ 		/* set chanspec */
+ 		err = brcmf_fil_iovar_int_set(ifp, "chanspec", chanspec);
+-
+ 		if (err) {
+-			bphy_err(drvr, "WLC_SET_CHANNEL failed (%d)\n", err);
++			bphy_err(drvr, "Setting chanspec failed (%d)\n", err);
+ 			goto done;
+ 		}
+ 	}

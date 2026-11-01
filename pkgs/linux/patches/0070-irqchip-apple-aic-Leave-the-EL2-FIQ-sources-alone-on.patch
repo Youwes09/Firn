@@ -1,0 +1,90 @@
+From 71c492a2924752fb7e54d4271e0afaccc3e75cba Mon Sep 17 00:00:00 2001
+From: KB2UKA <kb2uka80@gmail.com>
+Date: Mon, 26 Oct 2026 08:42:00 -0500
+Subject: [PATCH] irqchip/apple-aic: Leave the EL2 FIQ sources alone on t8132
+
+On t8132 (M4), a kernel running at EL2 hangs in irqchip init, before it
+can print anything, when AIC writes SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2 or
+ICH_HCR_EL2 to mask the guest timer and vGIC maintenance interrupts.
+Reading the timer enables from the FIQ handler works.
+
+Add a t8132 match whose data skips those writes. The guest timer FIQs
+then cannot be masked or unmasked, so KVM guests get no timer
+interrupts on this SoC until the cause is understood.
+
+Based on work from Omarchy-M4-Native
+(https://github.com/Kb2uka/Omarchy-M4-Native), released under GPL-2.0.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/irqchip/irq-apple-aic.c | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/irqchip/irq-apple-aic.c b/drivers/irqchip/irq-apple-aic.c
+index 4a3141d9f914..0f5625cf517f 100644
+--- a/drivers/irqchip/irq-apple-aic.c
++++ b/drivers/irqchip/irq-apple-aic.c
+@@ -260,6 +260,12 @@ struct aic_info {
+ 	/* Features */
+ 	bool fast_ipi;
+ 	bool local_fast_ipi;
++
++	/*
++	 * The EL2 guest timer FIQ enables and the vGIC maintenance
++	 * interrupt control must not be written (t8132).
++	 */
++	bool no_el2_sources;
+ };
+ 
+ static const struct aic_info aic1_info __initconst = {
+@@ -306,7 +312,21 @@ static const struct aic_info aic3_info __initconst = {
+ 	.local_fast_ipi = true,
+ };
+ 
++static const struct aic_info aic3_t8132_info __initconst = {
++	.version	= 3,
++
++	.irq_cfg	= AIC3_IRQ_CFG,
++
++	.fast_ipi	= true,
++	.local_fast_ipi = true,
++	.no_el2_sources = true,
++};
++
+ static const struct of_device_id aic_info_match[] = {
++	{
++		.compatible = "apple,t8132-aic3",
++		.data = &aic3_t8132_info,
++	},
+ 	{
+ 		.compatible = "apple,t8103-aic",
+ 		.data = &aic1_local_fipi_info,
+@@ -499,6 +519,9 @@ static unsigned long aic_fiq_get_idx(struct irq_data *d)
+ 
+ static void aic_fiq_set_mask(struct irq_data *d)
+ {
++	if (aic_irqc->info.no_el2_sources)
++		return;
++
+ 	/* Only the guest timers have real mask bits, unfortunately. */
+ 	switch (aic_fiq_get_idx(d)) {
+ 	case AIC_TMR_EL02_PHYS:
+@@ -516,6 +539,9 @@ static void aic_fiq_set_mask(struct irq_data *d)
+ 
+ static void aic_fiq_clear_mask(struct irq_data *d)
+ {
++	if (aic_irqc->info.no_el2_sources)
++		return;
++
+ 	switch (aic_fiq_get_idx(d)) {
+ 	case AIC_TMR_EL02_PHYS:
+ 		sysreg_clear_set_s(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2, 0, VM_TMR_FIQ_ENABLE_P);
+@@ -869,7 +895,7 @@ static int aic_init_cpu(unsigned int cpu)
+ 	sysreg_clear_set(cntv_ctl_el0, 0, ARCH_TIMER_CTRL_IT_MASK);
+ 
+ 	/* EL2-only (VHE mode) IRQ sources */
+-	if (is_kernel_in_hyp_mode()) {
++	if (is_kernel_in_hyp_mode() && !aic_irqc->info.no_el2_sources) {
+ 		/* Guest timers */
+ 		sysreg_clear_set_s(SYS_IMP_APL_VM_TMR_FIQ_ENA_EL2,
+ 				   VM_TMR_FIQ_ENABLE_V | VM_TMR_FIQ_ENABLE_P, 0);

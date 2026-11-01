@@ -1,0 +1,35 @@
+From f2f755fbbe22468f24c2226b8e9dfa766e23b143 Mon Sep 17 00:00:00 2001
+From: Yureka <yuka@yuka.dev>
+Date: Mon, 1 Jun 2026 09:07:45 +0200
+Subject: [PATCH] cpuidle-apple: load on M3 / Pro / Max / Ultra
+
+This enables the Apple-specific deep WFI mode on more machines which support it.
+
+Signed-off-by: Yureka <yuka@yuka.dev>
+---
+ drivers/cpuidle/cpuidle-apple.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/cpuidle/cpuidle-apple.c b/drivers/cpuidle/cpuidle-apple.c
+index b7504066d75a..3d2b804df8a2 100644
+--- a/drivers/cpuidle/cpuidle-apple.c
++++ b/drivers/cpuidle/cpuidle-apple.c
+@@ -148,12 +148,17 @@ static int __init apple_cpuidle_init(void)
+ 
+ 	if (!(of_machine_is_compatible("apple,t8103") ||
+ 	      of_machine_is_compatible("apple,t8112") ||
++	      of_machine_is_compatible("apple,t8122") ||
+ 	      of_machine_is_compatible("apple,t6000") ||
+ 	      of_machine_is_compatible("apple,t6001") ||
+ 	      of_machine_is_compatible("apple,t6002") ||
+ 	      of_machine_is_compatible("apple,t6020") ||
+ 	      of_machine_is_compatible("apple,t6021") ||
+-	      of_machine_is_compatible("apple,t6022")))
++	      of_machine_is_compatible("apple,t6022") ||
++	      of_machine_is_compatible("apple,t6030") ||
++	      of_machine_is_compatible("apple,t6031") ||
++	      of_machine_is_compatible("apple,t6032") ||
++	      of_machine_is_compatible("apple,t6034")))
+ 		return 0;
+ 
+ 	pdev = platform_device_register_simple("cpuidle-apple", -1, NULL, 0);

@@ -1,0 +1,60 @@
+From ce870486b1216cb4c7a3bb9f6766752f5c71cdce Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 21 Oct 2025 22:37:15 +0200
+Subject: [PATCH] input: macsmc-input: Fix wakeup from s2idle
+
+Hard wakeup events are required to wake from s2idle. The comment in [1]
+to always send wakeup events is correct though. To combine both
+requirements use pm_wakeup_dev_event() and evaluate the previous
+conditions for calling pm_wakeup_hard_event() as hard parameters.
+The remark about always reporting KEY_POWER is only partially correct
+though. (Some) User space handles that indeed correctly but a system
+offering a agetty login prompt shuts down immediately after waking from
+s2idle.
+
+1: https://lore.kernel.org/all/qffp7kadq3xojla5k6f5pr37irgytqfsqvabr6ydvulxnkcgnn@bv5mrraxrhhe/
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/input/misc/macsmc-input.c | 21 +++++++++++----------
+ 1 file changed, 11 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/input/misc/macsmc-input.c b/drivers/input/misc/macsmc-input.c
+index 2c05b2e882c5..1a583d855661 100644
+--- a/drivers/input/misc/macsmc-input.c
++++ b/drivers/input/misc/macsmc-input.c
+@@ -46,13 +46,16 @@ static void macsmc_input_event_button(struct macsmc_input *smcin, unsigned long
+ 	switch (button) {
+ 	case BTN_POWER:
+ 	case BTN_TOUCHID:
+-		if (smcin->wakeup_mode) {
+-			if (state)
+-				pm_wakeup_event(smcin->dev, 0);
+-		} else {
+-			input_report_key(smcin->input, KEY_POWER, state);
+-			input_sync(smcin->input);
+-		}
++		pm_wakeup_dev_event(smcin->dev, 0, (smcin->wakeup_mode && state));
++		/*
++		 * Suppress KEY_POWER reports when suspended to avoid powering down
++		 * immediately after waking from s2idle.
++		 * */
++		if (smcin->wakeup_mode)
++			return;
++
++		input_report_key(smcin->input, KEY_POWER, state);
++		input_sync(smcin->input);
+ 		break;
+ 	case BTN_POWER_HELD_SHORT: /* power button held down; ignore */
+ 		break;
+@@ -80,9 +83,7 @@ static void macsmc_input_event_lid(struct macsmc_input *smcin, unsigned long eve
+ {
+ 	u8 lid_state = !!((event >> 8) & 0xff);
+ 
+-	if (smcin->wakeup_mode && !lid_state)
+-		pm_wakeup_event(smcin->dev, 0);
+-
++	pm_wakeup_dev_event(smcin->dev, 0, (smcin->wakeup_mode && !lid_state));
+ 	input_report_switch(smcin->input, SW_LID, lid_state);
+ 	input_sync(smcin->input);
+ }

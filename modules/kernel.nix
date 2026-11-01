@@ -14,6 +14,7 @@ let
   kernel = kernelPkgs.callPackage ../pkgs/linux {
     kernelPatches = [ ];
     useCcache = cfg.kernelCcache;
+    configfile = cfg.kernelConfig;
   };
 in
 {

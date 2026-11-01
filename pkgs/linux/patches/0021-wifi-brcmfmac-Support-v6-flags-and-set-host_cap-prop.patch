@@ -1,0 +1,89 @@
+From 46dd73d1bd12eab4905f4547dad10e60884e9183 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 18 Oct 2022 22:10:08 +0900
+Subject: [PATCH] wifi: brcmfmac: Support v6+ flags and set host_cap properly
+
+Interface versions 6 and above support having the host tell the dongle
+about what it supports via a host_cap field (it seems that if it is set
+to zero, some kind of unknown defaults are used). Explicitly support and
+set this.
+
+This also disables OOB deep sleep support; it doesn't look like deep
+sleep is properly supported yet at all (it needs more logic than merely
+acking requests, which is all pcie.c does right now).
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 2caa0e84df46a04b498c535452d94c7644408365)
+
+Original-Commit: 047013a0588d173f00ca14301cbf9975c27ed747
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/pcie.c        | 35 ++++++++++++++++++-
+ 1 file changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index bad99c4a70d1..be163db8af28 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -357,6 +357,8 @@ struct brcmf_pcie_console {
+ struct brcmf_pcie_shared_info {
+ 	u32 tcm_base_address;
+ 	u32 flags;
++	u32 flags2;
++	u32 flags3;
+ 	struct brcmf_pcie_ringbuf *commonrings[BRCMF_NROF_COMMON_MSGRINGS];
+ 	struct brcmf_pcie_ringbuf *flowrings;
+ 	u16 max_rxbufpost;
+@@ -1691,12 +1693,16 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
+ {
+ 	struct brcmf_bus *bus = dev_get_drvdata(&devinfo->pdev->dev);
+ 	struct brcmf_pcie_shared_info *shared;
++	u32 host_cap;
++	u32 host_cap2;
+ 	u32 addr;
+ 
+ 	shared = &devinfo->shared;
+ 	shared->tcm_base_address = sharedram_addr;
+ 
+-	shared->flags = brcmf_pcie_read_tcm32(devinfo, sharedram_addr);
++	shared->flags = brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
++	                                      BRCMF_SHARED_FLAGS_OFFSET);
++
+ 	shared->version = (u8)(shared->flags & BRCMF_PCIE_SHARED_VERSION_MASK);
+ 	brcmf_dbg(PCIE, "PCIe protocol version %d\n", shared->version);
+ 	if ((shared->version > BRCMF_PCIE_MAX_SHARED_VERSION) ||
+@@ -1737,6 +1743,33 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
+ 	brcmf_pcie_bus_console_init(devinfo);
+ 	brcmf_pcie_bus_console_read(devinfo, false);
+ 
++	/* Features added in revision 6 follow */
++	if (shared->version < 6)
++		return 0;
++
++	shared->flags2 = brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
++	                                       BRCMF_SHARED_FLAGS2_OFFSET);
++	shared->flags3 = brcmf_pcie_read_tcm32(devinfo, sharedram_addr +
++	                                       BRCMF_SHARED_FLAGS3_OFFSET);
++
++	/* Update host support flags */
++	host_cap = shared->version;
++	host_cap2 = 0;
++
++	if (shared->flags & BRCMF_PCIE_SHARED_HOSTRDY_DB1)
++		host_cap |= BRCMF_HOSTCAP_H2D_ENABLE_HOSTRDY;
++
++	if (shared->flags & BRCMF_PCIE_SHARED_DAR)
++		host_cap |= BRCMF_HOSTCAP_H2D_DAR;
++
++	/* Disable DS: this is not currently properly supported */
++	host_cap |= BRCMF_HOSTCAP_DS_NO_OOB_DW;
++
++	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
++			       BRCMF_SHARED_HOST_CAP_OFFSET, host_cap);
++	brcmf_pcie_write_tcm32(devinfo, sharedram_addr +
++			       BRCMF_SHARED_HOST_CAP2_OFFSET, host_cap2);
++
+ 	return 0;
+ }
+ 

@@ -1,0 +1,39 @@
+From 603589b53ad71c5208ce73d8ec69e21422a85503 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 21 Nov 2023 23:57:07 +0100
+Subject: [PATCH] drm: apple: iomfb: Improve hotplug related logging
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb.c          | 3 ++-
+ drivers/gpu/drm/apple/iomfb_template.c | 3 +++
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index d6af92637355..0d0a82f54417 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -236,7 +236,8 @@ void dcp_hotplug(struct work_struct *work)
+ 	dev = connector->base.dev;
+ 
+ 	dcp = platform_get_drvdata(connector->dcp);
+-	dev_info(dcp->dev, "%s: connected: %d", __func__, connector->connected);
++	dev_info(dcp->dev, "%s() connected:%d valid_mode:%d\n", __func__,
++		 connector->connected, dcp->valid_mode);
+ 
+ 	/*
+ 	 * DCP defers link training until we set a display mode. But we set
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index d3587068f7e7..87b58f647651 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1014,6 +1014,9 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
+ 	if (dcp->main_display)
+ 		return;
+ 
++	dev_info(dcp->dev, "cb_hotplug() connected:%llu, valid_mode:%d\n",
++		 *connected, dcp->valid_mode);
++
+ 	/* Hotplug invalidates mode. DRM doesn't always handle this. */
+ 	if (!(*connected)) {
+ 		dcp->valid_mode = false;

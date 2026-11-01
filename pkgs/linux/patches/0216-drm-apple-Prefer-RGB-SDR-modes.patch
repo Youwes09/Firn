@@ -1,0 +1,254 @@
+From 2e633b25b91273853d7e436570e303d76197dc39 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Fri, 1 Dec 2023 23:41:53 +0100
+Subject: [PATCH] drm: apple: Prefer RGB SDR modes
+
+DCP color mode scoring seems to prefer high bit depth color modes even
+when it it would require DSC. For example 12-bit 4k 60 Hz YCbCr 4:4:4
+over a 600 MHz HDMI 2.0 link.
+Prefer 8-/10-bit RGB or YCbCr 4:4:4 modes if available.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 16 ++++++
+ drivers/gpu/drm/apple/parser.c         | 79 ++++++++++++++++++--------
+ drivers/gpu/drm/apple/parser.h         | 68 ++++++++++++++++++++++
+ 3 files changed, 139 insertions(+), 24 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 1356ede15195..fa6297355ead 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1192,6 +1192,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ {
+ 	struct dcp_display_mode *mode;
+ 	struct dcp_wait_cookie *cookie;
++	struct dcp_color_mode *cmode = NULL;
+ 	int ret;
+ 
+ 	mode = lookup_mode(dcp, &crtc_state->mode);
+@@ -1205,6 +1206,21 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 		 "set_digital_out_mode(color:%d timing:%d) " DRM_MODE_FMT "\n",
+ 		 mode->color_mode_id, mode->timing_mode_id,
+ 		 DRM_MODE_ARG(&crtc_state->mode));
++	if (mode->color_mode_id == mode->sdr_rgb.id)
++		cmode = &mode->sdr_rgb;
++	else if (mode->color_mode_id == mode->sdr_444.id)
++		cmode = &mode->sdr_444;
++	else if (mode->color_mode_id == mode->sdr.id)
++		cmode = &mode->sdr;
++	else if (mode->color_mode_id == mode->best.id)
++		cmode = &mode->best;
++	if (cmode)
++		dev_info(dcp->dev,
++			"set_digital_out_mode() color mode depth:%hhu format:%u "
++			"colorimetry:%u eotf:%u range:%u\n", cmode->depth,
++			cmode->format, cmode->colorimetry, cmode->eotf,
++			cmode->range);
++
+ 	dcp->mode = (struct dcp_set_digital_out_mode_req){
+ 		.color_mode_id = mode->color_mode_id,
+ 		.timing_mode_id = mode->timing_mode_id
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index a6de7ded2609..33b6787e5aee 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -313,14 +313,43 @@ struct color_mode {
+ 	s64 score;
+ };
+ 
+-static int parse_color_modes(struct dcp_parse_ctx *handle, s64 *preferred_id)
++static int fill_color_mode(struct dcp_color_mode *color,
++			   struct color_mode *cmode)
++{
++	if (color->score >= cmode->score)
++		return 0;
++
++	if (cmode->colorimetry < 0 || cmode->colorimetry >= DCP_COLORIMETRY_COUNT)
++		return -EINVAL;
++	if (cmode->depth < 8 || cmode->depth > 12)
++		return -EINVAL;
++	if (cmode->dynamic_range < 0 || cmode->dynamic_range >= DCP_COLOR_YCBCR_RANGE_COUNT)
++		return -EINVAL;
++	if (cmode->eotf < 0 || cmode->eotf >= DCP_EOTF_COUNT)
++		return -EINVAL;
++	if (cmode->pixel_encoding < 0 || cmode->pixel_encoding >= DCP_COLOR_FORMAT_COUNT)
++		return -EINVAL;
++
++	color->score = cmode->score;
++	color->id = cmode->id;
++	color->eotf = cmode->eotf;
++	color->format = cmode->pixel_encoding;
++	color->colorimetry = cmode->colorimetry;
++	color->range = cmode->dynamic_range;
++	color->depth = cmode->depth;
++
++	return 0;
++}
++
++static int parse_color_modes(struct dcp_parse_ctx *handle,
++			     struct dcp_display_mode *out)
+ {
+ 	struct iterator outer_it;
+ 	int ret = 0;
+-	s64 best_score = -1, best_score_sdr = -1;
+-	s64 best_id = -1, best_id_sdr = -1;
+-
+-	*preferred_id = -1;
++	out->sdr_444.score = -1;
++	out->sdr_rgb.score = -1;
++	out->sdr.score = -1;
++	out->best.score = -1;
+ 
+ 	dcp_parse_foreach_in_array(handle, outer_it) {
+ 		struct iterator it;
+@@ -367,25 +396,18 @@ static int parse_color_modes(struct dcp_parse_ctx *handle, s64 *preferred_id)
+ 				       cmode.eotf, cmode.dynamic_range,
+ 				       cmode.pixel_encoding);
+ 
+-		if (cmode.eotf == 0) {
+-			if (cmode.score > best_score_sdr) {
+-				best_score_sdr = cmode.score;
+-				best_id_sdr = cmode.id;
+-			}
+-		} else {
+-			if (cmode.score > best_score) {
+-				best_score = cmode.score;
+-				best_id = cmode.id;
+-			}
++		if (cmode.eotf == DCP_EOTF_SDR_GAMMA) {
++			if (cmode.pixel_encoding == DCP_COLOR_FORMAT_RGB &&
++				cmode.depth <= 10)
++				fill_color_mode(&out->sdr_rgb, &cmode);
++			else if (cmode.pixel_encoding == DCP_COLOR_FORMAT_YCBCR444 &&
++				cmode.depth <= 10)
++				fill_color_mode(&out->sdr_444, &cmode);
++			fill_color_mode(&out->sdr, &cmode);
+ 		}
++		fill_color_mode(&out->best, &cmode);
+ 	}
+ 
+-	/* prefer SDR color modes as long as HDR is not supported */
+-	if (best_score_sdr >= 0)
+-		*preferred_id = best_id_sdr;
+-	else if (best_score >= 0)
+-		*preferred_id = best_id;
+-
+ 	return 0;
+ }
+ 
+@@ -427,7 +449,7 @@ static int parse_mode(struct dcp_parse_ctx *handle,
+ 		else if (!strcmp(key, "VerticalAttributes"))
+ 			ret = parse_dimension(it.handle, &vert);
+ 		else if (!strcmp(key, "ColorModes"))
+-			ret = parse_color_modes(it.handle, &best_color_mode);
++			ret = parse_color_modes(it.handle, out);
+ 		else if (!strcmp(key, "ID"))
+ 			ret = parse_int(it.handle, &id);
+ 		else if (!strcmp(key, "IsVirtual"))
+@@ -445,8 +467,17 @@ static int parse_mode(struct dcp_parse_ctx *handle,
+ 			return ret;
+ 		}
+ 	}
+-
+-	trace_iomfb_parse_mode_success(id, &horiz, &vert, best_color_mode, is_virtual, *score);
++	if (out->sdr_rgb.score >= 0)
++		best_color_mode = out->sdr_rgb.id;
++	else if (out->sdr_444.score >= 0)
++		best_color_mode = out->sdr_444.id;
++	else if (out->sdr.score >= 0)
++		best_color_mode = out->sdr.id;
++	else if (out->best.score >= 0)
++		best_color_mode = out->best.id;
++
++	trace_iomfb_parse_mode_success(id, &horiz, &vert, best_color_mode,
++				       is_virtual, *score);
+ 
+ 	/*
+ 	 * Reject modes without valid color mode.
+diff --git a/drivers/gpu/drm/apple/parser.h b/drivers/gpu/drm/apple/parser.h
+index 1072aa0f0900..2ea77bcfee7d 100644
+--- a/drivers/gpu/drm/apple/parser.h
++++ b/drivers/gpu/drm/apple/parser.h
+@@ -15,6 +15,70 @@ struct dcp_parse_ctx {
+ 	u32 pos, len;
+ };
+ 
++enum dcp_color_eotf {
++	DCP_EOTF_SDR_GAMMA = 0, // "SDR gamma"
++	DCP_EOTF_HDR_GAMMA = 1, // "HDR gamma"
++	DCP_EOTF_ST_2084   = 2, // "ST 2084 (PQ)"
++	DCP_EOTF_BT_2100   = 3, // "BT.2100 (HLG)"
++	DCP_EOTF_COUNT
++};
++
++enum dcp_color_format {
++	DCP_COLOR_FORMAT_RGB                 =  0, // "RGB"
++	DCP_COLOR_FORMAT_YCBCR420            =  1, // "YUV 4:2:0"
++	DCP_COLOR_FORMAT_YCBCR422            =  3, // "YUV 4:2:2"
++	DCP_COLOR_FORMAT_YCBCR444            =  2, // "YUV 4:4:4"
++	DCP_COLOR_FORMAT_DV_NATIVE           =  4, // "DolbyVision (native)"
++	DCP_COLOR_FORMAT_DV_HDMI             =  5, // "DolbyVision (HDMI)"
++	DCP_COLOR_FORMAT_YCBCR422_DP         =  6, // "YCbCr 4:2:2 (DP tunnel)"
++	DCP_COLOR_FORMAT_YCBCR422_HDMI       =  7, // "YCbCr 4:2:2 (HDMI tunnel)"
++	DCP_COLOR_FORMAT_DV_LL_YCBCR422      =  8, // "DolbyVision LL YCbCr 4:2:2"
++	DCP_COLOR_FORMAT_DV_LL_YCBCR422_DP   =  9, // "DolbyVision LL YCbCr 4:2:2 (DP)"
++	DCP_COLOR_FORMAT_DV_LL_YCBCR422_HDMI = 10, // "DolbyVision LL YCbCr 4:2:2 (HDMI)"
++	DCP_COLOR_FORMAT_DV_LL_YCBCR444      = 11, // "DolbyVision LL YCbCr 4:4:4"
++	DCP_COLOR_FORMAT_DV_LL_RGB422        = 12, // "DolbyVision LL RGB 4:2:2"
++	DCP_COLOR_FORMAT_GRGB_BLUE_422       = 13, // "GRGB as YCbCr422 (Even line blue)"
++	DCP_COLOR_FORMAT_GRGB_RED_422        = 14, // "GRGB as YCbCr422 (Even line red)"
++	DCP_COLOR_FORMAT_COUNT
++};
++
++enum dcp_colorimetry {
++	DCP_COLORIMETRY_BT601              =  0, // "SMPTE 170M/BT.601"
++	DCP_COLORIMETRY_BT709              =  1, // "BT.701"
++	DCP_COLORIMETRY_XVYCC_601          =  2, // "xvYCC601"
++	DCP_COLORIMETRY_XVYCC_709          =  3, // "xvYCC709"
++	DCP_COLORIMETRY_SYCC_601           =  4, // "sYCC601"
++	DCP_COLORIMETRY_ADOBE_YCC_601      =  5, // "AdobeYCC601"
++	DCP_COLORIMETRY_BT2020_CYCC        =  6, // "BT.2020 (c)"
++	DCP_COLORIMETRY_BT2020_YCC         =  7, // "BT.2020 (nc)"
++	DCP_COLORIMETRY_VSVDB              =  8, // "DolbyVision VSVDB"
++	DCP_COLORIMETRY_BT2020_RGB         =  9, // "BT.2020 (RGB)"
++	DCP_COLORIMETRY_SRGB               = 10, // "sRGB"
++	DCP_COLORIMETRY_SCRGB              = 11, // "scRGB"
++	DCP_COLORIMETRY_SCRGB_FIXED        = 12, // "scRGBfixed"
++	DCP_COLORIMETRY_ADOBE_RGB          = 13, // "AdobeRGB"
++	DCP_COLORIMETRY_DCI_P3_RGB_D65     = 14, // "DCI-P3 (D65)"
++	DCP_COLORIMETRY_DCI_P3_RGB_THEATER = 15, // "DCI-P3 (Theater)"
++	DCP_COLORIMETRY_RGB                = 16, // "Default RGB"
++	DCP_COLORIMETRY_COUNT
++};
++
++enum dcp_color_range {
++	DCP_COLOR_YCBCR_RANGE_FULL    = 0,
++	DCP_COLOR_YCBCR_RANGE_LIMITED = 1,
++	DCP_COLOR_YCBCR_RANGE_COUNT
++};
++
++struct dcp_color_mode {
++	s64 score;
++	u32 id;
++	enum dcp_color_eotf eotf;
++	enum dcp_color_format format;
++	enum dcp_colorimetry colorimetry;
++	enum dcp_color_range range;
++	u8 depth;
++};
++
+ /*
+  * Represents a single display mode. These mode objects are populated at
+  * runtime based on the TimingElements dictionary sent by the DCP.
+@@ -23,6 +87,10 @@ struct dcp_display_mode {
+ 	struct drm_display_mode mode;
+ 	u32 color_mode_id;
+ 	u32 timing_mode_id;
++	struct dcp_color_mode sdr_rgb;
++	struct dcp_color_mode sdr_444;
++	struct dcp_color_mode sdr;
++	struct dcp_color_mode best;
+ };
+ 
+ struct dimension {

@@ -1,0 +1,43 @@
+From 79c4b973af7cf4c00e0692508081adc98921cae0 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 26 Nov 2023 18:57:07 +0100
+Subject: [PATCH] drm: apple: iomfb: Extend hotplug/mode parsing logging
+
+Under unknown but slightly broken conditions dcp sends timing modes
+without linked color modes. Log a warning when this happens and log the
+number of valid modes before emitting HPD events.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb.c          | 4 ++--
+ drivers/gpu/drm/apple/iomfb_template.c | 2 ++
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index bb4737fa0f25..e3b9abebe5ed 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -238,8 +238,8 @@ void dcp_hotplug(struct work_struct *work)
+ 	connector = container_of(work, struct apple_connector, hotplug_wq);
+ 
+ 	dcp = platform_get_drvdata(connector->dcp);
+-	dev_info(dcp->dev, "%s() connected:%d valid_mode:%d\n", __func__,
+-		 connector->connected, dcp->valid_mode);
++	dev_info(dcp->dev, "%s() connected:%d valid_mode:%d nr_modes:%u\n", __func__,
++		 connector->connected, dcp->valid_mode, dcp->nr_modes);
+ 
+ 	/*
+ 	 * DCP defers link training until we set a display mode. But we set
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 5f598204eda1..1356ede15195 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -567,6 +567,8 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
+ 			dcp->nr_modes = 0;
+ 			return false;
+ 		}
++		if (dcp->nr_modes == 0)
++			dev_warn(dcp->dev, "TimingElements without valid modes!\n");
+ 	} else if (!strcmp(req->key, "DisplayAttributes")) {
+ 		/* DisplayAttributes are empty for integrated displays, use
+ 		 * display dimensions read from the devicetree

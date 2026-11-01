@@ -1,0 +1,88 @@
+From a70e4d96079b5c84f162af03ef1c6f584260059f Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 16 Jul 2023 17:51:10 +0200
+Subject: [PATCH] drm: apple: backlight: avoid updating the brightness with a
+ commit
+
+An atomic_commit for brightness changes will consume a DCP swap without
+frame buffer updates and will result in a lost frame. After updating
+the next brightness values wait for 1 frame duration (at 23.976 fps).
+Check if the brightness update still needs to be send to DVCP or if a
+swap did that in the meintime.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp_backlight.c | 28 ++++++++++++++++++---------
+ 1 file changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
+index d063ecd7ad20..0eeb3d6d92c5 100644
+--- a/drivers/gpu/drm/apple/dcp_backlight.c
++++ b/drivers/gpu/drm/apple/dcp_backlight.c
+@@ -136,18 +136,24 @@ static u32 calculate_dac(struct apple_dcp *dcp, int val)
+ 	return 16 * dac;
+ }
+ 
+-static int drm_crtc_set_brightness(struct drm_crtc *crtc,
+-				   struct drm_modeset_acquire_ctx *ctx)
++static int drm_crtc_set_brightness(struct apple_dcp *dcp)
+ {
+ 	struct drm_atomic_state *state;
+ 	struct drm_crtc_state *crtc_state;
++	struct drm_modeset_acquire_ctx ctx;
++	struct drm_crtc *crtc = &dcp->crtc->base;
+ 	int ret = 0;
+ 
++	DRM_MODESET_LOCK_ALL_BEGIN(crtc->dev, ctx, 0, ret);
++
++	if (!dcp->brightness.update)
++		goto done;
++
+ 	state = drm_atomic_state_alloc(crtc->dev);
+ 	if (!state)
+ 		return -ENOMEM;
+ 
+-	state->acquire_ctx = ctx;
++	state->acquire_ctx = &ctx;
+ 	crtc_state = drm_atomic_get_crtc_state(state, crtc);
+ 	if (IS_ERR(crtc_state)) {
+ 		ret = PTR_ERR(crtc_state);
+@@ -160,6 +166,9 @@ static int drm_crtc_set_brightness(struct drm_crtc *crtc,
+ 
+ fail:
+ 	drm_atomic_state_put(state);
++done:
++	DRM_MODESET_LOCK_ALL_END(crtc->dev, ctx, ret);
++
+ 	return ret;
+ }
+ 
+@@ -175,6 +184,8 @@ static int dcp_set_brightness(struct backlight_device *bd)
+ 	dcp->brightness.dac = calculate_dac(dcp, brightness);
+ 	dcp->brightness.update = true;
+ 
++	DRM_MODESET_LOCK_ALL_END(dcp->crtc->base.dev, ctx, ret);
++
+ 	/*
+ 	 * Do not actively try to change brightness if no mode is set.
+ 	 * TODO: should this be reflected the in backlight's power property?
+@@ -182,14 +193,13 @@ static int dcp_set_brightness(struct backlight_device *bd)
+ 	 *       drm integrated backlight handling
+ 	 */
+ 	if (!dcp->valid_mode)
+-		goto out;
+-
+-	ret = drm_crtc_set_brightness(&dcp->crtc->base, &ctx);
++		return 0;
+ 
+-out:
+-	DRM_MODESET_LOCK_ALL_END(dcp->crtc->base.dev, ctx, ret);
++	/* Wait 1 vblank cycle in the hope an atomic swap has already updated
++	 * the brightness */
++	msleep((1001 + 23) / 24); // 42ms for 23.976 fps
+ 
+-	return ret;
++	return drm_crtc_set_brightness(dcp);
+ }
+ 
+ static const struct backlight_ops dcp_backlight_ops = {

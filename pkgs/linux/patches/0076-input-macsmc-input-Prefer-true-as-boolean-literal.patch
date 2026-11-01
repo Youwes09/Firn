@@ -1,0 +1,23 @@
+From d347d832b323b7f66ec1a461401fee59f962b62a Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 21 Oct 2025 22:53:52 +0200
+Subject: [PATCH] input: macsmc-input: Prefer `true` as boolean literal
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/input/misc/macsmc-input.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/input/misc/macsmc-input.c b/drivers/input/misc/macsmc-input.c
+index 1a583d855661..2cead3b7f45f 100644
+--- a/drivers/input/misc/macsmc-input.c
++++ b/drivers/input/misc/macsmc-input.c
+@@ -170,7 +170,7 @@ static int macsmc_input_probe(struct platform_device *pdev)
+ 	smcin->nb.notifier_call = macsmc_input_event;
+ 	blocking_notifier_chain_register(&smc->event_handlers, &smcin->nb);
+ 
+-	device_init_wakeup(&pdev->dev, 1);
++	device_init_wakeup(&pdev->dev, true);
+ 
+ 	return 0;
+ }

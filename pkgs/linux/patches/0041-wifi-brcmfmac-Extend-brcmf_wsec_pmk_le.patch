@@ -1,0 +1,46 @@
+From 8c09e2c815b9c0e4055c126aa16e0062ab0ef221 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Thu, 5 Oct 2023 00:34:44 +0900
+Subject: [PATCH] wifi: brcmfmac: Extend brcmf_wsec_pmk_le
+
+New firmware wants extra fields, hopefully old firmware ignores them.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit f1de1c49201884733ee35f6fe69cc2ae9b2f9416)
+
+Original-Commit: affeee33db1197e93b5d1be30d57b826927e6693
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h   | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index cd7057e6b13a..a4ec3808a5c8 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -67,7 +67,7 @@
+ #define BRCMF_WSEC_MAX_PSK_LEN		32
+ #define	BRCMF_WSEC_PASSPHRASE		BIT(0)
+ 
+-#define BRCMF_WSEC_MAX_SAE_PASSWORD_LEN 128
++#define BRCMF_WSEC_MAX_SAE_PASSWORD_LEN	256
+ 
+ /* primary (ie tx) key */
+ #define BRCMF_PRIMARY_KEY		(1 << 1)
+@@ -611,11 +611,15 @@ struct brcmf_wsec_key_le {
+  * @key_len: number of octets in key material.
+  * @flags: key handling qualifiers.
+  * @key: PMK key material.
++ * @opt_len: optional field length
++ * @opt_tlvs: optional fields in TLV format
+  */
+ struct brcmf_wsec_pmk_le {
+ 	__le16  key_len;
+ 	__le16  flags;
+ 	u8 key[BRCMF_WSEC_MAX_SAE_PASSWORD_LEN];
++	__le16  opt_len;
++	u8   opt_tlvs[];
+ };
+ 
+ /**

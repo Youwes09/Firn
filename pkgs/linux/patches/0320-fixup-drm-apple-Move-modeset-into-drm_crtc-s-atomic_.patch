@@ -1,0 +1,36 @@
+From 2920be1a76d4b8f0de9b4b00d51a74956617a37f Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 23 Aug 2026 22:56:48 +0200
+Subject: [PATCH] fixup! drm: apple: Move modeset into drm_crtc's atomic_enable
+
+---
+ drivers/gpu/drm/apple/apple_drv.c | 2 +-
+ drivers/gpu/drm/apple/dcp.h       | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 8f0845050146..d8386f3e1f54 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -114,7 +114,7 @@ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+ 	}
+ 
+ 	if (crtc_state->active)
+-		dcp_crtc_atomic_modeset(crtc, state);
++		dcp_crtc_atomic_modeset(crtc, commit);
+ }
+ 
+ static void apple_crtc_atomic_disable(struct drm_crtc *crtc,
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 61df0b0e0889..0f20a1087cb2 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -48,7 +48,7 @@ int dcp_get_modes(struct drm_connector *connector);
+ enum drm_mode_status dcp_mode_valid(struct drm_connector *connector,
+ 				    const struct drm_display_mode *mode);
+ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
+-			    struct drm_atomic_state *state);
++			    struct drm_atomic_commit *commit);
+ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ 			 const struct drm_display_mode *mode,
+ 			 struct drm_display_mode *adjusted_mode);

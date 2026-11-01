@@ -1,0 +1,24 @@
+From 34fc9e9fd4041cb9bb0f6b93db25690f3eb3a1f0 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 16 Jan 2025 23:29:40 +0100
+Subject: [PATCH] drm: apple: dptx: Silence DPTX_APCALL_{GET,SET}_DOWN_SPREAD
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dptxep.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index dc7e57eee469..b74218bfc6dd 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -542,6 +542,9 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
+ 		/* just try to ACK and hope for the best... */
+ 		dev_info(service->ep->dcp->dev, "DPTXPort: acking unhandled call %u\n",
+ 			idx);
++		fallthrough;
++	case DPTX_APCALL_GET_DOWN_SPREAD:
++	case DPTX_APCALL_SET_DOWN_SPREAD:
+ 		memcpy(reply, data, min(reply_size, data_size));
+ 		if (reply_size >= 4)
+ 			memset(reply, 0, 4);

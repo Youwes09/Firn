@@ -1,0 +1,36 @@
+From 2121719ec1ea96347f298e47a5dce8b1e4307e61 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 26 Oct 2026 18:00:00 -0400
+Subject: [PATCH] pmdomain: apple: pmp-report: Initialise the lock and use
+ 64-bit report bits
+
+The report lock was never initialised, and 1 << id is an int, so a
+report above bit 31 set the wrong bit. T8132 reports go up to 0x22.
+
+[Youwes09: split from niklassheth/linux 86255757f52d]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/pmdomain/apple/pmp-report.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/pmdomain/apple/pmp-report.c b/drivers/pmdomain/apple/pmp-report.c
+index 8050ade5ef8d..c38e3dde2217 100644
+--- a/drivers/pmdomain/apple/pmp-report.c
++++ b/drivers/pmdomain/apple/pmp-report.c
+@@ -41,6 +41,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	rep->dev = dev;
++	spin_lock_init(&rep->lock);
+ 	rep->base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(rep->base))
+ 		return PTR_ERR(rep->base);
+@@ -102,7 +103,7 @@ static int apple_pmp_report_set_state(struct generic_pm_domain *genpd, bool enab
+ {
+ 	struct apple_pmp_report_entry *ent = genpd_to_apple_pmp_report_entry(genpd);
+ 	struct apple_pmp_report *rep = dev_get_drvdata(ent->dev->parent);
+-	u64 bit_val = 1 << ent->id;
++	u64 bit_val = BIT_ULL(ent->id);
+ 	u64 val;
+ 	unsigned long flags;
+ 

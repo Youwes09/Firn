@@ -1,0 +1,51 @@
+From 0aaeeb52210952d83a350c0e3fcdb43efe5497a9 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 11 Apr 2023 22:54:28 +0900
+Subject: [PATCH] dcp: 42-bit DMA masks
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+---
+ drivers/gpu/drm/apple/apple_drv.c    | 2 +-
+ drivers/gpu/drm/apple/dcp.c          | 2 +-
+ drivers/gpu/drm/apple/dummy-piodma.c | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index a6e65c8c5d48..27fe7f04d684 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -461,7 +461,7 @@ static int apple_drm_init(struct device *dev)
+ 	resource_size_t fb_size;
+ 	int ret;
+ 
+-	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(36));
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(42));
+ 	if (ret)
+ 		return ret;
+ 
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index a62b7aff16a5..8655bdf70e24 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -419,7 +419,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 	u32 cpu_ctrl;
+ 	int ret;
+ 
+-	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(36));
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(42));
+ 	if (ret)
+ 		return ret;
+ 
+diff --git a/drivers/gpu/drm/apple/dummy-piodma.c b/drivers/gpu/drm/apple/dummy-piodma.c
+index fee449d17aad..2d3e19c10db1 100644
+--- a/drivers/gpu/drm/apple/dummy-piodma.c
++++ b/drivers/gpu/drm/apple/dummy-piodma.c
+@@ -26,7 +26,7 @@ static const struct component_ops dcp_piodma_comp_ops = {
+ };
+ static int dcp_piodma_probe(struct platform_device *pdev)
+ {
+-	int ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
++	int ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(42));
+ 	if (ret)
+ 		return ret;
+ 

@@ -48,6 +48,8 @@ in
     '';
 
     boot.initrd.systemd.enable = true;
+    # The Air has no TPM the kernel can reach.
+    boot.initrd.systemd.tpm2.enable = false;
     # The installer and firn-boot require a gzip initrd.
     boot.initrd.compressor = "gzip";
 

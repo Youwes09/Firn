@@ -1,0 +1,27 @@
+From b027244171df0ecfd3ff6ce0ff05d6c83e2835b5 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 12:13:12 -0500
+Subject: [PATCH] dt-bindings: iommu: apple,dart: Add t8132 compatible
+
+The M4 (t8132) DARTs are compatible with the t8110 DART, as on t6020.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/iommu/apple,dart.yaml | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/iommu/apple,dart.yaml b/Documentation/devicetree/bindings/iommu/apple,dart.yaml
+index 6efbe732b4ce..53069716c558 100644
+--- a/Documentation/devicetree/bindings/iommu/apple,dart.yaml
++++ b/Documentation/devicetree/bindings/iommu/apple,dart.yaml
+@@ -29,7 +29,9 @@ properties:
+           - apple,t8110-dart
+           - apple,t6000-dart
+       - items:
+-          - const: apple,t6020-dart
++          - enum:
++              - apple,t6020-dart
++              - apple,t8132-dart
+           - const: apple,t8110-dart
+ 
+   reg:

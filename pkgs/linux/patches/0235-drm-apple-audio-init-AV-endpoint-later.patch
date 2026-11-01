@@ -1,0 +1,47 @@
+From 664aeb630739b2aa4034dd11efea440fc62bfe10 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 14 Apr 2024 16:47:01 +0200
+Subject: [PATCH] drm: apple: audio: init AV endpoint later
+
+This seems to get rid of initialization timeouts / failures.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 17 +++++++++--------
+ 1 file changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index d9fc0db51dba..b4d6834f1da9 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -371,14 +371,6 @@ int dcp_start(struct platform_device *pdev)
+ 	if (ret)
+ 		dev_warn(dcp->dev, "Failed to start system endpoint: %d\n", ret);
+ 
+-#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+-	if (!noaudio) {
+-		ret = avep_init(dcp);
+-		if (ret)
+-			dev_warn(dcp->dev, "Failed to start AV endpoint: %d", ret);
+-	}
+-#endif
+-
+ 	if (dcp->phy && dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
+ 		ret = ibootep_init(dcp);
+ 		if (ret)
+@@ -420,6 +412,15 @@ int dcp_start(struct platform_device *pdev)
+ 	if (ret)
+ 		dev_err(dcp->dev, "Failed to start IOMFB endpoint: %d\n", ret);
+ 
++#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
++	if (!noaudio) {
++		ret = avep_init(dcp);
++		if (ret)
++			dev_warn(dcp->dev, "Failed to start AV endpoint: %d", ret);
++		ret = 0;
++	}
++#endif
++
+ 	return ret;
+ }
+ EXPORT_SYMBOL(dcp_start);

@@ -1,0 +1,53 @@
+From 263239c6088e6ef6badda6415ab9053e5fc5819d Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 25 Aug 2025 22:14:01 +0200
+Subject: [PATCH] drm: apple: Remove conflicting devices as late as possible
+
+Call aperture_remove_conflicting_devices() just before
+drm_dev_register(). This reduces the the time at startup without KMS drm
+device to a minimum. sddm/kwin(-wayland) fails with "kwin_wayland_drm:
+No suitable DRM devices have been found" in this case and never retries.
+Reverts commit "drm/apple: Remove simpledrm framebuffer before DRM
+device alloc". User space needs to deal with KMS device not being card0.
+The attempt to take card0 over from simpledrm was futile as the GPU
+driver is racing for this and won in many cases.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index ab17a53cd2c7..173cf5fba969 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -624,14 +624,6 @@ static int apple_drm_init(struct device *dev)
+ 	if (ret)
+ 		return ret;
+ 
+-	fb_size = fb_r.end - fb_r.start + 1;
+-	ret = aperture_remove_conflicting_devices(fb_r.start, fb_size,
+-						  apple_drm_driver.name);
+-	if (ret) {
+-		dev_err(dev, "Failed remove fb: %d\n", ret);
+-		goto err_unbind;
+-	}
+-
+ 	apple = devm_drm_dev_alloc(dev, &apple_drm_driver,
+ 				   struct apple_drm_private, drm);
+ 	if (IS_ERR(apple))
+@@ -673,6 +665,14 @@ static int apple_drm_init(struct device *dev)
+ 
+ 	drm_mode_config_reset(&apple->drm);
+ 
++	fb_size = fb_r.end - fb_r.start + 1;
++	ret = aperture_remove_conflicting_devices(fb_r.start, fb_size,
++						  apple_drm_driver.name);
++	if (ret) {
++		dev_err(dev, "Failed remove fb: %d\n", ret);
++		goto err_unbind;
++	}
++
+ 	ret = drm_dev_register(&apple->drm, 0);
+ 	if (ret)
+ 		goto err_unbind;

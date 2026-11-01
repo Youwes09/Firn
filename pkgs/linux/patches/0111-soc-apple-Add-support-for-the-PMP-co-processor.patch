@@ -1,0 +1,380 @@
+From d09c3f90aa7d46d6d9e1e87f1f7a1c3ae61ebced Mon Sep 17 00:00:00 2001
+From: Sasha Finkelstein <fnkl.kernel@gmail.com>
+Date: Thu, 26 Feb 2026 17:53:50 +0100
+Subject: [PATCH] soc: apple: Add support for the PMP co-processor
+
+This is the core part of a power management co-processor present
+on certain Apple SoCs. This driver starts the firmware, and
+uploads the configuration and calibration data by pretending
+to be IOKit.
+
+Signed-off-by: Sasha Finkelstein <fnkl.kernel@gmail.com>
+[Youwes09: ported to lifetime-bound drivers and the reworked RTKit
+ binding; PMP buffers are DMA allocations tied to the binding, read
+ through the I/O accessors; the IOVA table is acknowledged empty, as
+ nothing provides apple,pio-ranges]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/soc/apple/Kconfig  |  13 ++
+ drivers/soc/apple/Makefile |   2 +
+ drivers/soc/apple/pmp.rs   | 317 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 332 insertions(+)
+ create mode 100644 drivers/soc/apple/pmp.rs
+
+diff --git a/drivers/soc/apple/Kconfig b/drivers/soc/apple/Kconfig
+index d3544df0d36f..9f7eba4ac9b0 100644
+--- a/drivers/soc/apple/Kconfig
++++ b/drivers/soc/apple/Kconfig
+@@ -80,6 +80,19 @@ config RUST_APPLE_RTKIT
+ 	depends on RUST
+ 	select APPLE_RTKIT
+ 
++config APPLE_PMP
++	tristate "Apple Power Management Processor"
++	depends on ARCH_APPLE || COMPILE_TEST
++	depends on RUST
++	select APPLE_PMP_REPORT
++	select RUST_APPLE_RTKIT
++	default y if ARCH_APPLE
++	help
++	  A co-processor present on Apple SoCs, controlling power states of
++	  fabric and other uncore components.
++
++	  Say 'y' here if you have an Apple SoC.
++
+ endmenu
+ 
+ endif
+diff --git a/drivers/soc/apple/Makefile b/drivers/soc/apple/Makefile
+index 328fe259abbc..d65c376900c0 100644
+--- a/drivers/soc/apple/Makefile
++++ b/drivers/soc/apple/Makefile
+@@ -19,3 +19,5 @@ apple-sart-y = sart.o
+ 
+ obj-$(CONFIG_APPLE_TUNABLE) += apple-tunable.o
+ apple-tunable-y = tunable.o
++
++obj-$(CONFIG_APPLE_PMP) += pmp.o
+diff --git a/drivers/soc/apple/pmp.rs b/drivers/soc/apple/pmp.rs
+new file mode 100644
+index 000000000000..02ab0a5a4eac
+--- /dev/null
++++ b/drivers/soc/apple/pmp.rs
+@@ -0,0 +1,317 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++
++//! Apple PMP driver
++//!
++//! Copyright (C) The Asahi Linux Contributors
++
++use kernel::{
++    device::{
++        Bound,
++        Core, //
++    },
++    dma::Coherent,
++    io::{
++        io_project,
++        Io, //
++    },
++    kvec,
++    new_mutex,
++    of,
++    platform,
++    prelude::*,
++    soc::apple::rtkit,
++    str::CString,
++    sync::Mutex, //
++};
++
++const ASC_MMIO_SIZE: usize = 0x4000;
++const BOOTARGS_OFFSET: usize = 0x22c;
++const BOOTARGS_SIZE: usize = 0x230;
++const CPU_CONTROL: usize = 0x44;
++const CPU_RUN: u32 = 0x1 << 4;
++const PMP_ENDPOINT: u8 = 0x20;
++const OPC_GET_IOVA_TABLE: u64 = 0x10;
++const OPC_MALLOC: u64 = 0x12;
++const OPC_FREE: u64 = 0x14;
++const OPC_SET_BUF: u64 = 0x30;
++const OPC_REGISTER_IOREG: u64 = 0x32;
++const OPC_SET_IOREG: u64 = 0x34;
++const OPC_ACK_MASK: u64 = 0x1;
++const OPC_SHIFT: u32 = 48;
++const MALLOC_SIZE_MASK: u64 = 0xFFFFFF;
++const MSG_IOVA_MASK: u64 = 0xFFFFFFFFFFFF;
++const SET_IOREG_INDEX_MASK: u64 = 0xFFFF;
++
++const fn fourcc(b: &[u8; 4]) -> u32 {
++    u32::from_be_bytes(*b)
++}
++
++const fn ack(opc: u64) -> u64 {
++    (opc | OPC_ACK_MASK) << OPC_SHIFT
++}
++
++/// Reads `N` bytes at `offset` from a buffer PMP filled in.
++fn read_bytes<const N: usize>(buf: &Coherent<'_, [u8]>, offset: usize) -> Result<[u8; N]> {
++    let mut bytes = [0; N];
++    io_project!(buf, [try: offset..offset + N]).copy_to_slice(&mut bytes);
++    Ok(bytes)
++}
++
++struct PmpAllocation<'a> {
++    addr: u64,
++    alloc: Coherent<'a, [u8]>,
++}
++
++struct PmpState<'a> {
++    allocs: KVec<PmpAllocation<'a>>,
++    value_buf: Option<u64>,
++    ioreg_entries: KVec<u32>,
++}
++
++impl<'a> PmpState<'a> {
++    fn find_alloc(&self, addr: u64) -> Option<usize> {
++        // PMP usually refers to its latest allocation, so search from the end.
++        self.allocs.iter().rposition(|a| a.addr == addr)
++    }
++
++    fn get_buf(&self, addr: u64) -> Option<&Coherent<'a, [u8]>> {
++        self.find_alloc(addr).map(|i| &self.allocs[i].alloc)
++    }
++}
++
++#[pin_data]
++struct Pmp<'a> {
++    pdev: &'a platform::Device<Bound>,
++    #[pin]
++    state: Mutex<PmpState<'a>>,
++}
++
++impl<'a> Pmp<'a> {
++    fn new(pdev: &'a platform::Device<Bound>) -> Result<impl PinInit<Self, Error> + 'a> {
++        let state = PmpState {
++            allocs: KVec::with_capacity(10, GFP_KERNEL)?,
++            value_buf: None,
++            ioreg_entries: KVec::with_capacity(340, GFP_KERNEL)?,
++        };
++
++        Ok(try_pin_init!(Self {
++            pdev,
++            state <- new_mutex!(state),
++        }))
++    }
++
++    fn malloc(&self, size: u64) -> Result<u64> {
++        let alloc = Coherent::<u8>::zeroed_slice(self.pdev.as_ref(), size as usize, GFP_KERNEL)?;
++        let addr = alloc.dma_address();
++
++        self.state
++            .lock()
++            .allocs
++            .push(PmpAllocation { addr, alloc }, GFP_KERNEL)?;
++        Ok(ack(OPC_MALLOC) | addr)
++    }
++
++    fn free(&self, addr: u64) -> Result<u64> {
++        let mut state = self.state.lock();
++        let Some(i) = state.find_alloc(addr) else {
++            dev_err!(self.pdev, "Free of unknown buffer {addr:#x}\n");
++            return Err(EIO);
++        };
++
++        state.allocs.remove(i)?;
++        Ok(ack(OPC_FREE))
++    }
++
++    fn set_buf(&self, addr: u64) -> Result<u64> {
++        let mut state = self.state.lock();
++        if state.value_buf.is_some() {
++            dev_err!(self.pdev, "Value buffer already set\n");
++            return Err(EIO);
++        }
++
++        let buf = state.get_buf(addr).ok_or(EIO)?;
++        state.value_buf = Some(u64::from_le_bytes(read_bytes(buf, 0)?));
++        Ok(ack(OPC_SET_BUF))
++    }
++
++    /// Copies the tunable `name` from the devicetree into the value buffer, returning its size.
++    fn load_tunable(&self, state: &PmpState<'_>, name: &CStr) -> Result<u32> {
++        let node = self.pdev.as_ref().fwnode().ok_or(EIO)?;
++        let prop = CString::try_from_fmt(fmt!("apple,tunable-{name}"))?;
++        if !node.property_present(&prop) {
++            dev_dbg!(self.pdev, "No tunable {name}\n");
++            return Ok(0);
++        }
++
++        let buf = state
++            .value_buf
++            .and_then(|addr| state.get_buf(addr))
++            .ok_or(EIO)?;
++        let len = node.property_count_elem::<u8>(&prop)?;
++        let data = node
++            .property_read_array_vec::<u8>(&prop, len)?
++            .required_by(self.pdev.as_ref())?;
++
++        io_project!(buf, [try: 0..len]).copy_from_slice(&data);
++        Ok(len.try_into()?)
++    }
++
++    fn register_ioreg(&self, addr: u64) -> Result<u64> {
++        let mut state = self.state.lock();
++        let desc = state.get_buf(addr).ok_or(EIO)?;
++
++        let mut size = u32::from_le_bytes(read_bytes(desc, 0x40)?);
++        if size == 0 {
++            let mut name = [0; 0x31];
++            name[..0x30].copy_from_slice(&read_bytes::<0x30>(desc, 0)?);
++            let name = CStr::from_bytes_until_nul(&name).map_err(|_| EIO)?;
++            size = self.load_tunable(&state, name)?;
++        }
++
++        state.ioreg_entries.push(size, GFP_KERNEL)?;
++        let index = state.ioreg_entries.len() as u64;
++        Ok(ack(OPC_REGISTER_IOREG) | (index << 32) | u64::from(size))
++    }
++
++    fn set_ioreg(&self, index: u64) -> Result<u64> {
++        let state = self.state.lock();
++        let size = *state.ioreg_entries.get(index as usize).ok_or(EIO)?;
++        Ok(ack(OPC_SET_IOREG) | u64::from(size))
++    }
++
++    fn handle(&self, msg: u64) -> Result<u64> {
++        match (msg >> OPC_SHIFT) & 0xFF {
++            // No I/O ranges are given to PMP, so its table is empty.
++            OPC_GET_IOVA_TABLE => Ok(ack(OPC_GET_IOVA_TABLE)),
++            OPC_MALLOC => self.malloc(msg & MALLOC_SIZE_MASK),
++            OPC_FREE => self.free(msg & MSG_IOVA_MASK),
++            OPC_SET_BUF => self.set_buf(msg & MSG_IOVA_MASK),
++            OPC_REGISTER_IOREG => self.register_ioreg(msg & MSG_IOVA_MASK),
++            OPC_SET_IOREG => self.set_ioreg(msg & SET_IOREG_INDEX_MASK),
++            _ => {
++                dev_err!(self.pdev, "Unknown message {msg:#x}\n");
++                Err(EIO)
++            }
++        }
++    }
++}
++
++#[vtable]
++impl rtkit::Operations for Pmp<'_> {
++    fn recv_message(&self, rtkit: &rtkit::RtKit, _endpoint: u8, msg: u64) {
++        if let Err(e) = self
++            .handle(msg)
++            .and_then(|reply| rtkit.send_message(PMP_ENDPOINT, reply))
++        {
++            dev_err!(self.pdev, "Failed to handle message {msg:#x}: {e:?}\n");
++        }
++    }
++
++    fn crashed(&self, _crashlog: Option<&[u8]>) {
++        dev_err!(self.pdev, "PMP firmware crashed\n");
++    }
++}
++
++/// Sets the boot arguments the firmware reads when it starts.
++fn patch_bootargs(pdev: &platform::Device<Bound>, patches: &[(u32, Option<u32>)]) -> Result {
++    let pmp = pdev.io_request_by_name(c"pmp").ok_or(EINVAL)?.iomap()?;
++    let offset = pmp.try_read32(BOOTARGS_OFFSET)? as usize;
++    let size = pmp.try_read32(BOOTARGS_SIZE)? as usize;
++
++    let mut args = kvec![0u8; size]?;
++    for (i, b) in args.iter_mut().enumerate() {
++        *b = pmp.try_read8(offset + i)?;
++    }
++
++    // Each argument is a little-endian key and length, then the value.
++    let mut idx = 0;
++    while idx + 8 <= size {
++        let key = u32::from_le_bytes(args[idx..idx + 4].try_into().map_err(|_| EINVAL)?);
++        let len = u32::from_le_bytes(args[idx + 4..idx + 8].try_into().map_err(|_| EINVAL)?);
++        let len = len as usize;
++        idx += 8;
++
++        if let Some(&(_, Some(val))) = patches.iter().find(|(k, _)| *k == key) {
++            let val = u64::from(val).to_le_bytes();
++            let dst = args.get_mut(idx..idx + len).ok_or(EINVAL)?;
++            dst.copy_from_slice(val.get(..len).ok_or(EINVAL)?);
++        }
++        idx += len;
++    }
++
++    for (i, b) in args.iter().enumerate() {
++        pmp.try_write8(*b, offset + i)?;
++    }
++    Ok(())
++}
++
++fn start_cpu(pdev: &platform::Device<Bound>) -> Result {
++    let asc = pdev
++        .io_request_by_name(c"asc")
++        .ok_or(EINVAL)?
++        .iomap_sized::<ASC_MMIO_SIZE>()?;
++
++    asc.write32(asc.read32(CPU_CONTROL) | CPU_RUN, CPU_CONTROL);
++    Ok(())
++}
++
++type PmpData<'a> = Pin<KBox<rtkit::Registration<'a, Pmp<'a>>>>;
++
++fn start<'a>(pdev: &'a platform::Device<Bound>) -> Result<PmpData<'a>> {
++    let dev = pdev.as_ref();
++    let node = dev.fwnode().ok_or(EINVAL)?;
++
++    let bdid = node.property_read(c"apple,board-id").required_by(dev)?;
++    let dvid = node
++        .property_read(c"apple,dram-vendor-id")
++        .required_by(dev)?;
++    let dcap = node.property_read(c"apple,dram-capacity").optional();
++    patch_bootargs(
++        pdev,
++        &[
++            (fourcc(b"BDID"), Some(bdid)),
++            (fourcc(b"DCAP"), dcap),
++            (fourcc(b"DVID"), Some(dvid)),
++        ],
++    )?;
++
++    let mut rtk = KBox::pin_init(
++        // SAFETY: The registration is the driver data, which is dropped on unbind.
++        unsafe { rtkit::Registration::new(dev, None, Pmp::new(pdev)?) },
++        GFP_KERNEL,
++    )?;
++
++    start_cpu(pdev)?;
++    rtk.as_mut().wake()?;
++    rtk.rtkit().start_endpoint(PMP_ENDPOINT)?;
++    Ok(rtk)
++}
++
++struct PmpDriver;
++
++kernel::of_device_table!(
++    OF_TABLE,
++    <PmpDriver as platform::Driver>::IdInfo,
++    [(of::DeviceId::new(c"apple,t6000-pmp-v2"), ())]
++);
++
++impl platform::Driver for PmpDriver {
++    type IdInfo = ();
++    type Data<'bound> = PmpData<'bound>;
++
++    const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
++
++    fn probe<'bound>(
++        pdev: &'bound platform::Device<Core<'_>>,
++        _info: Option<&'bound Self::IdInfo>,
++    ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
++        start(pdev)
++    }
++}
++
++kernel::module_platform_driver! {
++    type: PmpDriver,
++    name: "apple_pmp",
++    description: "Apple Power Management Processor",
++    license: "Dual MIT/GPL",
++}

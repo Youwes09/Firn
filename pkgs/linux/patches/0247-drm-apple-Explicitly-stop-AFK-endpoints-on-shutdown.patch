@@ -1,0 +1,100 @@
+From 12ceb2108350264caf38bcec01ac07f1c7f6e2a2 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Sat, 15 Jun 2024 14:29:48 +0900
+Subject: [PATCH] drm/apple: Explicitly stop AFK endpoints on shutdown
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+---
+ drivers/gpu/drm/apple/afk.c | 13 +++++++++++++
+ drivers/gpu/drm/apple/afk.h |  1 +
+ drivers/gpu/drm/apple/dcp.c | 31 ++++++++++++++++++++++++++++++-
+ 3 files changed, 44 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index 5e3b5d392f94..af3e0a7ac713 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -86,6 +86,19 @@ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
+ 	return ERR_PTR(ret);
+ }
+ 
++void afk_shutdown(struct apple_dcp_afkep *afkep)
++{
++	afk_send(afkep, FIELD_PREP(RBEP_TYPE, RBEP_SHUTDOWN));
++	int ret;
++
++	ret = wait_for_completion_timeout(&afkep->stopped, msecs_to_jiffies(1000));
++	if (ret <= 0) {
++		dev_err(afkep->dcp->dev, "Timed out shutting down AFK endpoint %02x", afkep->endpoint);
++	}
++
++	destroy_workqueue(afkep->wq);
++}
++
+ int afk_start(struct apple_dcp_afkep *ep)
+ {
+ 	int ret;
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index 0f91f32e08e3..be3f0b105de5 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -187,6 +187,7 @@ struct apple_dcp_afkep {
+ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
+ 				 const struct apple_epic_service_ops *ops);
+ int afk_start(struct apple_dcp_afkep *ep);
++void afk_shutdown(struct apple_dcp_afkep *ep);
+ int afk_receive_message(struct apple_dcp_afkep *ep, u64 message);
+ int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
+ 		  enum epic_type etype, enum epic_category ecat, u8 stype,
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index afa77fafe8fe..8ee980bfc6af 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -1018,10 +1018,33 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ {
+ 	struct apple_dcp *dcp = dev_get_drvdata(dev);
+ 
++	if (!dcp)
++		return;
++
+ 	if (dcp->hdmi_hpd_irq)
+ 		disable_irq(dcp->hdmi_hpd_irq);
+ 
+-	if (dcp && dcp->shmem)
++	if (dcp->avep) {
++		afk_shutdown(dcp->avep);
++		dcp->avep = NULL;
++	}
++
++	if (dcp->dptxep) {
++		afk_shutdown(dcp->dptxep);
++		dcp->dptxep = NULL;
++	}
++
++	if (dcp->ibootep) {
++		afk_shutdown(dcp->ibootep);
++		dcp->ibootep = NULL;
++	}
++
++	if (dcp->systemep) {
++		afk_shutdown(dcp->systemep);
++		dcp->systemep = NULL;
++	}
++
++	if (dcp->shmem)
+ 		iomfb_shutdown(dcp);
+ 
+ 	if (dcp->piodma) {
+@@ -1031,6 +1054,12 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ 		dcp->piodma = NULL;
+ 	}
+ 
++	if (dcp->connector_type == DRM_MODE_CONNECTOR_eDP) {
++		cancel_work_sync(&dcp->bl_register_wq);
++		cancel_work_sync(&dcp->bl_update_wq);
++	}
++	cancel_work_sync(&dcp->vblank_wq);
++
+ 	devm_clk_put(dev, dcp->clk);
+ 	dcp->clk = NULL;
+ }

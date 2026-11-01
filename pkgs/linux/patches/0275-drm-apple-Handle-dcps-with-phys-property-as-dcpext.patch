@@ -1,0 +1,27 @@
+From 4d5143ab369838ba09592d647719cff4f378f1b3 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 3 Aug 2024 15:41:00 +0200
+Subject: [PATCH] drm: apple: Handle dcps with "phys" property as dcpext
+
+Required for dp-altmode on M2 Mac Mini which will use dcp to drive
+dp-altmode.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index a10ed4028148..e5e8496c9850 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -562,7 +562,8 @@ static int apple_drm_init_dcp(struct device *dev)
+ 			of_node_put(np);
+ 			continue;
+ 		}
+-		dcp_ext = of_device_is_compatible(np, "apple,dcpext");
++		dcp_ext = of_device_is_compatible(np, "apple,dcpext") ||
++		          of_property_present(np, "phys");
+ 
+ 		dcp[num_dcp] = of_find_device_by_node(np);
+ 		of_node_put(np);

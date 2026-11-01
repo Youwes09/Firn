@@ -1,0 +1,96 @@
+From 6c71131a5c1429615a5a4b8dbb20ba0c6fda77ac Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 21 Nov 2023 23:32:07 +0100
+Subject: [PATCH] drm: apple: dptx: Wait for completion of dptx_connect.
+
+Makes connects more reliable.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c    | 17 ++++++++++++-----
+ drivers/gpu/drm/apple/dptxep.c |  4 ++++
+ drivers/gpu/drm/apple/dptxep.h |  1 +
+ 3 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 9d5c07bd0857..ff4b90db75ee 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -256,6 +256,8 @@ EXPORT_SYMBOL_GPL(dcp_get_connector_type);
+ 
+ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ {
++	int ret = 0;
++
+ 	if (!dcp->phy) {
+ 		dev_warn(dcp->dev, "dcp_dptx_connect: missing phy\n");
+ 		return -ENODEV;
+@@ -264,22 +266,27 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 	mutex_lock(&dcp->hpd_mutex);
+ 	if (!dcp->dptxport[port].enabled) {
+ 		dev_warn(dcp->dev, "dcp_dptx_connect: dptx service for port %d not enabled\n", port);
+-		mutex_unlock(&dcp->hpd_mutex);
+-		return -ENODEV;
++		ret = -ENODEV;
++		goto out_unlock;
+ 	}
+ 
+ 	if (dcp->dptxport[port].connected)
+-		goto ret;
++		goto out_unlock;
+ 
++	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+ 	dcp->dptxport[port].atcphy = dcp->phy;
+ 	dptxport_connect(dcp->dptxport[port].service, 0, dcp->dptx_phy, dcp->dptx_die);
+ 	dptxport_request_display(dcp->dptxport[port].service);
+ 	dcp->dptxport[port].connected = true;
+ 
+-ret:
+ 	mutex_unlock(&dcp->hpd_mutex);
+-
++	wait_for_completion_timeout(&dcp->dptxport[port].linkcfg_completion,
++				    msecs_to_jiffies(1000));
+ 	return 0;
++
++out_unlock:
++	mutex_unlock(&dcp->hpd_mutex);
++	return ret;
+ }
+ 
+ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index 69455c7721f6..99b8d51c8aff 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -330,8 +330,10 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
+ static int
+ dptxport_call_did_change_link_config(struct apple_epic_service *service)
+ {
++	struct dptx_port *dptx = service->cookie;
+ 	/* assume the link config did change and wait a little bit */
+ 	mdelay(10);
++	complete(&dptx->linkcfg_completion);
+ 	return 0;
+ }
+ 
+@@ -573,6 +575,8 @@ int dptxep_init(struct apple_dcp *dcp)
+ 
+ 	init_completion(&dcp->dptxport[0].enable_completion);
+ 	init_completion(&dcp->dptxport[1].enable_completion);
++	init_completion(&dcp->dptxport[0].linkcfg_completion);
++	init_completion(&dcp->dptxport[1].linkcfg_completion);
+ 
+ 	dcp->dptxep = afk_init(dcp, DPTX_ENDPOINT, dptxep_ops);
+ 	if (IS_ERR(dcp->dptxep))
+diff --git a/drivers/gpu/drm/apple/dptxep.h b/drivers/gpu/drm/apple/dptxep.h
+index 481ebbc97bf3..4a0770d43c95 100644
+--- a/drivers/gpu/drm/apple/dptxep.h
++++ b/drivers/gpu/drm/apple/dptxep.h
+@@ -49,6 +49,7 @@ struct apple_epic_service;
+ struct dptx_port {
+ 	bool enabled, connected;
+ 	struct completion enable_completion;
++	struct completion linkcfg_completion;
+ 	u32 unit;
+ 	struct apple_epic_service *service;
+ 	union phy_configure_opts phy_ops;

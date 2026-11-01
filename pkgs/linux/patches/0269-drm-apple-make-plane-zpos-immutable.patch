@@ -1,0 +1,70 @@
+From c16bc577dac7cc5b6a79f6c275155242acf3326c Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Mon, 1 Jul 2024 17:27:05 +1000
+Subject: [PATCH] drm: apple: make plane zpos immutable
+
+Userspace cannot be trusted to give us a sane zpos value, but given DCP's
+requirement that the primary plane always be the bottommost surface, we
+can't rely on drm_atomic_normalize_zpos() to do the job for us either.
+
+Make the zpos property immutable, and keep the primary plane at zpos 0.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/apple_drv.c      | 11 +++++++++++
+ drivers/gpu/drm/apple/iomfb_template.c |  2 +-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 9fe6de168e12..b38e2170a417 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -20,6 +20,7 @@
+ 
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_blend.h>
+ #include <drm/clients/drm_client_setup.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_drv.h>
+@@ -431,10 +432,15 @@ static int apple_probe_per_dcp(struct device *dev,
+ 	struct apple_encoder *enc;
+ 	struct drm_plane *planes[DCP_MAX_PLANES];
+ 	int ret, i;
++	int immutable_zpos = 0;
+ 
+ 	planes[0] = apple_plane_init(drm, 1U << num, DRM_PLANE_TYPE_PRIMARY);
+ 	if (IS_ERR(planes[0]))
+ 		return PTR_ERR(planes[0]);
++	ret = drm_plane_create_zpos_immutable_property(planes[0], immutable_zpos);
++	if (ret) {
++		return ret;
++	}
+ 
+ 
+ 	/* Set up our other planes */
+@@ -442,6 +448,11 @@ static int apple_probe_per_dcp(struct device *dev,
+ 		planes[i] = apple_plane_init(drm, 1U << num, DRM_PLANE_TYPE_OVERLAY);
+ 		if (IS_ERR(planes[i]))
+ 			return PTR_ERR(planes[i]);
++		immutable_zpos++;
++		ret = drm_plane_create_zpos_immutable_property(planes[i], immutable_zpos);
++		if (ret) {
++			return ret;
++		}
+ 	}
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 63d774c60403..d7687f0d9ad4 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1316,7 +1316,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 		 * also unusable on some machines, so ignore it.
+ 		 */
+ 
+-		l = MAX_BLEND_SURFACES - new_state->zpos;
++		l = MAX_BLEND_SURFACES - new_state->normalized_zpos;
+ 
+ 		WARN_ON(l > MAX_BLEND_SURFACES);
+ 

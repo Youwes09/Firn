@@ -1,0 +1,308 @@
+From 508c882c79a92d330948d7c58ca563c0e18d574d Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Wed, 10 Sep 2025 17:56:28 +0200
+Subject: [PATCH] drm/apple: Unify driver into a single module
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/Makefile    | 19 +++++++++---------
+ drivers/gpu/drm/apple/apple_drv.c | 28 ++++++++++++++++++++++++++-
+ drivers/gpu/drm/apple/connector.c |  1 -
+ drivers/gpu/drm/apple/dcp.c       | 32 +++----------------------------
+ drivers/gpu/drm/apple/dcp.h       |  3 +++
+ drivers/gpu/drm/apple/iomfb.c     |  7 -------
+ drivers/gpu/drm/apple/parser.c    |  2 --
+ 7 files changed, 42 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
+index 4f78757829ea..8d963ad6fded 100644
+--- a/drivers/gpu/drm/apple/Makefile
++++ b/drivers/gpu/drm/apple/Makefile
+@@ -3,17 +3,16 @@
+ CFLAGS_trace.o = -I$(src)
+ 
+ appledrm-y := apple_drv.o
++appledrm-y += afk.o dcp.o dcp_backlight.o dptxep.o iomfb.o parser.o systemep.o
++appledrm-$(CONFIG_DRM_APPLE_AUDIO) += audio.o
++appledrm-$(CONFIG_DRM_APPLE_AUDIO) += av.o
++appledrm-y += connector.o
++appledrm-y += ibootep.o
++appledrm-y += iomfb_v12_3.o
++appledrm-y += iomfb_v13_3.o
++appledrm-y += epic/dpavservep.o
+ 
+-apple_dcp-y := afk.o dcp.o dcp_backlight.o dptxep.o iomfb.o parser.o systemep.o
+-apple_dcp-$(CONFIG_DRM_APPLE_AUDIO) += audio.o
+-apple_dcp-$(CONFIG_DRM_APPLE_AUDIO) += av.o
+-apple_dcp-y += connector.o
+-apple_dcp-y += ibootep.o
+-apple_dcp-y += iomfb_v12_3.o
+-apple_dcp-y += iomfb_v13_3.o
+-apple_dcp-y += epic/dpavservep.o
+ 
+-apple_dcp-$(CONFIG_TRACING) += trace.o
++appledrm-$(CONFIG_TRACING) += trace.o
+ 
+ obj-$(CONFIG_DRM_APPLE) += appledrm.o
+-obj-$(CONFIG_DRM_APPLE) += apple_dcp.o
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 173cf5fba969..a791a4a02810 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -812,7 +812,33 @@ static struct platform_driver apple_platform_driver = {
+ 	.remove		= apple_platform_remove,
+ };
+ 
+-drm_module_platform_driver(apple_platform_driver);
++
++
++static int __init appledrm_register(void)
++{
++	if (drm_firmware_drivers_only())
++		return -ENODEV;
++
++#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
++	dcp_audio_register();
++#endif
++	dcp_register();
++	platform_driver_register(&apple_platform_driver);
++
++	return 0;
++}
++
++static void __exit appledrm_unregister(void)
++{
++#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
++	dcp_audio_unregister();
++#endif
++	dcp_unregister();
++	platform_driver_unregister(&apple_platform_driver);
++}
++
++module_init(appledrm_register);
++module_exit(appledrm_unregister);
+ 
+ MODULE_AUTHOR("Asahi Linux contributors");
+ MODULE_DESCRIPTION(DRIVER_DESC);
+diff --git a/drivers/gpu/drm/apple/connector.c b/drivers/gpu/drm/apple/connector.c
+index 9e7866708933..15b3664d8563 100644
+--- a/drivers/gpu/drm/apple/connector.c
++++ b/drivers/gpu/drm/apple/connector.c
+@@ -120,7 +120,6 @@ void apple_connector_debugfs_init(struct drm_connector *connector, struct dentry
+ 		break;
+ 	}
+ }
+-EXPORT_SYMBOL(apple_connector_debugfs_init);
+ 
+ static void dcp_connector_set_dict(struct apple_connector *connector,
+ 				   struct dcp_chunks *dict,
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 0b3e301e7d83..25c866c74c81 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -201,7 +201,6 @@ int dcp_set_crc(struct drm_crtc *crtc, bool enabled)
+ 
+ 	return 0;
+ }
+-EXPORT_SYMBOL_GPL(dcp_set_crc);
+ 
+ /*
+  * Helper to send a DRM vblank event. We do not know how call swap_submit_dcp
+@@ -361,7 +360,6 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ 
+ 	return 0;
+ }
+-EXPORT_SYMBOL_GPL(dcp_crtc_atomic_check);
+ 
+ int dcp_get_connector_type(struct platform_device *pdev)
+ {
+@@ -369,7 +367,6 @@ int dcp_get_connector_type(struct platform_device *pdev)
+ 
+ 	return (dcp->connector_type);
+ }
+-EXPORT_SYMBOL_GPL(dcp_get_connector_type);
+ 
+ #define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
+ 
+@@ -451,7 +448,6 @@ int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+ 	return dcp_dptx_connect(dcp, port);
+ }
+-EXPORT_SYMBOL_GPL(dcp_dptx_connect_oob);
+ 
+ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
+ {
+@@ -467,7 +463,6 @@ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
+ 
+ 	return dcp_dptx_disconnect(dcp, port);
+ }
+-EXPORT_SYMBOL_GPL(dcp_dptx_disconnect_oob);
+ 
+ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
+ {
+@@ -502,7 +497,6 @@ void dcp_link(struct platform_device *pdev, struct apple_crtc *crtc,
+ 	dcp->crtc = crtc;
+ 	dcp->connector = connector;
+ }
+-EXPORT_SYMBOL_GPL(dcp_link);
+ 
+ int dcp_start(struct platform_device *pdev)
+ {
+@@ -575,7 +569,6 @@ int dcp_start(struct platform_device *pdev)
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL(dcp_start);
+ 
+ static int dcp_enable_dp2hdmi_hpd(struct apple_dcp *dcp)
+ {
+@@ -618,7 +611,6 @@ int dcp_wait_ready(struct platform_device *pdev, u64 timeout)
+ 
+ 	return dcp->active ? 0 : -ETIMEDOUT;
+ }
+-EXPORT_SYMBOL(dcp_wait_ready);
+ 
+ static void __maybe_unused dcp_sleep(struct apple_dcp *dcp)
+ {
+@@ -662,7 +654,6 @@ void dcp_poweron(struct platform_device *pdev)
+ 	if (dcp->avep)
+ 		av_service_connect(dcp);
+ }
+-EXPORT_SYMBOL(dcp_poweron);
+ 
+ void dcp_poweroff(struct platform_device *pdev)
+ {
+@@ -691,7 +682,6 @@ void dcp_poweroff(struct platform_device *pdev)
+ 		}
+ 	}
+ }
+-EXPORT_SYMBOL(dcp_poweroff);
+ 
+ static void dcp_work_register_backlight(struct work_struct *work)
+ {
+@@ -1335,28 +1325,12 @@ static struct platform_driver apple_platform_driver = {
+ 	},
+ };
+ 
+-static int __init apple_dcp_register(void)
++void __init dcp_register(void)
+ {
+-	if (drm_firmware_drivers_only())
+-		return -ENODEV;
+-
+-#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+-	dcp_audio_register();
+-#endif
+-	return platform_driver_register(&apple_platform_driver);
++	platform_driver_register(&apple_platform_driver);
+ }
+ 
+-static void __exit apple_dcp_unregister(void)
++void __exit dcp_unregister(void)
+ {
+ 	platform_driver_unregister(&apple_platform_driver);
+-#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+-	dcp_audio_unregister();
+-#endif
+ }
+-
+-module_init(apple_dcp_register);
+-module_exit(apple_dcp_unregister);
+-
+-MODULE_AUTHOR("Asahi Linux contributors");
+-MODULE_DESCRIPTION("Apple Display Controller DRM driver");
+-MODULE_LICENSE("Dual MIT/GPL");
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index cf598e037aee..ce18fa49e4da 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -68,6 +68,9 @@ int dpavservep_init(struct apple_dcp *dcp);
+ int avep_init(struct apple_dcp *dcp);
+ 
+ 
++void __init dcp_register(void);
++void __exit dcp_unregister(void);
++
+ void __init dcp_audio_register(void);
+ void __exit dcp_audio_unregister(void);
+ 
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 8310508c7a8f..18685aa80793 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -258,7 +258,6 @@ void dcp_hotplug(struct work_struct *work)
+ 
+ 	drm_kms_helper_connector_hotplug_event(&connector->base);
+ }
+-EXPORT_SYMBOL_GPL(dcp_hotplug);
+ 
+ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
+ 			    void *data, u32 length, u16 offset)
+@@ -413,7 +412,6 @@ int dcp_get_modes(struct drm_connector *connector)
+ 
+ 	return dcp->nr_modes;
+ }
+-EXPORT_SYMBOL_GPL(dcp_get_modes);
+ 
+ /* The user may own drm_display_mode, so we need to search for our copy */
+ struct dcp_display_mode *lookup_mode(struct apple_dcp *dcp,
+@@ -440,7 +438,6 @@ enum drm_mode_status dcp_mode_valid(struct drm_connector *connector,
+ 
+ 	return lookup_mode(dcp, mode) ? MODE_OK : MODE_BAD;
+ }
+-EXPORT_SYMBOL_GPL(dcp_mode_valid);
+ 
+ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
+ 			    struct drm_atomic_state *state)
+@@ -479,7 +476,6 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
+ 
+ 	return ret;
+ }
+-EXPORT_SYMBOL_GPL(dcp_crtc_atomic_modeset);
+ 
+ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ 			 const struct drm_display_mode *mode,
+@@ -492,7 +488,6 @@ bool dcp_crtc_mode_fixup(struct drm_crtc *crtc,
+ 	/* TODO: support synthesized modes through scaling */
+ 	return lookup_mode(dcp, mode) != NULL;
+ }
+-EXPORT_SYMBOL(dcp_crtc_mode_fixup);
+ 
+ 
+ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -527,7 +522,6 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ 		break;
+ 	}
+ }
+-EXPORT_SYMBOL_GPL(dcp_flush);
+ 
+ static void iomfb_start(struct apple_dcp *dcp)
+ {
+@@ -550,7 +544,6 @@ bool dcp_is_initialized(struct platform_device *pdev)
+ 
+ 	return dcp->active;
+ }
+-EXPORT_SYMBOL_GPL(dcp_is_initialized);
+ 
+ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message)
+ {
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index bc875ccc9376..7c7af18a7c7e 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -959,7 +959,6 @@ int parse_sound_constraints(struct dcp_parse_ctx *handle,
+ 
+ 	return 0;
+ }
+-EXPORT_SYMBOL_GPL(parse_sound_constraints);
+ 
+ int parse_sound_mode(struct dcp_parse_ctx *handle,
+ 		     struct dcp_sound_format_mask *sieve,
+@@ -989,7 +988,6 @@ int parse_sound_mode(struct dcp_parse_ctx *handle,
+ 
+ 	return 0;
+ }
+-EXPORT_SYMBOL_GPL(parse_sound_mode);
+ #endif
+ 
+ int parse_system_log_mnits(struct dcp_parse_ctx *handle, struct dcp_system_ev_mnits *entry)

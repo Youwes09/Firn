@@ -1,0 +1,23 @@
+From 3985aca6a6d454fa3f5f2c33c3750bf305020e85 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 9 Nov 2024 10:17:06 +0100
+Subject: [PATCH] drm: apple: Enable EDID support by default
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 020c53d9aa6a..2ffc376dc6a3 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -50,7 +50,7 @@ bool hdmi_audio;
+ module_param(hdmi_audio, bool, 0644);
+ MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
+ 
+-static bool unstable_edid;
++static bool unstable_edid = true;
+ module_param(unstable_edid, bool, 0644);
+ MODULE_PARM_DESC(unstable_edid, "Enable unstable EDID retrival support");
+ 

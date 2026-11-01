@@ -1,0 +1,63 @@
+From 1bde089c53d49bc2f8f2d8a6866c549208e435f5 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Tue, 14 May 2024 19:23:04 +1000
+Subject: [PATCH] drm: apple: constrain swaps to maximum blendable surfaces
+
+Despite having 4 surfaces, DCP can only blend two of them at once.
+
+Constrain swaps to two surfaces, and warn if userspace somehow
+tries to give us more to swap.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/iomfb.h          | 2 ++
+ drivers/gpu/drm/apple/iomfb_template.c | 8 +++++---
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index b3285fb3dc7e..3ae4fb46ff64 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -77,6 +77,8 @@ enum iomfb_property_id {
+ /* Structures used in v12.0 firmware */
+ 
+ #define SWAP_SURFACES 4
++/* We have 4 surfaces, but we can only ever blend two */
++#define MAX_BLEND_SURFACES 2
+ #define MAX_PLANES 3
+ 
+ enum dcp_colorspace {
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 0abdbd5529c0..63d774c60403 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -904,6 +904,7 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 		swap->swap.bl_power = 0;
+ 	}
+ 
++	/* Null all surfaces */
+ 	for (int l = 0; l < SWAP_SURFACES; l++)
+ 		swap->surf_null[l] = true;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+@@ -1274,7 +1275,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 
+ 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+ 
+-	/* Reset to defaults */
++	/* Reset all surfaces to defaults */
+ 	memset(req, 0, sizeof(*req));
+ 	for (l = 0; l < SWAP_SURFACES; l++)
+ 		req->surf_null[l] = true;
+@@ -1314,9 +1315,10 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 		 * Despite having 4 surfaces, we can only blend two. Surface 0 is
+ 		 * also unusable on some machines, so ignore it.
+ 		 */
+-		l = 2 - new_state->zpos;
+ 
+-		WARN_ON(l >= SWAP_SURFACES);
++		l = MAX_BLEND_SURFACES - new_state->zpos;
++
++		WARN_ON(l > MAX_BLEND_SURFACES);
+ 
+ 		req->swap.swap_enabled |= BIT(l);
+ 

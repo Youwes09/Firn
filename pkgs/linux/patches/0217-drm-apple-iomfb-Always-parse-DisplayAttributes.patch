@@ -1,0 +1,40 @@
+From d0fff5c20eb3befacd396d0a4fe477a7a8fa87cd Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 4 Dec 2023 23:27:29 +0100
+Subject: [PATCH] drm: apple: iomfb: Always parse DisplayAttributes
+
+Fixes missing physical display dimensions for HDMI display on Macbook
+Pros.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 15 +++++----------
+ 1 file changed, 5 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index fa6297355ead..4639f774ba49 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -570,17 +570,12 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
+ 		if (dcp->nr_modes == 0)
+ 			dev_warn(dcp->dev, "TimingElements without valid modes!\n");
+ 	} else if (!strcmp(req->key, "DisplayAttributes")) {
+-		/* DisplayAttributes are empty for integrated displays, use
+-		 * display dimensions read from the devicetree
+-		 */
+-		if (dcp->main_display) {
+-			ret = parse_display_attributes(&ctx, &dcp->width_mm,
+-						&dcp->height_mm);
++		ret = parse_display_attributes(&ctx, &dcp->width_mm,
++					&dcp->height_mm);
+ 
+-			if (ret) {
+-				dev_warn(dcp->dev, "failed to parse display attribs\n");
+-				return false;
+-			}
++		if (ret) {
++			dev_warn(dcp->dev, "failed to parse display attribs\n");
++			return false;
+ 		}
+ 
+ 		dcp_set_dimensions(dcp);

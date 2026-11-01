@@ -1,0 +1,22 @@
+From c4c403f3c71f37e11be14e6a3190783178cc8665 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 7 Dec 2024 21:50:40 +0100
+Subject: [PATCH] drm: apple: Add .get_scanout_buffer for drm_panic support
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 8d36c579b90f..ea3483f83be9 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -119,6 +119,7 @@ static void apple_plane_atomic_update(struct drm_plane *plane,
+ static const struct drm_plane_helper_funcs apple_plane_helper_funcs = {
+ 	.atomic_check	= apple_plane_atomic_check,
+ 	.atomic_update	= apple_plane_atomic_update,
++	.get_scanout_buffer = drm_fb_dma_get_scanout_buffer,
+ };
+ 
+ static void apple_plane_cleanup(struct drm_plane *plane)

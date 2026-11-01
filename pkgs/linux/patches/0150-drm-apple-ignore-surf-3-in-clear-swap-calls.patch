@@ -1,0 +1,35 @@
+From e1ccadb642b319f8bd1b34c4a31e1b28e6a0f006 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 9 Mar 2023 12:44:51 +0100
+Subject: [PATCH] drm/apple: ignore surf[3] in clear swap calls
+
+MacOS 13.2 does the same and it is unclear if surf[3] can be used at
+all. PRobably not necessary but found during debugging to firmware 13.2.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 6c8c7a8e5619..a23593237a39 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -841,7 +841,7 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	memset(swap, 0, sizeof(*swap));
+ 
+ 	swap->swap.swap_enabled =
+-		swap->swap.swap_completed = IOMFB_SET_BACKGROUND | 0xF;
++		swap->swap.swap_completed = IOMFB_SET_BACKGROUND | 0x7;
+ 	swap->swap.bg_color = 0xFF000000;
+ 
+ 	/*
+@@ -1113,7 +1113,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 	 * sticks around.
+ 	 */
+ 	if (!dcp->surfaces_cleared) {
+-		req->swap.swap_enabled = IOMFB_SET_BACKGROUND | 0xF;
++		req->swap.swap_enabled = IOMFB_SET_BACKGROUND | 0x7;
+ 		req->swap.bg_color = 0xFF000000;
+ 		dcp->surfaces_cleared = true;
+ 	}

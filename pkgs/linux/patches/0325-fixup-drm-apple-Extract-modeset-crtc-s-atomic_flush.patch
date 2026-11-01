@@ -1,0 +1,22 @@
+From 85a2983a340fe5a7568c4ce8889e27927b9ae188 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 23 Aug 2026 22:56:48 +0200
+Subject: [PATCH] fixup! drm: apple: Extract modeset crtc's atomic_flush()
+
+---
+ drivers/gpu/drm/apple/iomfb.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 0d5cb5a351d3..2a21119c3230 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -416,7 +416,7 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
+ 	int ret = -EIO;
+ 	bool modeset;
+ 
+-	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
+ 	if (!crtc_state)
+ 		return 0;
+ 

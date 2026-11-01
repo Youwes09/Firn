@@ -1,0 +1,77 @@
+From ffa1cfaf8c572d83034ca916aa69ac738ee60309 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 11 Apr 2023 21:57:38 +0900
+Subject: [PATCH] dcp: Add get_tiling_state
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+---
+ drivers/gpu/drm/apple/iomfb.h          | 13 +++++++++++++
+ drivers/gpu/drm/apple/iomfb_template.c | 12 ++++++++++++
+ drivers/gpu/drm/apple/iomfb_v13_2.c    |  2 ++
+ 3 files changed, 27 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index ebb5079d407d..7885df76f1fe 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -362,4 +362,17 @@ struct iomfb_set_matrix_resp {
+ 	u32 ret;
+ } __packed;
+ 
++struct dcpep_get_tiling_state_req {
++	u32 event;
++	u32 param;
++	u32 value;
++	u8 value_null;
++	u8 padding[3];
++} __packed;
++
++struct dcpep_get_tiling_state_resp {
++	u32 value;
++	u32 ret;
++} __packed;
++
+ #endif
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 65079d5b4600..23315d75ef37 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -977,6 +977,16 @@ dcpep_cb_swap_complete_intent_gated(struct apple_dcp *dcp,
+ 		info->width, info->height);
+ }
+ 
++static struct dcpep_get_tiling_state_resp
++dcpep_cb_get_tiling_state(struct apple_dcp *dcp,
++			  struct dcpep_get_tiling_state_req *req)
++{
++	return (struct dcpep_get_tiling_state_resp){
++		.value = 0,
++		.ret = 1,
++	};
++}
++
+ TRAMPOLINE_VOID(trampoline_nop, dcpep_cb_nop);
+ TRAMPOLINE_OUT(trampoline_true, dcpep_cb_true, u8);
+ TRAMPOLINE_OUT(trampoline_false, dcpep_cb_false, u8);
+@@ -1022,6 +1032,8 @@ TRAMPOLINE_IN(trampoline_enable_backlight_message_ap_gated,
+ 	      iomfbep_cb_enable_backlight_message_ap_gated, u8);
+ TRAMPOLINE_IN(trampoline_pr_publish, iomfb_cb_pr_publish,
+ 	      struct iomfb_property);
++TRAMPOLINE_INOUT(trampoline_get_tiling_state, dcpep_cb_get_tiling_state,
++		 struct dcpep_get_tiling_state_req, struct dcpep_get_tiling_state_resp);
+ 
+ /*
+  * Callback for swap requests. If a swap failed, we'll never get a swap
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_2.c b/drivers/gpu/drm/apple/iomfb_v13_2.c
+index 63ae1e79adda..356a2aa2433b 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_2.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_2.c
+@@ -51,6 +51,8 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[110] = trampoline_true, /* create_iomfb_service */
+ 	[111] = trampoline_true, /* create_backlight_service */
+ 	[112] = trampoline_true, /* create_nvram_servce? */
++	[113] = trampoline_get_tiling_state,
++	[114] = trampoline_false, /* set_tiling_state */
+ 	[119] = dcpep_cb_boot_1,
+ 	[120] = trampoline_false, /* is_dark_boot */
+ 	[121] = trampoline_false, /* is_dark_boot / is_waking_from_hibernate*/

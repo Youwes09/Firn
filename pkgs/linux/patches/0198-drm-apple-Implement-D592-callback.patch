@@ -1,0 +1,93 @@
+From 12c0d8e43c9bbd562d46d5c111ee26671b3ac3e8 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 19 Nov 2023 18:07:41 +0100
+Subject: [PATCH] drm: apple: Implement D592 callback
+
+This callback is occasionally seen around (failed) modesets. There seems
+to be no need to handle it so just trace it.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c |  7 +++++++
+ drivers/gpu/drm/apple/iomfb_v12_3.c    |  1 +
+ drivers/gpu/drm/apple/iomfb_v13_3.c    |  1 +
+ drivers/gpu/drm/apple/trace.h          | 17 +++++++++++++++++
+ 4 files changed, 26 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index cbd22184baaa..cb954b25ccdb 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1034,6 +1034,12 @@ dcpep_cb_swap_complete_intent_gated(struct apple_dcp *dcp,
+ 		info->width, info->height);
+ }
+ 
++static void
++dcpep_cb_abort_swap_ap_gated(struct apple_dcp *dcp, u32 *swap_id)
++{
++	trace_iomfb_abort_swap_ap_gated(dcp, *swap_id);
++}
++
+ static struct dcpep_get_tiling_state_resp
+ dcpep_cb_get_tiling_state(struct apple_dcp *dcp,
+ 			  struct dcpep_get_tiling_state_req *req)
+@@ -1095,6 +1101,7 @@ TRAMPOLINE_IN(trampoline_hotplug, dcpep_cb_hotplug, u64);
+ TRAMPOLINE_IN(trampoline_swap_complete_intent_gated,
+ 	      dcpep_cb_swap_complete_intent_gated,
+ 	      struct dcp_swap_complete_intent_gated);
++TRAMPOLINE_IN(trampoline_abort_swap_ap_gated, dcpep_cb_abort_swap_ap_gated, u32);
+ TRAMPOLINE_IN(trampoline_enable_backlight_message_ap_gated,
+ 	      iomfbep_cb_enable_backlight_message_ap_gated, u8);
+ TRAMPOLINE_IN(trampoline_pr_publish, iomfb_cb_pr_publish,
+diff --git a/drivers/gpu/drm/apple/iomfb_v12_3.c b/drivers/gpu/drm/apple/iomfb_v12_3.c
+index abcd1e4aab3f..0fe08c42d646 100644
+--- a/drivers/gpu/drm/apple/iomfb_v12_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v12_3.c
+@@ -89,6 +89,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[588] = trampoline_nop, /* resize_default_fb_surface_gated */
+ 	[589] = trampoline_swap_complete,
+ 	[591] = trampoline_swap_complete_intent_gated,
++	[592] = trampoline_abort_swap_ap_gated,
+ 	[593] = trampoline_enable_backlight_message_ap_gated,
+ 	[594] = trampoline_nop, /* IOMobileFramebufferAP::setSystemConsoleMode */
+ 	[596] = trampoline_false, /* IOMobileFramebufferAP::isDFBAllocated */
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_3.c b/drivers/gpu/drm/apple/iomfb_v13_3.c
+index 9c692ba3c81b..1ee29112be45 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_3.c
+@@ -95,6 +95,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[588] = trampoline_nop, /* resize_default_fb_surface_gated */
+ 	[589] = trampoline_swap_complete,
+ 	[591] = trampoline_swap_complete_intent_gated,
++	[592] = trampoline_abort_swap_ap_gated,
+ 	[593] = trampoline_enable_backlight_message_ap_gated,
+ 	[594] = trampoline_nop, /* IOMobileFramebufferAP::setSystemConsoleMode */
+ 	[596] = trampoline_false, /* IOMobileFramebufferAP::isDFBAllocated */
+diff --git a/drivers/gpu/drm/apple/trace.h b/drivers/gpu/drm/apple/trace.h
+index 814bc7f08644..e03bf8b199c8 100644
+--- a/drivers/gpu/drm/apple/trace.h
++++ b/drivers/gpu/drm/apple/trace.h
+@@ -303,6 +303,23 @@ TRACE_EVENT(iomfb_swap_complete_intent_gated,
+ 	    )
+ );
+ 
++TRACE_EVENT(iomfb_abort_swap_ap_gated,
++	    TP_PROTO(struct apple_dcp *dcp, u32 swap_id),
++	    TP_ARGS(dcp, swap_id),
++	    TP_STRUCT__entry(
++			     __field(u64, dcp)
++			     __field(u32, swap_id)
++	    ),
++	    TP_fast_assign(
++			   __entry->dcp = (u64)dcp;
++			   __entry->swap_id = swap_id;
++	    ),
++	    TP_printk("dcp=%llx, swap_id=%u",
++		      __entry->dcp,
++		      __entry->swap_id
++	    )
++);
++
+ DECLARE_EVENT_CLASS(iomfb_parse_mode_template,
+ 	    TP_PROTO(s64 id, struct dimension *horiz, struct dimension *vert, s64 best_color_mode, bool is_virtual, s64 score),
+ 	    TP_ARGS(id, horiz, vert, best_color_mode, is_virtual, score),

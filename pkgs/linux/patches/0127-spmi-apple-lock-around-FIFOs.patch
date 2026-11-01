@@ -1,0 +1,51 @@
+From d97bf33482b24ec28dbde5e23935b6ab2cc825bb Mon Sep 17 00:00:00 2001
+From: Alba Mendez <me@alba.sh>
+Date: Tue, 18 Aug 2026 20:32:44 +0200
+Subject: [PATCH] spmi: apple: lock around FIFOs
+
+The driver was missing locking around register interactions.
+
+Signed-off-by: Alba Mendez <me@alba.sh>
+Reviewed-by: Janne Grunau <j@jannau.net>
+Signed-off-by: Sasha Finkelstein <k@chaosmail.tech>
+---
+ drivers/spmi/spmi-apple-controller.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/spmi/spmi-apple-controller.c b/drivers/spmi/spmi-apple-controller.c
+index 9843dc871d6c..fabccd25aa0d 100644
+--- a/drivers/spmi/spmi-apple-controller.c
++++ b/drivers/spmi/spmi-apple-controller.c
+@@ -16,6 +16,7 @@
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/platform_device.h>
+ #include <linux/spmi.h>
+ 
+@@ -39,6 +40,7 @@
+ 
+ struct apple_spmi {
+ 	void __iomem *regs;
++	struct mutex fifo_lock;
+ 	bool prev_fail;
+ };
+ 
+@@ -78,6 +80,8 @@ static int spmi_raw_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid, u16 param,
+ 	size_t i = 0, j;
+ 	int ret;
+ 
++	guard(mutex)(&spmi->fifo_lock);
++
+ 	if (spmi->prev_fail) {
+ 		writel(SPMI_ACT_FIFO_FLUSH, spmi->regs + SPMI_ACT_REG);
+ 		spmi->prev_fail = false;
+@@ -195,6 +199,7 @@ static int apple_spmi_probe(struct platform_device *pdev)
+ 		return -ENOMEM;
+ 
+ 	spmi = spmi_controller_get_drvdata(ctrl);
++	mutex_init(&spmi->fifo_lock);
+ 
+ 	spmi->regs = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(spmi->regs))

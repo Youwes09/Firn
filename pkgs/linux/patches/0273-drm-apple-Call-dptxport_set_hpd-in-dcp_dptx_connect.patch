@@ -1,0 +1,67 @@
+From c43c5fdf6fec6120b5a287abccff8c361e5d5f5e Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 4 Aug 2024 18:46:04 +0200
+Subject: [PATCH] drm: apple: Call dptxport_set_hpd in dcp_dptx_connect
+
+Also increases the connection timeout to 2 seconds.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 23 +++++++++++------------
+ 1 file changed, 11 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 447168440596..b5e234d8599a 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -370,7 +370,7 @@ int dcp_get_connector_type(struct platform_device *pdev)
+ }
+ EXPORT_SYMBOL_GPL(dcp_get_connector_type);
+ 
+-#define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(1000)
++#define DPTX_CONNECT_TIMEOUT msecs_to_jiffies(2000)
+ 
+ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ {
+@@ -410,6 +410,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 
+ 	usleep_range(5, 10);
+ 
++	if (dcp->connector_type == DRM_MODE_CONNECTOR_DisplayPort)
++		dptxport_set_hpd(dcp->dptxport[port].service, true);
++
+ 	return 0;
+ 
+ out_unlock:
+@@ -417,17 +420,6 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 	return ret;
+ }
+ 
+-int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
+-{
+-	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+-	int err = dcp_dptx_connect(dcp, port);
+-	if (err < 0)
+-		return err;
+-	dptxport_set_hpd(dcp->dptxport[port].service, true);
+-	return 0;
+-}
+-EXPORT_SYMBOL_GPL(dcp_dptx_connect_oob);
+-
+ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ {
+ 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
+@@ -442,6 +434,13 @@ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
+ 	return 0;
+ }
+ 
++int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++	return dcp_dptx_connect(dcp, port);
++}
++EXPORT_SYMBOL_GPL(dcp_dptx_connect_oob);
++
+ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
+ {
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);

@@ -1,0 +1,24 @@
+From 5554fd945e731e88bc12607f8ceef8c71c59ba1c Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 21:19:11 -0500
+Subject: [PATCH] dt-bindings: usb: apple,dwc3: Add t8132
+
+The M4's USB controllers are compatible with the M1's.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/usb/apple,dwc3.yaml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Documentation/devicetree/bindings/usb/apple,dwc3.yaml b/Documentation/devicetree/bindings/usb/apple,dwc3.yaml
+index f70c33f32c5d..f49e1a03779e 100644
+--- a/Documentation/devicetree/bindings/usb/apple,dwc3.yaml
++++ b/Documentation/devicetree/bindings/usb/apple,dwc3.yaml
+@@ -24,6 +24,7 @@ properties:
+               - apple,t6000-dwc3
+               - apple,t6020-dwc3
+               - apple,t8112-dwc3
++              - apple,t8132-dwc3
+           - const: apple,t8103-dwc3
+       - const: apple,t8103-dwc3
+ 

@@ -1,0 +1,33 @@
+From 3df693acaabb3083f60c7582b13564b267c603e3 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 21 Jan 2025 20:32:16 +0100
+Subject: [PATCH] drm: apple: HDMI: Check HPD state before enabling the IRQ
+
+The HPD IRQ is edge triggered so its state needs to queried explicitly
+to detect the current state.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 992e53b5f607..9dfd5cbcdad2 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -569,6 +569,15 @@ EXPORT_SYMBOL(dcp_start);
+ 
+ static int dcp_enable_dp2hdmi_hpd(struct apple_dcp *dcp)
+ {
++	// check HPD state before enabling the edge triggered IRQ
++	if (dcp->hdmi_hpd) {
++		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
++		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
++
++		if (connected)
++			dcp_dptx_connect(dcp, 0);
++	}
++
+ 	if (dcp->hdmi_hpd_irq)
+ 		enable_irq(dcp->hdmi_hpd_irq);
+ 

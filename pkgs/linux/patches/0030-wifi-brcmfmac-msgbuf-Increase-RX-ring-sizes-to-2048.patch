@@ -1,0 +1,51 @@
+From dc858722bf0e6260568b8a34401e257567a90683 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 3 Oct 2023 18:33:36 +0900
+Subject: [PATCH] wifi: brcmfmac: msgbuf: Increase RX ring sizes to 2048
+
+New chips, bigger rings again. BCM4388 Apple firmware posts more than
+1024 RX buffers, so we need to bump this up again.
+
+This also requires increasing the number of RX PKTIDs.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit ae8644ec4d5e34455b50883e33373cd6e4dc98ef)
+
+Original-Commit: e89edd82e25ec74206ccc379770db42954914b1f
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c | 2 +-
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c
+index ba9985644f0c..659419e017c5 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.c
+@@ -75,7 +75,7 @@
+ #define MSGBUF_TYPE_D2H_RING_DELETE_CMPLT	0x2E
+ 
+ #define NR_TX_PKTIDS				2048
+-#define NR_RX_PKTIDS				1024
++#define NR_RX_PKTIDS				2048
+ 
+ #define BRCMF_IOCTL_REQ_PKTID			0xFFFE
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h
+index 89b6b7f9ddb7..0ed48cf13d93 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/msgbuf.h
+@@ -8,10 +8,10 @@
+ #ifdef CONFIG_BRCMFMAC_PROTO_MSGBUF
+ 
+ #define BRCMF_H2D_MSGRING_CONTROL_SUBMIT_MAX_ITEM	64
+-#define BRCMF_H2D_MSGRING_RXPOST_SUBMIT_MAX_ITEM	1024
++#define BRCMF_H2D_MSGRING_RXPOST_SUBMIT_MAX_ITEM	2048
+ #define BRCMF_D2H_MSGRING_CONTROL_COMPLETE_MAX_ITEM	64
+ #define BRCMF_D2H_MSGRING_TX_COMPLETE_MAX_ITEM		1024
+-#define BRCMF_D2H_MSGRING_RX_COMPLETE_MAX_ITEM		1024
++#define BRCMF_D2H_MSGRING_RX_COMPLETE_MAX_ITEM		2048
+ #define BRCMF_H2D_TXFLOWRING_MAX_ITEM			512
+ 
+ #define BRCMF_H2D_MSGRING_CONTROL_SUBMIT_ITEMSIZE	40

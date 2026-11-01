@@ -1,0 +1,127 @@
+From e39d27c74dededb5847a25e7c928cf12df340a3b Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 21 Dec 2025 20:14:16 +0100
+Subject: [PATCH] drm: apple: Use typec mux to switch atc-phy into DP
+
+The upstream atc phy driver has no longer special handling for the phy
+only use case on 14/16-inch Macbook Pros. So simply let dcp handle this
+and switch the type-c mux to full 4 lane DisplayPort mode.
+This requires devicetree changes in the form of a graph based connection
+between dcpext0 and atc-phy.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c    | 11 +++++++++++
+ drivers/gpu/drm/apple/dcp-internal.h |  2 ++
+ drivers/gpu/drm/apple/dcp.c          | 26 ++++++++++++++++++++++++++
+ drivers/gpu/drm/apple/dptxep.c       |  4 +++-
+ 4 files changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index a791a4a02810..1e466c7d706b 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -735,6 +735,17 @@ static int add_dcp_components(struct device *dev,
+ 					continue;
+ 				}
+ #endif
++
++				/*
++				 * The ATC phy driver is not part of the component
++				 * collection for the Apple display-subsystem so
++				 * ignore it here.
++				 */
++				if (of_device_is_compatible(port, "apple,t8103-atcphy")) {
++					of_node_put(port);
++					continue;
++				}
++
+ 				if (of_device_is_available(port))
+ 					drm_of_component_match_add(dev, matchptr,
+ 							   component_compare_of,
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 4a37741d01e0..f2eb2483c9a8 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -12,6 +12,7 @@
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ #include <linux/scatterlist.h>
++#include <linux/usb/typec_mux.h>
+ 
+ #include "dptxep.h"
+ #include "iomfb.h"
+@@ -252,6 +253,7 @@ struct apple_dcp {
+ 	/* these fields are output port specific */
+ 	struct phy *phy;
+ 	struct mux_control *xbar;
++	struct typec_mux *typec_mux;
+ 
+ 	struct gpio_desc *hdmi_hpd;
+ 	struct gpio_desc *hdmi_pwren;
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 25c866c74c81..81ab1a63d8bb 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -21,6 +21,9 @@
+ #include <linux/slab.h>
+ #include <linux/soc/apple/rtkit.h>
+ #include <linux/string.h>
++#include <linux/usb/typec_altmode.h>
++#include <linux/usb/typec_dp.h>
++#include <linux/usb/typec_mux.h>
+ #include <linux/workqueue.h>
+ 
+ #include <drm/drm_fb_dma_helper.h>
+@@ -1090,6 +1093,8 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ 	if (dcp->hdmi_hpd_irq)
+ 		disable_irq(dcp->hdmi_hpd_irq);
+ 
++	typec_mux_put(dcp->typec_mux);
++
+ 	if (dcp->avep) {
+ 		av_service_disconnect(dcp);
+ 		afk_shutdown(dcp->avep);
+@@ -1227,6 +1232,27 @@ static int dcp_platform_probe(struct platform_device *pdev)
+ 			ret = mux_control_select(dcp->xbar, mux_index);
+ 			if (ret)
+ 				dev_warn(dev, "mux_control_select failed: %d\n", ret);
++
++			/*
++			 * Switch atcphy to DP-only. should move to a Macbook Pro
++			 * 14-/16-inch specific DP-to-HDMI drm_bridge.
++			 */
++			dcp->typec_mux = fwnode_typec_mux_get(dev_fwnode(dcp->dev));
++			if (!IS_ERR_OR_NULL(dcp->typec_mux)) {
++				struct typec_altmode alt = {
++					.svid = USB_TYPEC_DP_SID,
++				};
++				struct typec_mux_state state = {
++					.alt = &alt,
++					.mode = TYPEC_DP_STATE_C,
++				};
++				int ret = typec_mux_set(dcp->typec_mux, &state);
++				dev_info(dev, "typec_mux_set() returned: %d\n", ret);
++			} else {
++				dev_info(dev, "fwnode_typec_mux_get() returned: %ld\n",
++						IS_ERR(dcp->typec_mux) ? PTR_ERR(dcp->typec_mux) : 0);
++				dcp->typec_mux = NULL;
++			}
+ 		}
+ 	}
+ 
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index 09357d4d0b88..1ea00602d476 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -479,7 +479,9 @@ dptxport_call_activate(struct apple_epic_service *service,
+ 	const struct apple_dcp *dcp = service->ep->dcp;
+ 
+ 	// TODO: hack, use phy_set_mode to select the correct DCP(EXT) input
+-	phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
++	// for standalone phy (i.e. not atc phy).
++	if (!dcp->typec_mux)
++		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
+ 
+ 	memcpy(reply, data, min(reply_size, data_size));
+ 	if (reply_size >= 4)

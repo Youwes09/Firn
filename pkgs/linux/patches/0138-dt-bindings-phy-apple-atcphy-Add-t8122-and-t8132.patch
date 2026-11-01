@@ -1,0 +1,28 @@
+From 51822eabc86961c5afd17d97c0702956c7317c31 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 21:19:16 -0500
+Subject: [PATCH] dt-bindings: phy: apple,atcphy: Add t8122 and t8132
+
+The M3's Type-C PHY needs its own setup, so it gets its own fallback
+compatible. The M4's is compatible with the M3's.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/phy/apple,atcphy.yaml | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/phy/apple,atcphy.yaml b/Documentation/devicetree/bindings/phy/apple,atcphy.yaml
+index 0acac7e3ee67..d6162fd4788d 100644
+--- a/Documentation/devicetree/bindings/phy/apple,atcphy.yaml
++++ b/Documentation/devicetree/bindings/phy/apple,atcphy.yaml
+@@ -55,6 +55,10 @@ properties:
+               - apple,t8112-atcphy
+           - const: apple,t8103-atcphy
+       - const: apple,t8103-atcphy
++      - items:
++          - const: apple,t8132-atcphy
++          - const: apple,t8122-atcphy
++      - const: apple,t8122-atcphy
+ 
+   reg:
+     items:

@@ -1,0 +1,26 @@
+From c3d4df1e2d3dd6f0a7a4bba4065a54734f4eefea Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 27 Dec 2025 15:00:14 +0100
+Subject: [PATCH] drm: apple: Switch link status to BAD if power on fails
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 2a521ec5254e..2802394a8bc3 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -829,6 +829,11 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
+ 
+ 	if (ret == 0)
+ 		dev_warn(dcp->dev, "wait for power timed out\n");
++	else if (ret > 0)
++		dev_info(dcp->dev, "dcp_set_power_state_req returned, %d ms remaining\n", jiffies_to_msecs(ret));
++	if (ret <= 0)
++		drm_connector_set_link_status_property(&dcp->connector->base,
++						       DRM_MODE_LINK_STATUS_BAD);
+ 
+ 	kref_put(&cookie->refcount, release_wait_cookie);;
+ 

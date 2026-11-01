@@ -1,0 +1,237 @@
+From 4cdc520c940a4273ded66bc020ba6ba4e94bf64e Mon Sep 17 00:00:00 2001
+From: Yureka Lilian <yureka@cyberchaos.dev>
+Date: Sat, 25 Jul 2026 15:42:41 +0200
+Subject: [PATCH] arm64: dts: apple: t8132: Add PCIe and the Wi-Fi/Bluetooth
+ module
+
+Add the PCIe controller with its three root ports and DARTs. On the
+notebooks port 0 carries the BCM4388 Wi-Fi and Bluetooth module,
+powered through SMC GPIO 19.
+
+[Youwes09: squashed Gravity Linux commit 9edf52c13ea3 ("t8132 pcie")
+ and commit bdafece9eddb ("t8132 wifi pwren"); dropped the Mac mini
+ part; power domain from the ADT, as Niklas Sheth found; node order,
+ style]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-jxxx.dtsi |  34 ++++++
+ arch/arm64/boot/dts/apple/t8132.dtsi      | 130 ++++++++++++++++++++++
+ 2 files changed, 164 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi b/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
+index 9882ea3f85e6..61b5a0e45b67 100644
+--- a/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
+@@ -11,7 +11,9 @@
+ 
+ / {
+ 	aliases {
++		bluetooth0 = &bluetooth0;
+ 		serial0 = &serial0;
++		wifi0 = &wifi0;
+ 	};
+ 
+ 	chosen {
+@@ -41,8 +43,40 @@ memory@800000000 {
+ 		device_type = "memory";
+ 		reg = <0x8 0 0x2 0>; /* To be filled by loader */
+ 	};
++
++	vreg_pcie0_port0: regulator-pcie0-port0 {
++		compatible = "regulator-fixed";
++		regulator-name = "pwren-pcie0-port0";
++		gpio = <&smc_gpio 19 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
+ };
+ 
+ &serial0 {
+ 	status = "okay";
+ };
++
++/*
++ * Force the bus number assignments so that we can declare some of the
++ * on-board devices and properties that are populated by the bootloader
++ * (such as MAC addresses).
++ */
++&port00 {
++	power-supply = <&vreg_pcie0_port0>;
++	bus-range = <1 1>;
++
++	wifi0: wifi@0,0 {
++		compatible = "pci14e4,4434";
++		reg = <0x10000 0x0 0x0 0x0 0x0>;
++		/* To be filled by the loader */
++		local-mac-address = [00 00 00 00 00 00];
++		apple,antenna-sku = "XX";
++	};
++
++	bluetooth0: bluetooth@0,1 {
++		compatible = "pci14e4,5f72";
++		reg = <0x10100 0x0 0x0 0x0 0x0>;
++		/* To be filled by the loader */
++		local-bd-address = [00 00 00 00 00 00];
++	};
++};
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 5d787d4496e0..ea0829b60aa3 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -5,6 +5,7 @@
+  * Copyright The Asahi Linux Contributors
+  */
+ 
++#include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/interrupt-controller/apple-aic.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/pinctrl/apple.h>
+@@ -196,6 +197,8 @@ soc: soc {
+ 
+ 		ranges;
+ 		nonposted-mmio;
++		/* Required to get >32-bit DMA via DARTs */
++		dma-ranges = <0 0 0 0 0xffffffff 0xffffc000>;
+ 
+ 		pmgr: power-management@380700000 {
+ 			compatible = "apple,t8132-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+@@ -379,6 +382,13 @@ i2c4_pins: i2c4-pins {
+ 				pinmux = <APPLE_PINMUX(108, 1)>,
+ 				         <APPLE_PINMUX(107, 1)>;
+ 			};
++
++			pcie_pins: pcie-pins {
++				// clkreq pins
++				pinmux = <APPLE_PINMUX(160, 1)>,
++					 <APPLE_PINMUX(161, 1)>,
++					 <APPLE_PINMUX(162, 1)>;
++			};
+ 		};
+ 
+ 		i2c0: i2c@3ad010000 {
+@@ -478,6 +488,126 @@ serial0: serial@3ad200000 {
+ 
+ 			status = "disabled";
+ 		};
++
++		pcie0_dart: iommu@490000000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x4 0x90000000 0x0 0x4000>;
++			#iommu-cells = <1>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1232 IRQ_TYPE_LEVEL_HIGH>;
++			power-domains = <&ps_apcie_gp>;
++		};
++
++		pcie1_dart: iommu@491000000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x4 0x91000000 0x0 0x4000>;
++			#iommu-cells = <1>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1236 IRQ_TYPE_LEVEL_HIGH>;
++			power-domains = <&ps_apcie_gp>;
++
++			status = "disabled";
++		};
++
++		pcie2_dart: iommu@492000000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x4 0x92000000 0x0 0x4000>;
++			#iommu-cells = <1>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1250 IRQ_TYPE_LEVEL_HIGH>;
++			power-domains = <&ps_apcie_gp>;
++
++			status = "disabled";
++		};
++
++		pcie0: pcie@1cb0000000 {
++			device_type = "pci";
++			compatible = "apple,t8132-pcie", "apple,t6020-pcie";
++			reg = <0x1c 0xb0000000 0x0 0x1000000>,	/* config */
++			      <0x4 0x94000000 0x0 0x4000>,	/* rc */
++			      <0x4 0x90028000 0x0 0x4000>,	/* port0 */
++			      <0x4 0x91028000 0x0 0x4000>,	/* port1 */
++			      <0x4 0x92028000 0x0 0x4000>,	/* port2 */
++			      <0x4 0x97020000 0x0 0x4000>,	/* phy0 */
++			      <0x4 0x97024000 0x0 0x4000>,	/* phy1 */
++			      <0x4 0x97028000 0x0 0x4000>;	/* phy2 */
++			reg-names = "config", "rc", "port0", "port1", "port2",
++				    "phy0", "phy1", "phy2";
++			ranges = <0x43000000 0xb 0xc0000000 0xb 0xc0000000 0x0 0x20000000>,
++				 <0x02000000 0x0 0x80000000 0xb 0x80000000 0x0 0x40000000>;
++			#address-cells = <3>;
++			#size-cells = <2>;
++			bus-range = <0 3>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1231 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 1240 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 1249 IRQ_TYPE_LEVEL_HIGH>;
++			iommu-map = <0x100 &pcie0_dart 0 1>,
++				    <0x200 &pcie1_dart 1 1>,
++				    <0x300 &pcie2_dart 1 1>;
++			iommu-map-mask = <0xff00>;
++			msi-controller;
++			msi-parent = <&pcie0>;
++			msi-ranges = <&aic AIC_IRQ 1506 IRQ_TYPE_EDGE_RISING 32>;
++			pinctrl-0 = <&pcie_pins>;
++			pinctrl-names = "default";
++			power-domains = <&ps_apcie_phy_sw>;
++
++			port00: pci@0,0 {
++				device_type = "pci";
++				compatible = "pciclass,0604";
++				reg = <0x0 0x0 0x0 0x0 0x0>;
++				ranges;
++				#address-cells = <3>;
++				#interrupt-cells = <1>;
++				#size-cells = <2>;
++				interrupt-controller;
++				interrupt-map = <0 0 0 1 &port00 0 0 0 0>,
++						<0 0 0 2 &port00 0 0 0 1>,
++						<0 0 0 3 &port00 0 0 0 2>,
++						<0 0 0 4 &port00 0 0 0 3>;
++				interrupt-map-mask = <0 0 0 7>;
++				reset-gpios = <&pinctrl_ap 163 GPIO_ACTIVE_LOW>;
++			};
++
++			port01: pci@1,0 {
++				device_type = "pci";
++				compatible = "pciclass,0604";
++				reg = <0x800 0x0 0x0 0x0 0x0>;
++				ranges;
++				#address-cells = <3>;
++				#interrupt-cells = <1>;
++				#size-cells = <2>;
++				interrupt-controller;
++				interrupt-map = <0 0 0 1 &port01 0 0 0 0>,
++						<0 0 0 2 &port01 0 0 0 1>,
++						<0 0 0 3 &port01 0 0 0 2>,
++						<0 0 0 4 &port01 0 0 0 3>;
++				interrupt-map-mask = <0 0 0 7>;
++				reset-gpios = <&pinctrl_ap 164 GPIO_ACTIVE_LOW>;
++
++				status = "disabled";
++			};
++
++			port02: pci@2,0 {
++				device_type = "pci";
++				compatible = "pciclass,0604";
++				reg = <0x1000 0x0 0x0 0x0 0x0>;
++				ranges;
++				#address-cells = <3>;
++				#interrupt-cells = <1>;
++				#size-cells = <2>;
++				interrupt-controller;
++				interrupt-map = <0 0 0 1 &port02 0 0 0 0>,
++						<0 0 0 2 &port02 0 0 0 1>,
++						<0 0 0 3 &port02 0 0 0 2>,
++						<0 0 0 4 &port02 0 0 0 3>;
++				interrupt-map-mask = <0 0 0 7>;
++				reset-gpios = <&pinctrl_ap 165 GPIO_ACTIVE_LOW>;
++
++				status = "disabled";
++			};
++		};
+ 	};
+ 
+ 	timer {

@@ -1,0 +1,35 @@
+From 456805abf0c5540fa2929f2eca49e2aeae366249 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sat, 31 Oct 2026 13:29:13 -0500
+Subject: [PATCH] drm/apple: Send the requested brightness on 26.6 firmware
+
+The powerlog service reports the panel's brightness as the firmware
+changes it, including the ramp to zero when the display powers off, and
+those reports overwrite brightness.nits. Send the level the backlight
+device asks for instead, so a power-on does not restore the last level
+seen on the way down.
+
+[Youwes09: from Gravity Linux 83fb190f1108]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 2435adba523b..880eaec55347 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1846,7 +1846,12 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 	/* update brightness if changed */
+ 	if (dcp_has_panel(dcp) && dcp->brightness.update) {
+ #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
+-		dcp_swap_set_brightness(&req->swap, dcp->brightness.nits);
++		/* Restore the requested level, not transient firmware telemetry. */
++		int brightness = dcp->brightness.bl_dev ?
++			backlight_get_brightness(dcp->brightness.bl_dev) :
++			dcp->brightness.nits;
++
++		dcp_swap_set_brightness(&req->swap, brightness);
+ #else
+ #if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+ 		req->swap.bl_update = 1;

@@ -1,0 +1,65 @@
+From 6a86d09c35ddce5743e8515bd9e7c1d7a6e6df59 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sat, 31 Oct 2026 11:04:46 -0500
+Subject: [PATCH] PCI: apple: Power on devices through pwrctrl
+
+The pwrctrl core no longer creates slot devices on its own; a host
+driver has to create them and power them on before it brings the links
+up. Without that, a port whose power comes from a supply, as on the
+T8132 J713's Wi-Fi port, stays off and its link never trains.
+
+Create and power on the pwrctrl devices before setting up the ports,
+following the MediaTek gen3 driver.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/pci/controller/pcie-apple.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/pci/controller/pcie-apple.c b/drivers/pci/controller/pcie-apple.c
+index c2cffc0659f4..bfe663912f7d 100644
+--- a/drivers/pci/controller/pcie-apple.c
++++ b/drivers/pci/controller/pcie-apple.c
+@@ -30,6 +30,7 @@
+ #include <linux/msi.h>
+ #include <linux/of_irq.h>
+ #include <linux/pci-ecam.h>
++#include <linux/pci-pwrctrl.h>
+ 
+ #include "pci-host-common.h"
+ 
+@@ -870,11 +871,32 @@ static int apple_pcie_probe(struct platform_device *pdev)
+ 	mutex_init(&pcie->lock);
+ 	INIT_LIST_HEAD(&pcie->ports);
+ 
++	ret = pci_pwrctrl_create_devices(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to create pwrctrl devices\n");
++
++	ret = pci_pwrctrl_power_on_devices(dev);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to power on devices\n");
++		goto err_destroy_pwrctrl;
++	}
++
+ 	ret = apple_msi_init(pcie);
+ 	if (ret)
+-		return ret;
++		goto err_power_off;
++
++	ret = pci_host_common_init(pdev, bridge, &apple_pcie_cfg_ecam_ops);
++	if (ret)
++		goto err_power_off;
++
++	return 0;
+ 
+-	return pci_host_common_init(pdev, bridge, &apple_pcie_cfg_ecam_ops);
++err_power_off:
++	pci_pwrctrl_power_off_devices(dev);
++err_destroy_pwrctrl:
++	if (ret != -EPROBE_DEFER)
++		pci_pwrctrl_destroy_devices(dev);
++	return ret;
+ }
+ 
+ static const struct of_device_id apple_pcie_of_match[] = {

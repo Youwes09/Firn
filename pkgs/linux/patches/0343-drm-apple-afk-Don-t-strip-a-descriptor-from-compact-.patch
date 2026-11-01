@@ -1,0 +1,34 @@
+From 5fdbbfc4549226dd60af95b26f9f21f90a2432a4 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sat, 31 Oct 2026 13:25:41 -0500
+Subject: [PATCH] drm/apple: afk: Don't strip a descriptor from compact reports
+
+Reports carry the serialized object directly. Unlike calls and replies,
+they have no compact command descriptor, so skipping one drops the
+OSSerialize header and the top-level dictionary tag, and the powerlog
+service fails to parse every mNits report.
+
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+[Youwes09: from Gravity Linux a8aa5e2f7d1d]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/afk.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index 9e91548e4c9b..c861cf07cff4 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -862,10 +862,8 @@ static void afk_recv_compact_message(struct apple_dcp_afkep *ep, u16 intf_id,
+ 	}
+ 	if (sub->category == 0 && sub->type == EPIC_SUBTYPE_STD_SERVICE) {
+ 		service = afk_epic_find_service(ep, intf_id);
+-		if (payload_size >= sizeof(struct epic_compact_desc)) {
+-			payload += sizeof(struct epic_compact_desc);
+-			payload_size -= sizeof(struct epic_compact_desc);
+-		}
++		/* Reports carry the serialized object directly. Unlike calls and
++		 * replies, they have no compact command descriptor. */
+ 		if (compact_trace) {
+ 			dev_info(ep->dcp->dev,
+ 				 "AFK-COMPACT report ep=%02x intf=%u service=%s size=%zu data=%*phN\n",

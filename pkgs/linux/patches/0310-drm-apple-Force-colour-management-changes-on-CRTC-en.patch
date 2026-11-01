@@ -1,0 +1,23 @@
+From 9726fb2e953a098a59f64e3781966cde81a81be5 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Mon, 2 Mar 2026 21:15:07 +1000
+Subject: [PATCH] drm: apple: Force colour management changes on CRTC enable
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index ab9fd49467dc..0f36dad6f963 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -109,6 +109,8 @@ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+ 	if (crtc_state->active_changed && crtc_state->active) {
+ 		struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
+ 		dcp_poweron(apple_crtc->dcp);
++		/* Force the CTM to be set on first swap */
++		crtc_state->color_mgmt_changed = true;
+ 	}
+ 
+ 	if (crtc_state->active)

@@ -1,0 +1,110 @@
+From 94499b469099ba6e87c87ac46dfc28007b8792d8 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 22 Oct 2022 12:00:21 +0200
+Subject: [PATCH] iommu: Add IOMMU_RESV_TRANSLATED for non 1:1 mapped reserved
+ regions
+
+The display controller in Apple silicon SoCs uses bootloader mappings
+which require IOMMU translation.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/iommu/iommu.c | 24 ++++++++++++++++++++----
+ include/linux/iommu.h | 10 ++++++++++
+ 2 files changed, 30 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/iommu/iommu.c b/drivers/iommu/iommu.c
+index b486b8bbd1fc..6c7e9fe69b00 100644
+--- a/drivers/iommu/iommu.c
++++ b/drivers/iommu/iommu.c
+@@ -117,6 +117,7 @@ static const char * const iommu_group_resv_type_string[] = {
+ 	[IOMMU_RESV_RESERVED]			= "reserved",
+ 	[IOMMU_RESV_MSI]			= "msi",
+ 	[IOMMU_RESV_SW_MSI]			= "msi",
++	[IOMMU_RESV_TRANSLATED]			= "translated",
+ };
+ 
+ #define IOMMU_CMD_LINE_DMA_API		BIT(0)
+@@ -3009,10 +3010,11 @@ void iommu_put_resv_regions(struct device *dev, struct list_head *list)
+ }
+ EXPORT_SYMBOL(iommu_put_resv_regions);
+ 
+-struct iommu_resv_region *iommu_alloc_resv_region(phys_addr_t start,
+-						  size_t length, int prot,
+-						  enum iommu_resv_type type,
+-						  gfp_t gfp)
++struct iommu_resv_region *iommu_alloc_resv_region_tr(phys_addr_t start,
++						     dma_addr_t dva_start,
++						     size_t length, int prot,
++						     enum iommu_resv_type type,
++						     gfp_t gfp)
+ {
+ 	struct iommu_resv_region *region;
+ 
+@@ -3022,11 +3024,25 @@ struct iommu_resv_region *iommu_alloc_resv_region(phys_addr_t start,
+ 
+ 	INIT_LIST_HEAD(&region->list);
+ 	region->start = start;
++	if (type == IOMMU_RESV_TRANSLATED)
++		region->dva = dva_start;
+ 	region->length = length;
+ 	region->prot = prot;
+ 	region->type = type;
+ 	return region;
+ }
++EXPORT_SYMBOL_GPL(iommu_alloc_resv_region_tr);
++
++struct iommu_resv_region *iommu_alloc_resv_region(phys_addr_t start,
++						  size_t length, int prot,
++						  enum iommu_resv_type type,
++						  gfp_t gfp)
++{
++	if (type == IOMMU_RESV_TRANSLATED)
++		return NULL;
++
++	return iommu_alloc_resv_region_tr(start, 0, length, prot, type, gfp);
++}
+ EXPORT_SYMBOL_GPL(iommu_alloc_resv_region);
+ 
+ void iommu_set_default_passthrough(bool cmd_line)
+diff --git a/include/linux/iommu.h b/include/linux/iommu.h
+index ef5043752a36..2c39d6744363 100644
+--- a/include/linux/iommu.h
++++ b/include/linux/iommu.h
+@@ -292,12 +292,18 @@ enum iommu_resv_type {
+ 	IOMMU_RESV_MSI,
+ 	/* Software-managed MSI translation window */
+ 	IOMMU_RESV_SW_MSI,
++	/*
++	 * Memory regions which must be mapped with the specified mapping
++	 * at all times.
++	 */
++	IOMMU_RESV_TRANSLATED,
+ };
+ 
+ /**
+  * struct iommu_resv_region - descriptor for a reserved memory region
+  * @list: Linked list pointers
+  * @start: System physical start address of the region
++ * @start: Device virtual start address of the region for IOMMU_RESV_TRANSLATED
+  * @length: Length of the region in bytes
+  * @prot: IOMMU Protection flags (READ/WRITE/...)
+  * @type: Type of the reserved region
+@@ -306,6 +312,7 @@ enum iommu_resv_type {
+ struct iommu_resv_region {
+ 	struct list_head	list;
+ 	phys_addr_t		start;
++	dma_addr_t		dva;
+ 	size_t			length;
+ 	int			prot;
+ 	enum iommu_resv_type	type;
+@@ -970,6 +977,9 @@ extern bool iommu_default_passthrough(void);
+ extern struct iommu_resv_region *
+ iommu_alloc_resv_region(phys_addr_t start, size_t length, int prot,
+ 			enum iommu_resv_type type, gfp_t gfp);
++extern struct iommu_resv_region *
++iommu_alloc_resv_region_tr(phys_addr_t start, dma_addr_t dva_start, size_t length,
++			   int prot, enum iommu_resv_type type, gfp_t gfp);
+ extern int iommu_get_group_resv_regions(struct iommu_group *group,
+ 					struct list_head *head);
+ 

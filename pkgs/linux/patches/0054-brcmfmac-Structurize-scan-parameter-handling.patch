@@ -1,0 +1,1154 @@
+From cb5112f5b2788cef3177096a684c696bd1a9973c Mon Sep 17 00:00:00 2001
+From: Daniel Berlin <dberlin@dberlin.org>
+Date: Sun, 22 Oct 2023 12:40:57 -0400
+Subject: [PATCH] [brcmfmac] Structurize scan parameter handling
+
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+(cherry picked from commit 5fe90ab08fd65f5cfe24c69097beccb3b0d384d8)
+
+Original-Commit: 63eb254702f670ee7ff88ca2ae2cfffd2a8809de
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/Makefile      |   2 +
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    | 235 ++-------
+ .../broadcom/brcm80211/brcmfmac/core.h        |   9 +
+ .../broadcom/brcm80211/brcmfmac/feature.c     |  18 +-
+ .../broadcom/brcm80211/brcmfmac/feature.h     |   4 -
+ .../broadcom/brcm80211/brcmfmac/fwil_types.h  | 190 +++++---
+ .../broadcom/brcm80211/brcmfmac/scan_param.c  | 446 ++++++++++++++++++
+ .../broadcom/brcm80211/brcmfmac/scan_param.h  |  22 +
+ 8 files changed, 643 insertions(+), 283 deletions(-)
+ create mode 100644 drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c
+ create mode 100644 drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.h
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile
+index e5ca0f511822..f3f72f952457 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/Makefile
+@@ -25,7 +25,9 @@ brcmfmac-objs += \
+ 		btcoex.o \
+ 		vendor.o \
+ 		pno.o \
++		scan_param.o \
+ 		xtlv.o
++
+ brcmfmac-$(CONFIG_BRCMFMAC_PROTO_BCDC) += \
+ 		bcdc.o \
+ 		fwsignal.o
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index e1e189bdd568..1f7b8d8de82e 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -1118,170 +1118,11 @@ bool brcmf_is_apmode_operating(struct wiphy *wiphy)
+ 	return ret;
+ }
+ 
+-static void brcmf_scan_params_v2_to_v1(struct brcmf_scan_params_v2_le *params_v2_le,
+-				       struct brcmf_scan_params_le *params_le)
+-{
+-	size_t params_size;
+-	u32 ch;
+-	int n_channels, n_ssids;
+-
+-	memcpy(&params_le->ssid_le, &params_v2_le->ssid_le,
+-	       sizeof(params_le->ssid_le));
+-	memcpy(&params_le->bssid, &params_v2_le->bssid,
+-	       sizeof(params_le->bssid));
+-
+-	params_le->bss_type = params_v2_le->bss_type;
+-	params_le->scan_type = le32_to_cpu(params_v2_le->scan_type);
+-	params_le->nprobes = params_v2_le->nprobes;
+-	params_le->active_time = params_v2_le->active_time;
+-	params_le->passive_time = params_v2_le->passive_time;
+-	params_le->home_time = params_v2_le->home_time;
+-	params_le->channel_num = params_v2_le->channel_num;
+-
+-	ch = le32_to_cpu(params_v2_le->channel_num);
+-	n_channels = ch & BRCMF_SCAN_PARAMS_COUNT_MASK;
+-	n_ssids = ch >> BRCMF_SCAN_PARAMS_NSSID_SHIFT;
+-
+-	params_size = sizeof(u16) * n_channels;
+-	if (n_ssids > 0) {
+-		params_size = roundup(params_size, sizeof(u32));
+-		params_size += sizeof(struct brcmf_ssid_le) * n_ssids;
+-	}
+-
+-	memcpy(&params_le->channel_list[0],
+-	       &params_v2_le->channel_list[0], params_size);
+-}
+-
+-static u32 brcmf_nl80211_scan_flags_to_scan_flags(u32 nl80211_flags)
+-{
+-	u32 scan_flags = 0;
+-	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_SPAN) {
+-		scan_flags |= BRCMF_SCANFLAGS_LOW_SPAN;
+-		brcmf_dbg(SCAN, "requested low span scan\n");
+-	}
+-	if (nl80211_flags & NL80211_SCAN_FLAG_HIGH_ACCURACY) {
+-		scan_flags |= BRCMF_SCANFLAGS_HIGH_ACCURACY;
+-		brcmf_dbg(SCAN, "requested high accuracy scan\n");
+-	}
+-	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_POWER) {
+-		scan_flags |= BRCMF_SCANFLAGS_LOW_POWER;
+-		brcmf_dbg(SCAN, "requested low power scan\n");
+-	}
+-	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_PRIORITY) {
+-		scan_flags |= BRCMF_SCANFLAGS_LOW_PRIO;
+-		brcmf_dbg(SCAN, "requested low priority scan\n");
+-	}
+-	return scan_flags;
+-}
+-
+-static void brcmf_escan_prep(struct brcmf_cfg80211_info *cfg,
+-			     struct brcmf_if *ifp,
+-			     struct brcmf_scan_params_v2_le *params_le,
+-			     struct cfg80211_scan_request *request)
+-{
+-	u32 n_ssids;
+-	u32 n_channels;
+-	s32 i;
+-	s32 offset;
+-	u16 chanspec;
+-	char *ptr;
+-	int length;
+-	struct brcmf_ssid_le ssid_le;
+-	u32 scan_type = BRCMF_SCANTYPE_ACTIVE;
+-
+-	eth_broadcast_addr(params_le->bssid);
+-
+-	length = BRCMF_SCAN_PARAMS_V2_FIXED_SIZE;
+-
+-	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_SCAN_V3))
+-		params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V3);
+-	else
+-		params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V2);
+-
+-	params_le->bss_type = DOT11_BSSTYPE_ANY;
+-	params_le->ssid_type = 0;
+-	params_le->channel_num = 0;
+-	params_le->nprobes = cpu_to_le32(-1);
+-	params_le->active_time = cpu_to_le32(-1);
+-	params_le->passive_time = cpu_to_le32(-1);
+-	params_le->home_time = cpu_to_le32(-1);
+-	memset(&params_le->ssid_le, 0, sizeof(params_le->ssid_le));
+-
+-	/* Scan abort */
+-	if (!request) {
+-		length += sizeof(u16);
+-		params_le->channel_num = cpu_to_le32(1);
+-		params_le->channel_list[0] = cpu_to_le16(-1);
+-		params_le->length = cpu_to_le16(length);
+-		return;
+-	}
+-
+-	n_ssids = request->n_ssids;
+-	n_channels = request->n_channels;
+-
+-	/* Copy channel array if applicable */
+-	brcmf_dbg(SCAN, "### List of channelspecs to scan ### %d\n",
+-		  n_channels);
+-	if (n_channels > 0) {
+-		length += roundup(sizeof(u16) * n_channels, sizeof(u32));
+-		for (i = 0; i < n_channels; i++) {
+-			chanspec = channel_to_chanspec(&cfg->d11inf,
+-						       request->channels[i]);
+-			brcmf_dbg(SCAN, "Chan : %d, Channel spec: %x\n",
+-				  request->channels[i]->hw_value, chanspec);
+-			params_le->channel_list[i] = cpu_to_le16(chanspec);
+-		}
+-	} else {
+-		brcmf_dbg(SCAN, "Scanning all channels\n");
+-	}
+-
+-	/* Copy ssid array if applicable */
+-	brcmf_dbg(SCAN, "### List of SSIDs to scan ### %d\n", n_ssids);
+-	if (n_ssids > 0) {
+-		offset = offsetof(struct brcmf_scan_params_v2_le, channel_list) +
+-				n_channels * sizeof(u16);
+-		offset = roundup(offset, sizeof(u32));
+-		length += sizeof(ssid_le) * n_ssids;
+-		ptr = (char *)params_le + offset;
+-		for (i = 0; i < n_ssids; i++) {
+-			memset(&ssid_le, 0, sizeof(ssid_le));
+-			ssid_le.SSID_len =
+-					cpu_to_le32(request->ssids[i].ssid_len);
+-			memcpy(ssid_le.SSID, request->ssids[i].ssid,
+-			       request->ssids[i].ssid_len);
+-			if (!ssid_le.SSID_len)
+-				brcmf_dbg(SCAN, "%d: Broadcast scan\n", i);
+-			else
+-				brcmf_dbg(SCAN, "%d: scan for  %.32s size=%d\n",
+-					  i, ssid_le.SSID, ssid_le.SSID_len);
+-			memcpy(ptr, &ssid_le, sizeof(ssid_le));
+-			ptr += sizeof(ssid_le);
+-		}
+-	} else {
+-		brcmf_dbg(SCAN, "Performing passive scan\n");
+-		scan_type = BRCMF_SCANTYPE_PASSIVE;
+-	}
+-	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
+-	params_le->scan_type = cpu_to_le32(scan_type);
+-	params_le->length = cpu_to_le16(length);
+-
+-	/* Include RNR results if requested */
+-	if (request->flags & NL80211_SCAN_FLAG_COLOCATED_6GHZ) {
+-		params_le->ssid_type |= BRCMF_SCANSSID_INC_RNR;
+-	}
+-
+-	/* Adding mask to channel numbers */
+-	params_le->channel_num =
+-		cpu_to_le32((n_ssids << BRCMF_SCAN_PARAMS_NSSID_SHIFT) |
+-			(n_channels & BRCMF_SCAN_PARAMS_COUNT_MASK));
+-}
+-
+ s32 brcmf_notify_escan_complete(struct brcmf_cfg80211_info *cfg,
+ 				struct brcmf_if *ifp, bool aborted,
+ 				bool fw_abort)
+ {
+ 	struct brcmf_pub *drvr = cfg->pub;
+-	struct brcmf_scan_params_v2_le params_v2_le;
+ 	struct cfg80211_scan_request *scan_request;
+ 	u64 reqid;
+ 	u32 bucket;
+@@ -1297,25 +1138,16 @@ s32 brcmf_notify_escan_complete(struct brcmf_cfg80211_info *cfg,
+ 	timer_delete_sync(&cfg->escan_timeout);
+ 
+ 	if (fw_abort) {
++		u32 len;
++		void *data = drvr->scan_param_handler.get_prepped_struct(cfg, &len, NULL);
++		if (!data){
++			bphy_err(drvr, "Scan abort failed to prepare abort struct\n");
++			return 0;
++		}
+ 		/* Do a scan abort to stop the driver's scan engine */
+ 		brcmf_dbg(SCAN, "ABORT scan in firmware\n");
+-
+-		brcmf_escan_prep(cfg, ifp, &params_v2_le, NULL);
+-
+-		/* E-Scan (or anyother type) can be aborted by SCAN */
+-		if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_SCAN_V2)) {
+-			err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SCAN,
+-						     &params_v2_le,
+-						     sizeof(params_v2_le));
+-		} else {
+-			struct brcmf_scan_params_le params_le;
+-
+-			brcmf_scan_params_v2_to_v1(&params_v2_le, &params_le);
+-			err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SCAN,
+-						     &params_le,
+-						     sizeof(params_le));
+-		}
+-
++		err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SCAN, data, len);
++		kfree(data);
+ 		if (err)
+ 			bphy_err(drvr, "Scan abort failed\n");
+ 	}
+@@ -1539,19 +1371,24 @@ brcmf_run_escan(struct brcmf_cfg80211_info *cfg, struct brcmf_if *ifp,
+ 		struct cfg80211_scan_request *request)
+ {
+ 	struct brcmf_pub *drvr = cfg->pub;
+-	s32 params_size = BRCMF_SCAN_PARAMS_V2_FIXED_SIZE +
+-			  offsetof(struct brcmf_escan_params_le, params_v2_le);
++	u32 struct_size = 0;
++	void *prepped_params = NULL;
++	u32 params_size = 0;
+ 	struct brcmf_escan_params_le *params;
+ 	s32 err = 0;
+ 
+ 	brcmf_dbg(SCAN, "E-SCAN START\n");
+ 
+-	if (request != NULL) {
+-		/* Allocate space for populating ssids in struct */
+-		params_size += sizeof(u32) * ((request->n_channels + 1) / 2);
+-
+-		/* Allocate space for populating ssids in struct */
+-		params_size += sizeof(struct brcmf_ssid_le) * request->n_ssids;
++	prepped_params = drvr->scan_param_handler.get_prepped_struct(cfg, &struct_size, request);
++	if (!prepped_params) {
++		err = -EINVAL;
++		goto exit;
++	}
++	params_size = struct_size +
++		      offsetof(struct brcmf_escan_params_le, params_v4_le);
++	if (!params_size) {
++		err = -EINVAL;
++		goto exit;
+ 	}
+ 
+ 	params = kzalloc(params_size, GFP_KERNEL);
+@@ -1559,29 +1396,14 @@ brcmf_run_escan(struct brcmf_cfg80211_info *cfg, struct brcmf_if *ifp,
+ 		err = -ENOMEM;
+ 		goto exit;
+ 	}
+-	BUG_ON(params_size + sizeof("escan") >= BRCMF_DCMD_MEDLEN);
+-	brcmf_escan_prep(cfg, ifp, &params->params_v2_le, request);
+-
+-	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_SCAN_V3)) {
+-		params->version = cpu_to_le32(BRCMF_ESCAN_REQ_VERSION_V3);
+-	} else if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_SCAN_V2)) {
+-		params->version = cpu_to_le32(BRCMF_ESCAN_REQ_VERSION_V2);
+-	} else {
+-		struct brcmf_escan_params_le *params_v1;
+-
+-		params_size -= BRCMF_SCAN_PARAMS_V2_FIXED_SIZE;
+-		params_size += BRCMF_SCAN_PARAMS_FIXED_SIZE;
+-		params_v1 = kzalloc(params_size, GFP_KERNEL);
+-		if (!params_v1) {
+-			err = -ENOMEM;
+-			goto exit_params;
+-		}
+-		params_v1->version = cpu_to_le32(BRCMF_ESCAN_REQ_VERSION);
+-		brcmf_scan_params_v2_to_v1(&params->params_v2_le, &params_v1->params_le);
+-		kfree(params);
+-		params = params_v1;
+-	}
++	/* Copy into the largest part */
++	unsafe_memcpy(
++		&params->params_v4_le, prepped_params, struct_size,
++		/* A composite flex-array that is at least as large as the memcpy due to the allocation above */);
+ 
++	/* We can now free the original prepped parameters */
++	kfree(prepped_params);
++	params->version = cpu_to_le32(drvr->scan_param_handler.version);
+ 	params->action = cpu_to_le16(WL_ESCAN_ACTION_START);
+ 	params->sync_id = cpu_to_le16(0x1234);
+ 
+@@ -1593,7 +1415,6 @@ brcmf_run_escan(struct brcmf_cfg80211_info *cfg, struct brcmf_if *ifp,
+ 			bphy_err(drvr, "error (%d)\n", err);
+ 	}
+ 
+-exit_params:
+ 	kfree(params);
+ exit:
+ 	return err;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h
+index a75ce5e9297e..c7562bdb61e8 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.h
+@@ -98,6 +98,7 @@ struct brcmf_rev_info {
+ };
+ 
+ struct brcmf_pno_info;
++enum nl80211_band;
+ /**
+  * struct pno_struct_handler
+  */
+@@ -114,6 +115,13 @@ struct pno_struct_handler {
+ 			       u8 (*ssid)[IEEE80211_MAX_SSID_LEN], u8 *ssid_len,
+ 			       u8 *channel, enum nl80211_band *band);
+ };
++struct cfg80211_scan_request;
++struct scan_param_struct_handler {
++	u8 version;
++	void *(*get_prepped_struct)(struct brcmf_cfg80211_info *cfg,
++				    u32 *struct_size,
++				    struct cfg80211_scan_request *request);
++};
+ 
+ /* Common structure for module and instance linkage */
+ struct brcmf_pub {
+@@ -165,6 +173,7 @@ struct brcmf_pub {
+ 	void *vdata;
+ 	u16 cnt_ver;
+ 	struct pno_struct_handler pno_handler;
++	struct scan_param_struct_handler scan_param_handler;
+ };
+ 
+ /* forward declarations */
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+index e7e2aeab4a06..13f37f9d808f 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+@@ -17,6 +17,7 @@
+ #include "feature.h"
+ #include "common.h"
+ #include "pno.h"
++#include "scan_param.h"
+ 
+ #define BRCMF_FW_UNSUPPORTED	23
+ 
+@@ -293,7 +294,7 @@ static int brcmf_feat_fwcap_debugfs_read(struct seq_file *seq, void *data)
+ void brcmf_feat_attach(struct brcmf_pub *drvr)
+ {
+ 	struct brcmf_if *ifp = brcmf_get_ifp(drvr, 0);
+-	struct brcmf_wl_scan_version_le scan_ver;
++	struct brcmf_scan_version_le scan_ver;
+ 	struct brcmf_pno_param_v3_le pno_params;
+ 	struct brcmf_pno_macaddr_le pfn_mac;
+ 	struct brcmf_gscan_config gscan_cfg;
+@@ -349,16 +350,11 @@ void brcmf_feat_attach(struct brcmf_pub *drvr)
+ 
+ 	err = brcmf_fil_iovar_data_get(ifp, "scan_ver", &scan_ver, sizeof(scan_ver));
+ 	if (!err) {
+-		int ver = le16_to_cpu(scan_ver.scan_ver_major);
+-
+-		if (ver == 2) {
+-			ifp->drvr->feat_flags |= BIT(BRCMF_FEAT_SCAN_V2);
+-		} else if (ver == 3) {
+-			/* We consider SCAN_V3 a subtype of SCAN_V2 since the
+-			 * structure is essentially the same.
+-			 */
+-			ifp->drvr->feat_flags |= BIT(BRCMF_FEAT_SCAN_V2) | BIT(BRCMF_FEAT_SCAN_V3);
+-		}
++		u16 ver = le16_to_cpu(scan_ver.scan_ver_major);
++		brcmf_scan_param_setup_for_version(drvr, ver);
++	} else {
++		/* Default tp version 1. */
++		brcmf_scan_param_setup_for_version(drvr, 1);
+ 	}
+ 
+ 	/* See what version of PFN scan is supported*/
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
+index 56c61c7f35ce..6c060503ac15 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
+@@ -30,9 +30,7 @@
+  * SAE: simultaneous authentication of equals
+  * FWAUTH: Firmware authenticator
+  * DUMP_OBSS: Firmware has capable to dump obss info to support ACS
+- * SCAN_V2: Version 2 scan params
+  * SAE_EXT: SAE authentication handled by user-space supplicant
+- * SCAN_v3: Version 3 scan params
+  * PMKID_V2: Version 2 PMKID
+  * PMKID_V3: Version 3 PMKID
+  * EVENT_MSGS_EXT: Event messages extension
+@@ -62,8 +60,6 @@
+ 	BRCMF_FEAT_DEF(SAE) \
+ 	BRCMF_FEAT_DEF(FWAUTH) \
+ 	BRCMF_FEAT_DEF(DUMP_OBSS) \
+-	BRCMF_FEAT_DEF(SCAN_V2) \
+-	BRCMF_FEAT_DEF(SCAN_V3) \
+ 	BRCMF_FEAT_DEF(PMKID_V2) \
+ 	BRCMF_FEAT_DEF(PMKID_V3) \
+ 	BRCMF_FEAT_DEF(SAE_EXT) \
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index 151cef2c2e31..e4b3b13a8ff9 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -47,13 +47,10 @@
+ #define BRCMF_STA_DWDS_CAP		0x01000000	/* DWDS CAP */
+ #define BRCMF_STA_DWDS			0x02000000	/* DWDS active */
+ 
+-/* size of brcmf_scan_params not including variable length array */
+-#define BRCMF_SCAN_PARAMS_FIXED_SIZE	64
+-#define BRCMF_SCAN_PARAMS_V2_FIXED_SIZE	72
+-
+ /* version of brcmf_scan_params structure */
+ #define BRCMF_SCAN_PARAMS_VERSION_V2	2
+ #define BRCMF_SCAN_PARAMS_VERSION_V3	3
++#define BRCMF_SCAN_PARAMS_VERSION_V4	4
+ 
+ /* masks for channel and ssid count */
+ #define BRCMF_SCAN_PARAMS_COUNT_MASK	0x0000ffff
+@@ -406,23 +403,23 @@ struct brcmf_ssid8_le {
+ };
+ 
+ struct brcmf_scan_params_le {
+-	struct brcmf_ssid_le ssid_le;	/* default: {0, ""} */
+-	u8 bssid[ETH_ALEN];	/* default: bcast */
+-	s8 bss_type;		/* default: any,
++	struct brcmf_ssid_le ssid_le; /* default: {0, ""} */
++	u8 bssid[ETH_ALEN]; 	/* default: bcast */
++	s8 bss_type; 		/* default: any,
+ 				 * DOT11_BSSTYPE_ANY/INFRASTRUCTURE/INDEPENDENT
+ 				 */
+-	u8 scan_type;	/* flags, 0 use default */
+-	__le32 nprobes;	  /* -1 use default, number of probes per channel */
+-	__le32 active_time;	/* -1 use default, dwell time per channel for
++	u8 scan_type; 		/* flags, 0 use default */
++	__le32 nprobes; 	/* -1 use default, number of probes per channel */
++	__le32 active_time; 	/* -1 use default, dwell time per channel for
+ 				 * active scanning
+ 				 */
+-	__le32 passive_time;	/* -1 use default, dwell time per channel
++	__le32 passive_time; 	/* -1 use default, dwell time per channel
+ 				 * for passive scanning
+ 				 */
+ 	__le32 home_time;	/* -1 use default, dwell time for the
+ 				 * home channel between channel scans
+ 				 */
+-	__le32 channel_num;	/* count of channels and ssids that follow
++	__le32 channel_num; 	/* count of channels and ssids that follow
+ 				 *
+ 				 * low half is count of channels in
+ 				 * channel_list, 0 means default (use all
+@@ -438,56 +435,125 @@ struct brcmf_scan_params_le {
+ 				 * fixed parameter portion is assumed, otherwise
+ 				 * ssid in the fixed portion is ignored
+ 				 */
+-	union {
+-		__le16 padding;	/* Reserve space for at least 1 entry for abort
+-				 * which uses an on stack brcmf_scan_params_le
+-				 */
+-		DECLARE_FLEX_ARRAY(__le16, channel_list);	/* chanspecs */
+-	};
++	__le16 channel_list[]; /* chanspecs */
+ };
+ 
+ struct brcmf_scan_params_v2_le {
+-	__le16 version;		/* structure version */
+-	__le16 length;		/* structure length */
+-	struct brcmf_ssid_le ssid_le;	/* default: {0, ""} */
+-	u8 bssid[ETH_ALEN];	/* default: bcast */
+-	s8 bss_type;		/* default: any,
+-				 * DOT11_BSSTYPE_ANY/INFRASTRUCTURE/INDEPENDENT
+-				 */
+-	u8 ssid_type;		/* v3 only */
+-	__le32 scan_type;	/* flags, 0 use default */
+-	__le32 nprobes;		/* -1 use default, number of probes per channel */
+-	__le32 active_time;	/* -1 use default, dwell time per channel for
+-				 * active scanning
+-				 */
+-	__le32 passive_time;	/* -1 use default, dwell time per channel
+-				 * for passive scanning
+-				 */
+-	__le32 home_time;	/* -1 use default, dwell time for the
+-				 * home channel between channel scans
+-				 */
+-	__le32 channel_num;	/* count of channels and ssids that follow
+-				 *
+-				 * low half is count of channels in
+-				 * channel_list, 0 means default (use all
+-				 * available channels)
+-				 *
+-				 * high half is entries in struct brcmf_ssid
+-				 * array that follows channel_list, aligned for
+-				 * s32 (4 bytes) meaning an odd channel count
+-				 * implies a 2-byte pad between end of
+-				 * channel_list and first ssid
+-				 *
+-				 * if ssid count is zero, single ssid in the
+-				 * fixed parameter portion is assumed, otherwise
+-				 * ssid in the fixed portion is ignored
+-				 */
+-	union {
+-		__le16 padding;	/* Reserve space for at least 1 entry for abort
+-				 * which uses an on stack brcmf_scan_params_v2_le
+-				 */
+-		DECLARE_FLEX_ARRAY(__le16, channel_list);	/* chanspecs */
+-	};
++	__le16 version; /* structure version */
++	__le16 length; /* structure length */
++	struct brcmf_ssid_le ssid_le;  /* default: {0, ""} */
++	u8 bssid[ETH_ALEN];	       /* default: bcast */
++	s8 bss_type; 		       /* default: any,
++					* DOT11_BSSTYPE_ANY/INFRASTRUCTURE/INDEPENDENT
++					*/
++	u8 PAD;
++	__le32 scan_type; 	       /* flags, 0 use default */
++	__le32 nprobes; 	       /* -1 use default, number of probes per channel */
++	__le32 active_time; 	       /* -1 use default, dwell time per channel for
++					* active scanning
++					*/
++	__le32 passive_time;	       /* -1 use default, dwell time per channel
++					* for passive scanning
++					*/
++	__le32 home_time;	       /* -1 use default, dwell time for the
++					* home channel between channel scans
++					*/
++	__le32 channel_num;	       /* count of channels and ssids that follow
++					*
++					* low half is count of channels in
++					* channel_list, 0 means default (use all
++					* available channels)
++					*
++					* high half is entries in struct brcmf_ssid
++					* array that follows channel_list, aligned for
++					* s32 (4 bytes) meaning an odd channel count
++					* implies a 2-byte pad between end of
++					* channel_list and first ssid
++					*
++					* if ssid count is zero, single ssid in the
++					* fixed parameter portion is assumed, otherwise
++					* ssid in the fixed portion is ignored
++					*/
++	__le16 channel_list[]; 		/* chanspecs */
++};
++
++struct brcmf_scan_params_v3_le {
++	__le16 version; 	       /* structure version */
++	__le16 length; 		       /* structure length */
++	struct brcmf_ssid_le ssid_le;  /* default: {0, ""} */
++	u8 bssid[ETH_ALEN]; 	       /* default: bcast */
++	s8 bss_type; 		       /* default: any,
++					* DOT11_BSSTYPE_ANY/INFRASTRUCTURE/INDEPENDENT
++					*/
++	u8 ssid_type;		       /* short vs regular SSID */
++	__le32 scan_type; 	       /* flags, 0 use default */
++	__le32 nprobes;		       /* -1 use default, number of probes per channel */
++	__le32 active_time; 	       /* -1 use default, dwell time per channel for
++					* active scanning
++					*/
++	__le32 passive_time;	       /* -1 use default, dwell time per channel
++					* for passive scanning
++					*/
++	__le32 home_time; 	       /* -1 use default, dwell time for the
++					* home channel between channel scans
++					*/
++	__le32 channel_num; 	       /* count of channels and ssids that follow
++					*
++					* low half is count of channels in
++					* channel_list, 0 means default (use all
++					* available channels)
++					*
++					* high half is entries in struct brcmf_ssid
++					* array that follows channel_list, aligned for
++					* s32 (4 bytes) meaning an odd channel count
++					* implies a 2-byte pad between end of
++					* channel_list and first ssid
++					*
++					* if ssid count is zero, single ssid in the
++					* fixed parameter portion is assumed, otherwise
++					* ssid in the fixed portion is ignored
++					*/
++	__le16 channel_list[]; 		/* chanspecs */
++};
++
++struct brcmf_scan_params_v4_le {
++	__le16 version; 	       /* structure version */
++	__le16 length; 		       /* structure length */
++	struct brcmf_ssid_le ssid_le;  /* default: {0, ""} */
++	u8 bssid[ETH_ALEN]; 	       /* default: bcast */
++	s8 bss_type;		       /* default: any,
++					* DOT11_BSSTYPE_ANY/INFRASTRUCTURE/INDEPENDENT
++					*/
++	u8 ssid_type; 		       /* short vs regular SSID */
++	__le32 scan_type;	       /* flags, 0 use default */
++	__le32 scan_type_ext;	       /* ext flags, 0 use default */
++	__le32 nprobes; 	       /* -1 use default, number of probes per channel */
++	__le32 active_time;	       /* -1 use default, dwell time per channel for
++					* active scanning
++					*/
++	__le32 passive_time; 	       /* -1 use default, dwell time per channel
++					* for passive scanning
++					*/
++	__le32 home_time; 	       /* -1 use default, dwell time for the
++					* home channel between channel scans
++					*/
++	__le32 channel_num;	       /* count of channels and ssids that follow
++					*
++					* low half is count of channels in
++					* channel_list, 0 means default (use all
++					* available channels)
++					*
++					* high half is entries in struct brcmf_ssid
++					* array that follows channel_list, aligned for
++					* s32 (4 bytes) meaning an odd channel count
++					* implies a 2-byte pad between end of
++					* channel_list and first ssid
++					*
++					* if ssid count is zero, single ssid in the
++					* fixed parameter portion is assumed, otherwise
++					* ssid in the fixed portion is ignored
++					*/
++	__le16 channel_list[]; 	       /* chanspecs */
+ };
+ 
+ struct brcmf_scan_results {
+@@ -504,6 +570,8 @@ struct brcmf_escan_params_le {
+ 	union {
+ 		struct brcmf_scan_params_le params_le;
+ 		struct brcmf_scan_params_v2_le params_v2_le;
++		struct brcmf_scan_params_v3_le params_v3_le;
++		struct brcmf_scan_params_v4_le params_v4_le;
+ 	};
+ };
+ 
+@@ -880,13 +948,13 @@ struct brcmf_wlc_version_le {
+ /**
+  * struct brcmf_wl_scan_version_le - scan interface version
+  */
+-struct brcmf_wl_scan_version_le {
++struct brcmf_scan_version_le {
+         __le16  version;
+         __le16  length;
+         __le16  scan_ver_major;
+ };
+ 
+-#define BRCMF_WL_SCAN_VERSION_VERSION 1
++#define BRCMF_SCAN_VERSION_VERSION 1
+ 
+ /**
+  * struct brcmf_assoclist_le - request assoc list.
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c
+new file mode 100644
+index 000000000000..6bd5f6d1616c
+--- /dev/null
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.c
+@@ -0,0 +1,446 @@
++// SPDX-License-Identifier: ISC
++/*
++ * Copyright (c) 2023 Daniel Berlin
++ */
++#include <linux/gcd.h>
++#include <net/cfg80211.h>
++
++#include "core.h"
++#include "debug.h"
++#include "fwil_types.h"
++#include "cfg80211.h"
++#include "scan_param.h"
++
++static void brcmf_scan_param_set_defaults(u8 (*bssid)[ETH_ALEN], s8 *bss_type, __le32 *channel_num,
++					  __le32 *nprobes, __le32 *active_time,
++					  __le32 *passive_time,
++					  __le32 *home_time)
++{
++	eth_broadcast_addr(*bssid);
++	*bss_type = DOT11_BSSTYPE_ANY;
++	*channel_num = 0;
++	*nprobes = cpu_to_le32(-1);
++	*active_time = cpu_to_le32(-1);
++	*passive_time = cpu_to_le32(-1);
++	*home_time = cpu_to_le32(-1);
++}
++
++static void brcmf_scan_param_copy_chanspecs(
++	struct brcmf_cfg80211_info *cfg, __le16 (*dest_channels)[],
++	struct ieee80211_channel **in_channels, u32 n_channels)
++{
++	int i;
++	for (i = 0; i < n_channels; i++) {
++		u32 chanspec =
++			channel_to_chanspec(&cfg->d11inf, in_channels[i]);
++		brcmf_dbg(SCAN, "Chan : %d, Channel spec: %x\n",
++			  in_channels[i]->hw_value, chanspec);
++		(*dest_channels)[i] = cpu_to_le16(chanspec);
++	}
++}
++
++static void brcmf_scan_param_copy_ssids(char *dest_ssids,
++					struct cfg80211_ssid *in_ssids,
++					u32 n_ssids)
++{
++	int i;
++	for (i = 0; i < n_ssids; i++) {
++		struct brcmf_ssid_le ssid_le;
++		memset(&ssid_le, 0, sizeof(ssid_le));
++		ssid_le.SSID_len = cpu_to_le32(in_ssids[i].ssid_len);
++		memcpy(ssid_le.SSID, in_ssids[i].ssid, in_ssids[i].ssid_len);
++		if (!ssid_le.SSID_len)
++			brcmf_dbg(SCAN, "%d: Broadcast scan\n", i);
++		else
++			brcmf_dbg(SCAN, "%d: scan for  %.32s size=%d\n", i,
++				  ssid_le.SSID, ssid_le.SSID_len);
++		memcpy(dest_ssids, &ssid_le, sizeof(ssid_le));
++		dest_ssids += sizeof(ssid_le);
++	}
++}
++
++/* The scan parameter structures have an array of SSID's that appears at the end in some cases.
++ * In these cases, the chan list is really the lower half of a pair, the upper half is a ssid number,
++ * and then after all of that there is an array of SSIDs */
++static u32
++brcmf_scan_param_tail_size(const struct cfg80211_scan_request *request,
++			   u32 params_size)
++{
++	if (request != NULL) {
++		/* Allocate space for populating ssid upper half in struct */
++		params_size += sizeof(u32) * ((request->n_channels + 1) / 2);
++		/* Allocate space for populating ssids in struct */
++		params_size += sizeof(struct brcmf_ssid_le) * request->n_ssids;
++	} else {
++		params_size += sizeof(u16);
++	}
++	return params_size;
++}
++
++static u32 brcmf_nl80211_scan_flags_to_scan_flags(u32 nl80211_flags)
++{
++	u32 scan_flags = 0;
++	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_SPAN) {
++		scan_flags |= BRCMF_SCANFLAGS_LOW_SPAN;
++		brcmf_dbg(SCAN, "requested low span scan\n");
++	}
++	if (nl80211_flags & NL80211_SCAN_FLAG_HIGH_ACCURACY) {
++		scan_flags |= BRCMF_SCANFLAGS_HIGH_ACCURACY;
++		brcmf_dbg(SCAN, "requested high accuracy scan\n");
++	}
++	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_POWER) {
++		scan_flags |= BRCMF_SCANFLAGS_LOW_POWER;
++		brcmf_dbg(SCAN, "requested low power scan\n");
++	}
++	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_PRIORITY) {
++		scan_flags |= BRCMF_SCANFLAGS_LOW_PRIO;
++		brcmf_dbg(SCAN, "requested low priority scan\n");
++	}
++	return scan_flags;
++}
++
++static void *
++brcmf_scan_param_get_prepped_struct_v1(struct brcmf_cfg80211_info *cfg,
++				       u32 *struct_size,
++				       struct cfg80211_scan_request *request)
++{
++	u32 n_ssids;
++	u32 n_channels;
++	u32 params_size = sizeof(struct brcmf_scan_params_le);
++	u32 length;
++	struct brcmf_scan_params_le *params_le = NULL;
++	u8 scan_type = BRCMF_SCANTYPE_ACTIVE;
++
++	length = offsetof(struct brcmf_scan_params_le, channel_list);
++	params_size = brcmf_scan_param_tail_size(request, params_size);
++	params_le = kzalloc(params_size, GFP_KERNEL);
++	if (!params_le) {
++		bphy_err(cfg, "Could not allocate scan params\n");
++		return NULL;
++	}
++	brcmf_scan_param_set_defaults(&params_le->bssid,
++		&params_le->bss_type, &params_le->channel_num,
++		&params_le->nprobes, &params_le->active_time,
++		&params_le->passive_time, &params_le->home_time);
++
++	/* Scan abort */
++	if (!request) {
++		params_le->channel_num = cpu_to_le32(1);
++		params_le->channel_list[0] = cpu_to_le16(-1);
++		goto done;
++	}
++
++	n_ssids = request->n_ssids;
++	n_channels = request->n_channels;
++
++	/* Copy channel array if applicable */
++	brcmf_dbg(SCAN, "### List of channelspecs to scan ### %d\n",
++		  n_channels);
++	if (n_channels > 0) {
++		length += roundup(sizeof(u16) * n_channels, sizeof(u32));
++		brcmf_scan_param_copy_chanspecs(cfg, &params_le->channel_list,
++						request->channels, n_channels);
++	} else {
++		brcmf_dbg(SCAN, "Scanning all channels\n");
++	}
++
++	/* Copy ssid array if applicable */
++	brcmf_dbg(SCAN, "### List of SSIDs to scan ### %d\n", n_ssids);
++	if (n_ssids > 0) {
++		s32 offset;
++		char *ptr;
++
++		offset =
++			offsetof(struct brcmf_scan_params_le, channel_list) +
++			n_channels * sizeof(u16);
++		offset = roundup(offset, sizeof(u32));
++		length += sizeof(struct brcmf_ssid_le) * n_ssids;
++		ptr = (char *)params_le + offset;
++		brcmf_scan_param_copy_ssids(ptr, request->ssids, n_ssids);
++	} else {
++		brcmf_dbg(SCAN, "Performing passive scan\n");
++		scan_type = BRCMF_SCANTYPE_PASSIVE;
++	}
++	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
++	params_le->scan_type =scan_type;
++	/* Adding mask to channel numbers */
++	params_le->channel_num =
++		cpu_to_le32((n_ssids << BRCMF_SCAN_PARAMS_NSSID_SHIFT) |
++			    (n_channels & BRCMF_SCAN_PARAMS_COUNT_MASK));
++done:
++	*struct_size = length;
++	return params_le;
++}
++
++static void *
++brcmf_scan_param_get_prepped_struct_v2(struct brcmf_cfg80211_info *cfg,
++				       u32 *struct_size,
++				       struct cfg80211_scan_request *request)
++{
++	u32 n_ssids;
++	u32 n_channels;
++	u32 params_size = sizeof(struct brcmf_scan_params_v2_le);
++	u32 length;
++	struct brcmf_scan_params_v2_le *params_le = NULL;
++	u32 scan_type = BRCMF_SCANTYPE_ACTIVE;
++
++	length = offsetof(struct brcmf_scan_params_v2_le, channel_list);
++	params_size = brcmf_scan_param_tail_size(request, params_size);
++	params_le = kzalloc(params_size, GFP_KERNEL);
++	if (!params_le) {
++		bphy_err(cfg, "Could not allocate scan params\n");
++		return NULL;
++	}
++	params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V2);
++	brcmf_scan_param_set_defaults(&params_le->bssid,
++		&params_le->bss_type, &params_le->channel_num,
++		&params_le->nprobes, &params_le->active_time,
++		&params_le->passive_time, &params_le->home_time);
++
++	/* Scan abort */
++	if (!request) {
++		length += sizeof(u16);
++		params_le->channel_num = cpu_to_le32(1);
++		params_le->channel_list[0] = cpu_to_le16(-1);
++		params_le->length = cpu_to_le16(length);
++		goto done;
++	}
++
++	n_ssids = request->n_ssids;
++	n_channels = request->n_channels;
++
++	/* Copy channel array if applicable */
++	brcmf_dbg(SCAN, "### List of channelspecs to scan ### %d\n",
++		  n_channels);
++	if (n_channels > 0) {
++		length += roundup(sizeof(u16) * n_channels, sizeof(u32));
++		brcmf_scan_param_copy_chanspecs(cfg, &params_le->channel_list,
++						request->channels, n_channels);
++	} else {
++		brcmf_dbg(SCAN, "Scanning all channels\n");
++	}
++
++	/* Copy ssid array if applicable */
++	brcmf_dbg(SCAN, "### List of SSIDs to scan ### %d\n", n_ssids);
++	if (n_ssids > 0) {
++		s32 offset;
++		char *ptr;
++
++		offset =
++			offsetof(struct brcmf_scan_params_v2_le, channel_list) +
++			n_channels * sizeof(u16);
++		offset = roundup(offset, sizeof(u32));
++		length += sizeof(struct brcmf_ssid_le) * n_ssids;
++		ptr = (char *)params_le + offset;
++		brcmf_scan_param_copy_ssids(ptr, request->ssids, n_ssids);
++
++	} else {
++		brcmf_dbg(SCAN, "Performing passive scan\n");
++		scan_type = BRCMF_SCANTYPE_PASSIVE;
++	}
++	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
++	params_le->scan_type = cpu_to_le32(scan_type);
++	params_le->length = cpu_to_le16(length);
++	/* Adding mask to channel numbers */
++	params_le->channel_num =
++		cpu_to_le32((n_ssids << BRCMF_SCAN_PARAMS_NSSID_SHIFT) |
++			    (n_channels & BRCMF_SCAN_PARAMS_COUNT_MASK));
++done:
++	*struct_size = length;
++	return params_le;
++}
++
++static void *
++brcmf_scan_param_get_prepped_struct_v3(struct brcmf_cfg80211_info *cfg,
++				       u32 *struct_size,
++				       struct cfg80211_scan_request *request)
++{
++	u32 n_ssids;
++	u32 n_channels;
++	u32 params_size = sizeof(struct brcmf_scan_params_v3_le);
++	u32 length;
++	struct brcmf_scan_params_v3_le *params_le = NULL;
++	u32 scan_type = BRCMF_SCANTYPE_ACTIVE;
++
++	length = offsetof(struct brcmf_scan_params_v3_le, channel_list);
++	params_size = brcmf_scan_param_tail_size(request, params_size);
++	params_le = kzalloc(params_size, GFP_KERNEL);
++	if (!params_le) {
++		bphy_err(cfg, "Could not allocate scan params\n");
++		return NULL;
++	}
++
++	params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V3);
++	params_le->ssid_type = 0;
++	brcmf_scan_param_set_defaults(&params_le->bssid,
++		&params_le->bss_type, &params_le->channel_num,
++		&params_le->nprobes, &params_le->active_time,
++		&params_le->passive_time, &params_le->home_time);
++
++	/* Scan abort */
++	if (!request) {
++		length += sizeof(u16);
++		params_le->channel_num = cpu_to_le32(1);
++		params_le->channel_list[0] = cpu_to_le16(-1);
++		params_le->length = cpu_to_le16(length);
++		goto done;
++	}
++
++	n_ssids = request->n_ssids;
++	n_channels = request->n_channels;
++
++	/* Copy channel array if applicable */
++	brcmf_dbg(SCAN, "### List of channelspecs to scan ### %d\n",
++		  n_channels);
++	if (n_channels > 0) {
++		length += roundup(sizeof(u16) * n_channels, sizeof(u32));
++		brcmf_scan_param_copy_chanspecs(cfg, &params_le->channel_list,
++						request->channels, n_channels);
++
++	} else {
++		brcmf_dbg(SCAN, "Scanning all channels\n");
++	}
++
++	/* Copy ssid array if applicable */
++	brcmf_dbg(SCAN, "### List of SSIDs to scan ### %d\n", n_ssids);
++	if (n_ssids > 0) {
++		s32 offset;
++		char *ptr;
++
++		offset =
++			offsetof(struct brcmf_scan_params_v3_le, channel_list) +
++			n_channels * sizeof(u16);
++		offset = roundup(offset, sizeof(u32));
++		length += sizeof(struct brcmf_ssid_le) * n_ssids;
++		ptr = (char *)params_le + offset;
++		brcmf_scan_param_copy_ssids(ptr, request->ssids, n_ssids);
++
++	} else {
++		brcmf_dbg(SCAN, "Performing passive scan\n");
++		scan_type = BRCMF_SCANTYPE_PASSIVE;
++	}
++	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
++	params_le->scan_type = cpu_to_le32(scan_type);
++	params_le->length = cpu_to_le16(length);
++	params_le->channel_num =
++		cpu_to_le32((n_ssids << BRCMF_SCAN_PARAMS_NSSID_SHIFT) |
++			    (n_channels & BRCMF_SCAN_PARAMS_COUNT_MASK));
++
++	/* Include RNR results if requested */
++	if (request->flags & NL80211_SCAN_FLAG_COLOCATED_6GHZ) {
++		params_le->ssid_type |= BRCMF_SCANSSID_INC_RNR;
++	}
++	/* Adding mask to channel numbers */
++done:
++	*struct_size = length;
++	return params_le;
++}
++
++static void *
++brcmf_scan_param_get_prepped_struct_v4(struct brcmf_cfg80211_info *cfg,
++				       u32 *struct_size,
++				       struct cfg80211_scan_request *request)
++{
++	u32 n_ssids;
++	u32 n_channels;
++	u32 params_size = sizeof(struct brcmf_scan_params_v4_le);
++	u32 length;
++	struct brcmf_scan_params_v4_le *params_le = NULL;
++	u32 scan_type = BRCMF_SCANTYPE_ACTIVE;
++
++	length = offsetof(struct brcmf_scan_params_v4_le, channel_list);
++	params_size = brcmf_scan_param_tail_size(request, params_size);
++	params_le = kzalloc(params_size, GFP_KERNEL);
++	if (!params_le) {
++		bphy_err(cfg, "Could not allocate scan params\n");
++		return NULL;
++	}
++	params_le->version = cpu_to_le16(BRCMF_SCAN_PARAMS_VERSION_V4);
++	params_le->ssid_type = 0;
++	brcmf_scan_param_set_defaults(&params_le->bssid,
++		&params_le->bss_type, &params_le->channel_num,
++		&params_le->nprobes, &params_le->active_time,
++		&params_le->passive_time, &params_le->home_time);
++
++	/* Scan abort */
++	if (!request) {
++		length += sizeof(u16);
++		params_le->channel_num = cpu_to_le32(1);
++		params_le->channel_list[0] = cpu_to_le16(-1);
++		params_le->length = cpu_to_le16(length);
++		goto done;
++	}
++
++	n_ssids = request->n_ssids;
++	n_channels = request->n_channels;
++
++	/* Copy channel array if applicable */
++	brcmf_dbg(SCAN, "### List of channelspecs to scan ### %d\n",
++		  n_channels);
++	if (n_channels > 0) {
++		length += roundup(sizeof(u16) * n_channels, sizeof(u32));
++		brcmf_scan_param_copy_chanspecs(cfg, &params_le->channel_list,
++						request->channels, n_channels);
++	} else {
++		brcmf_dbg(SCAN, "Scanning all channels\n");
++	}
++
++	/* Copy ssid array if applicable */
++	brcmf_dbg(SCAN, "### List of SSIDs to scan ### %d\n", n_ssids);
++	if (n_ssids > 0) {
++		s32 offset;
++		char *ptr;
++
++		offset =
++			offsetof(struct brcmf_scan_params_v4_le, channel_list) +
++			n_channels * sizeof(u16);
++		offset = roundup(offset, sizeof(u32));
++		length += sizeof(struct brcmf_ssid_le) * n_ssids;
++		ptr = (char *)params_le + offset;
++		brcmf_scan_param_copy_ssids(ptr, request->ssids, n_ssids);
++	} else {
++		brcmf_dbg(SCAN, "Performing passive scan\n");
++		scan_type = BRCMF_SCANTYPE_PASSIVE;
++	}
++	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
++	params_le->scan_type = cpu_to_le32(scan_type);
++	params_le->length = cpu_to_le16(length);
++	/* Adding mask to channel numbers */
++	params_le->channel_num =
++		cpu_to_le32((n_ssids << BRCMF_SCAN_PARAMS_NSSID_SHIFT) |
++			    (n_channels & BRCMF_SCAN_PARAMS_COUNT_MASK));
++	/* Include RNR results if requested */
++	if (request->flags & NL80211_SCAN_FLAG_COLOCATED_6GHZ) {
++		params_le->ssid_type |= BRCMF_SCANSSID_INC_RNR;
++	}
++done:
++	*struct_size = length;
++	return params_le;
++}
++
++int brcmf_scan_param_setup_for_version(struct brcmf_pub *drvr, u8 version)
++{
++	drvr->scan_param_handler.version = version;
++	switch (version) {
++	case 1: {
++		drvr->scan_param_handler.get_prepped_struct =
++			brcmf_scan_param_get_prepped_struct_v1;
++	} break;
++	case 2: {
++		drvr->scan_param_handler.get_prepped_struct =
++			brcmf_scan_param_get_prepped_struct_v2;
++	} break;
++	case 3: {
++		drvr->scan_param_handler.get_prepped_struct =
++			brcmf_scan_param_get_prepped_struct_v3;
++	} break;
++	case 4: {
++		drvr->scan_param_handler.get_prepped_struct =
++			brcmf_scan_param_get_prepped_struct_v4;
++
++	} break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.h
+new file mode 100644
+index 000000000000..577de083c6e3
+--- /dev/null
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/scan_param.h
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: ISC
++/*
++ * Copyright (c) 2023 Daniel Berlin
++ */
++
++#ifndef _BRCMF_SCAN_PARAM_H
++#define _BRCMF_SCAN_PARAM_H
++
++struct brcmf_pub;
++
++/**
++ * brcmf_scan_param_setup_for_version() - Setup the driver to handle join structures
++ *
++ * There are a number of different structures and interface versions for scanning info
++ * This sets up the driver to handle a particular interface version.
++ *
++ * @drvr Driver structure to setup
++ * @ver Interface version
++ * Return: %0 if okay, error code otherwise
++ */
++int brcmf_scan_param_setup_for_version(struct brcmf_pub *, u8 ver);
++#endif /* _BRCMF_SCAN_PARAM_H */

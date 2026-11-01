@@ -1,0 +1,87 @@
+From 88ae0c2ec1303caf2a123a4dc1e021cb1b5e8dc2 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 6 Nov 2023 21:13:29 +0100
+Subject: [PATCH] drm: apple: Remove explicit asc-dram-mask handling
+
+This is no longer necessary after introducing "apple,dma-range" for the
+dart driver.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp-internal.h |  3 ---
+ drivers/gpu/drm/apple/dcp.c          | 14 ++------------
+ drivers/gpu/drm/apple/iomfb.c        |  1 -
+ 3 files changed, 2 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index e6dac0c9ab9b..54e61fd7290f 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -108,9 +108,6 @@ struct apple_dcp {
+ 	/* Coprocessor control register */
+ 	void __iomem *coproc_reg;
+ 
+-	/* mask for DCP IO virtual addresses shared over rtkit */
+-	u64 asc_dram_mask;
+-
+ 	/* DCP has crashed */
+ 	bool crashed;
+ 
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 1da361e7b8f3..7be710e8a3f5 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -145,8 +145,7 @@ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
+ 			return -ENOMEM;
+ 
+ 		// TODO: get map from device-tree
+-		phy_addr = iommu_iova_to_phys(domain,
+-					      bfr->iova & ~dcp->asc_dram_mask);
++		phy_addr = iommu_iova_to_phys(domain, bfr->iova);
+ 		if (!phy_addr)
+ 			return -ENOMEM;
+ 
+@@ -166,8 +165,6 @@ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
+ 		if (!bfr->buffer)
+ 			return -ENOMEM;
+ 
+-		bfr->iova |= dcp->asc_dram_mask;
+-
+ 		dev_info(dcp->dev, "shmem_setup: iova: %lx, buffer: %lx",
+ 			 (uintptr_t)bfr->iova, (uintptr_t)bfr->buffer);
+ 	}
+@@ -182,8 +179,7 @@ static void dcp_rtk_shmem_destroy(void *cookie, struct apple_rtkit_shmem *bfr)
+ 	if (bfr->is_mapped)
+ 		memunmap(bfr->buffer);
+ 	else
+-		dma_free_coherent(dcp->dev, bfr->size, bfr->buffer,
+-				  bfr->iova & ~dcp->asc_dram_mask);
++		dma_free_coherent(dcp->dev, bfr->size, bfr->buffer, bfr->iova);
+ }
+ 
+ static struct apple_rtkit_ops rtkit_ops = {
+@@ -536,12 +532,6 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 		return dev_err_probe(dev, PTR_ERR(dcp->clk),
+ 				     "Unable to find clock\n");
+ 
+-	ret = of_property_read_u64(dev->of_node, "apple,asc-dram-mask",
+-				   &dcp->asc_dram_mask);
+-	if (ret)
+-		dev_warn(dev, "failed read 'apple,asc-dram-mask': %d\n", ret);
+-	dev_dbg(dev, "'apple,asc-dram-mask': 0x%011llx\n", dcp->asc_dram_mask);
+-
+ 	bitmap_zero(dcp->memdesc_map, DCP_MAX_MAPPINGS);
+ 	// TDOD: mem_desc IDs start at 1, for simplicity just skip '0' entry
+ 	set_bit(0, dcp->memdesc_map);
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 8715574e0ca4..af61d74ca443 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -558,7 +558,6 @@ int iomfb_start_rtkit(struct apple_dcp *dcp)
+ 	dcp->shmem = dma_alloc_coherent(dcp->dev, DCP_SHMEM_SIZE, &shmem_iova,
+ 					GFP_KERNEL);
+ 
+-	shmem_iova |= dcp->asc_dram_mask;
+ 	dcp_send_message(dcp, IOMFB_ENDPOINT, dcpep_set_shmem(shmem_iova));
+ 
+ 	return 0;

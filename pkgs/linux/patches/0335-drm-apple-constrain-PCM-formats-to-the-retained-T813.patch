@@ -1,0 +1,74 @@
+From b16ad9e1532e729bf952eb7e171f7d8a7d9c42a6 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 17 Sep 2026 20:52:09 -0400
+Subject: [PATCH] drm/apple: constrain PCM formats to the retained T8132 audio
+ link
+
+Record the format and channel count when starting the resident DCP link. Constrain subsequent PCM opens and reject incompatible hw_params changes on an already-open PCM, preventing a new DMA layout from being interpreted using the previous link format.
+
+Validation: affected objects compile; hardware tests on #106 passed three S24_LE stereo reopen cycles and rejected an S16_LE reopen before DMA started.
+
+Assisted-by: Codex:gpt-6-astra
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+---
+ drivers/gpu/drm/apple/audio.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/audio.c b/drivers/gpu/drm/apple/audio.c
+index 65b5c6869291..af24e859bbb0 100644
+--- a/drivers/gpu/drm/apple/audio.c
++++ b/drivers/gpu/drm/apple/audio.c
+@@ -47,6 +47,8 @@ struct dcp_audio {
+ 	unsigned int open_cookie;
+ 	bool power_held;
+ 	bool link_started;
++	snd_pcm_format_t link_format;
++	unsigned int link_channels;
+ 
+ 	struct mutex data_lock;
+ 	bool dcp_connected; /// dcp status keep for delayed initialization
+@@ -339,6 +341,22 @@ static int dcp_pcm_open(struct snd_pcm_substream *substream)
+ 		if (ret < 0)
+ 			goto err_close;
+ 
++		/* The retained link also retains its sample representation and
++		 * channel layout. A new client must not reinterpret its DMA data.
++		 */
++		if (dcpaud->link_started) {
++			ret = snd_pcm_hw_constraint_mask64(substream->runtime,
++					SNDRV_PCM_HW_PARAM_FORMAT,
++					BIT_ULL(dcpaud->link_format));
++			if (ret < 0)
++				goto err_close;
++			ret = snd_pcm_hw_constraint_single(substream->runtime,
++					SNDRV_PCM_HW_PARAM_CHANNELS,
++					dcpaud->link_channels);
++			if (ret < 0)
++				goto err_close;
++		}
++
+ 		ret = snd_pcm_hw_constraint_step(substream->runtime, 0,
+ 					 SNDRV_PCM_HW_PARAM_PERIOD_BYTES,
+ 					 SZ_4K);
+@@ -384,6 +402,12 @@ static int dcp_pcm_hw_params(struct snd_pcm_substream *substream,
+ 	if (!dcpaud_connection_up(dcpaud))
+ 		return -ENXIO;
+ 
++	/* Also cover reconfiguration of an already-open PCM after STOP. */
++	if (dcpaud->link_started &&
++	    (params_format(params) != dcpaud->link_format ||
++	     params_channels(params) != dcpaud->link_channels))
++		return -EINVAL;
++
+ 	ret = dcpaud_select_cookie(dcpaud, params);
+ 	if (ret < 0)
+ 		return ret;
+@@ -529,6 +553,8 @@ static int dcp_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 			return ret;
+ 		}
+ 		if (t8132) {
++			dcpaud->link_format = substream->runtime->format;
++			dcpaud->link_channels = substream->runtime->channels;
+ 			dcpaud->link_started = true;
+ 			return 0;
+ 		}

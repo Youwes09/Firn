@@ -1,0 +1,38 @@
+From 2b55741fc040c52c2ab3576bfd69dd118766a6d9 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Wed, 9 Apr 2025 18:20:02 +0200
+Subject: [PATCH] iommu: apple-dart: Disallow identity domains for locked DARTs
+
+The register controlling bypass support is read-only for locked DARTs.
+In addition trnaslation can not be disabled so blocking domain has to be
+implemented with an empty translation table.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/iommu/apple-dart.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/iommu/apple-dart.c b/drivers/iommu/apple-dart.c
+index 37d19145c347..ffd53bf6deae 100644
+--- a/drivers/iommu/apple-dart.c
++++ b/drivers/iommu/apple-dart.c
+@@ -871,6 +871,9 @@ static int apple_dart_attach_dev_identity(struct iommu_domain *domain,
+ 	if (!cfg->supports_bypass)
+ 		return -EINVAL;
+ 
++	if (cfg->locked)
++		return -EINVAL;
++
+ 	for_each_stream_map(i, cfg, stream_map)
+ 		apple_dart_hw_enable_bypass(stream_map);
+ 	return 0;
+@@ -893,6 +896,9 @@ static int apple_dart_attach_dev_blocked(struct iommu_domain *domain,
+ 	struct apple_dart_stream_map *stream_map;
+ 	int i;
+ 
++	if (cfg->locked)
++		return -EINVAL;
++
+ 	for_each_stream_map(i, cfg, stream_map)
+ 		apple_dart_hw_disable_dma(stream_map);
+ 	return 0;

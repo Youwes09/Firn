@@ -1,4 +1,5 @@
-# Adds only a service, so the VM boots the shipped initrd and parameters.
+# Adds a service and the drivers QEMU's virt machine needs, so the VM boots
+# the shipped initrd and parameters on the J713 kernel plus qemu-virt.config.
 {
   config,
   lib,
@@ -11,6 +12,8 @@ let
   firn-boot = pkgs.callPackage ../../pkgs/firn-boot { };
 in
 {
+  hardware.firn.kernelConfig = ../../pkgs/linux/j713-vm.config;
+
   systemd.services.firn-selftest = {
     description = "Firn VM self-test";
     wantedBy = [ "multi-user.target" ];
@@ -31,9 +34,10 @@ in
     ];
     serviceConfig = {
       Type = "oneshot";
-      StandardOutput = "tty";
-      StandardError = "tty";
-      TTYPath = "/dev/ttyAMA0";
+      # Through /dev/console: serial-getty hangs up ttyAMA0 when it starts,
+      # and a failed write ends the script.
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
     };
     script = ''
       fail=0

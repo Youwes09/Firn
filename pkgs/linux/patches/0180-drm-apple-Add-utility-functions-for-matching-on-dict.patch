@@ -1,0 +1,57 @@
+From e2f62561b593c0d78a8cbbdbfe41c5caa1022b30 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
+Date: Wed, 15 Feb 2023 16:20:22 +0100
+Subject: [PATCH] drm: apple: Add utility functions for matching on dict keys
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Martin Povišer <povik+lin@cutebit.org>
+---
+ drivers/gpu/drm/apple/parser.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index 78d32abaed77..484441415e9d 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -117,6 +117,39 @@ static int skip(struct dcp_parse_ctx *handle)
+ 	}
+ }
+ 
++static int skip_pair(struct dcp_parse_ctx *handle)
++{
++	int ret;
++
++	ret = skip(handle);
++	if (ret)
++		return ret;
++
++	return skip(handle);
++}
++
++static bool consume_string(struct dcp_parse_ctx *ctx, const char *specimen)
++{
++	struct dcp_parse_tag *tag;
++	const char *key;
++	ctx->pos = round_up(ctx->pos, 4);
++
++	if (ctx->pos + sizeof(*tag) + strlen(specimen) - 1 > ctx->len)
++		return false;
++	tag = ctx->blob + ctx->pos;
++	key = ctx->blob + ctx->pos + sizeof(*tag);
++	if (tag->padding)
++		return false;
++
++	if (tag->type != DCP_TYPE_STRING ||
++	    tag->size != strlen(specimen) ||
++	    strncmp(key, specimen, tag->size))
++		return false;
++
++	skip(ctx);
++	return true;
++}
++
+ /* Caller must free the result */
+ static char *parse_string(struct dcp_parse_ctx *handle)
+ {

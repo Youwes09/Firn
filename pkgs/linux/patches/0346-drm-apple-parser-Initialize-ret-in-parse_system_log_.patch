@@ -1,0 +1,29 @@
+From 23199f72e5e3ae39fb0781dc8befe804f7a2d8bd Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sat, 31 Oct 2026 13:26:20 -0500
+Subject: [PATCH] drm/apple: parser: Initialize ret in parse_system_log_mnits()
+
+Keys the parser skips leave ret unset, and the loop tests it after every
+key.
+
+Fixes: 606c19a5e0e1 ("drm: apple: epic: systemep: Parse "mNits" log events")
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+[Youwes09: from Gravity Linux a8aa5e2f7d1d]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/parser.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index b546a426733c..3b40c4a9b750 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -1032,7 +1032,7 @@ int parse_sound_mode(struct dcp_parse_ctx *handle,
+ int parse_system_log_mnits(struct dcp_parse_ctx *handle, struct dcp_system_ev_mnits *entry)
+ {
+ 	struct iterator it;
+-	int ret;
++	int ret = 0;
+ 	s64 mnits = -1;
+ 	s64 idac = -1;
+ 	s64 timestamp = -1;

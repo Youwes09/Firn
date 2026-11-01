@@ -1,0 +1,37 @@
+From a2c7f77044fc0bacbb8556dea82b7f75f2185140 Mon Sep 17 00:00:00 2001
+From: Yureka <yureka@cyberchaos.dev>
+Date: Sat, 24 Jan 2026 10:02:15 +0100
+Subject: [PATCH] cpuidle-apple: only load on machines where it is known to be
+ needed
+
+This handles M4 which no longer has the Apple specific deep WFI mode
+but the register-based check still reports it as if it has.
+Attempting to use the code on M4 causes SErrors on attempting to
+write the s3_5_c15_c5_0 register.
+
+Signed-off-by: Yureka <yureka@cyberchaos.dev>
+---
+ drivers/cpuidle/cpuidle-apple.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/drivers/cpuidle/cpuidle-apple.c b/drivers/cpuidle/cpuidle-apple.c
+index 1dfb10cdb5e4..b7504066d75a 100644
+--- a/drivers/cpuidle/cpuidle-apple.c
++++ b/drivers/cpuidle/cpuidle-apple.c
+@@ -146,6 +146,16 @@ static int __init apple_cpuidle_init(void)
+ 	if (!of_machine_is_compatible("apple,arm-platform"))
+ 		return 0;
+ 
++	if (!(of_machine_is_compatible("apple,t8103") ||
++	      of_machine_is_compatible("apple,t8112") ||
++	      of_machine_is_compatible("apple,t6000") ||
++	      of_machine_is_compatible("apple,t6001") ||
++	      of_machine_is_compatible("apple,t6002") ||
++	      of_machine_is_compatible("apple,t6020") ||
++	      of_machine_is_compatible("apple,t6021") ||
++	      of_machine_is_compatible("apple,t6022")))
++		return 0;
++
+ 	pdev = platform_device_register_simple("cpuidle-apple", -1, NULL, 0);
+ 	if (IS_ERR(pdev)) {
+ 		platform_driver_unregister(&apple_cpuidle_driver);

@@ -1,0 +1,55 @@
+From 4b8ff17404433eadc850779562b92ef3d48ddd75 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 9 Apr 2023 22:44:35 +0200
+Subject: [PATCH] drm: apple: afk: Adapt to macOS 13.3 firmware
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/afk.c | 9 ++++++---
+ drivers/gpu/drm/apple/afk.h | 2 ++
+ 2 files changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index 18bced4cc4ea..26f626c2f775 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -495,7 +495,7 @@ static void afk_recv_handle(struct apple_dcp_afkep *ep, u32 channel, u32 type,
+ 	service = afk_epic_find_service(ep, channel);
+ 
+ 	if (!service) {
+-		if (type != EPIC_TYPE_NOTIFY) {
++		if (type != EPIC_TYPE_NOTIFY && type != EPIC_TYPE_REPLY) {
+ 			dev_err(ep->dcp->dev,
+ 				"AFK[ep:%02x]: expected notify but got 0x%x on channel %d\n",
+ 				ep->endpoint, type, channel);
+@@ -807,12 +807,15 @@ int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
+ 	eshdr = ep->txbfr.buf + wptr;
+ 	memset(eshdr, 0, sizeof(*eshdr));
+ 	eshdr->length = cpu_to_le32(payload_len);
+-	eshdr->version = 3;
++	eshdr->version = 4;
+ 	eshdr->category = ecat;
+ 	eshdr->type = cpu_to_le16(stype);
+ 	eshdr->timestamp = cpu_to_le64(0);
+ 	eshdr->tag = cpu_to_le16(tag);
+-	eshdr->inline_len = cpu_to_le32(0);
++	if (ecat == EPIC_CAT_REPLY)
++		eshdr->inline_len = cpu_to_le32(payload_len - 4);
++	else
++		eshdr->inline_len = cpu_to_le32(0);
+ 	wptr += sizeof(*eshdr);
+ 
+ 	memcpy(ep->txbfr.buf + wptr, payload, payload_len);
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index fe4ed35159ac..1fdb4100352b 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -106,6 +106,8 @@ struct epic_cmd {
+ 	__le64 txbuf;
+ 	__le32 rxlen;
+ 	__le32 txlen;
++	u8 rxcookie;
++	u8 txcookie;
+ } __attribute__((packed));
+ 
+ struct epic_service_call {

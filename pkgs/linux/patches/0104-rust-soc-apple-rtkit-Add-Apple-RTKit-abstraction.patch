@@ -1,0 +1,365 @@
+From 3abe4884e89ba755c8ed723ad4381bb490ae039c Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Thu, 18 Aug 2022 02:13:54 +0900
+Subject: [PATCH] rust: soc: apple: rtkit: Add Apple RTKit abstraction
+
+RTKit is Apple's proprietary real-time operating system framework, used
+across many subdevices on Apple Silicon platforms including NVMe, system
+management, GPU, etc. Add Rust abstractions for this subsystem, so that
+it can be used by upcoming Rust drivers.
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+[Youwes09: reworked for lifetime-bound drivers: the handler lives in a
+ pinned Registration tied to the bound device, like irq::Registration,
+ and callbacks get the RtKit to reply through; shared buffers and early
+ messages left out until a driver uses them; re-export the SoC bus items
+ from kernel::soc, which the rust_soc sample uses]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/soc/apple/Kconfig          |   6 +
+ rust/bindings/bindings_helper.h    |   1 +
+ rust/kernel/lib.rs                 |   1 -
+ rust/kernel/soc/apple/mod.rs       |   6 +
+ rust/kernel/soc/apple/rtkit.rs     | 256 +++++++++++++++++++++++++++++
+ rust/kernel/{soc.rs => soc/bus.rs} |   0
+ rust/kernel/soc/mod.rs             |   9 +
+ 7 files changed, 278 insertions(+), 1 deletion(-)
+ create mode 100644 rust/kernel/soc/apple/mod.rs
+ create mode 100644 rust/kernel/soc/apple/rtkit.rs
+ rename rust/kernel/{soc.rs => soc/bus.rs} (100%)
+ create mode 100644 rust/kernel/soc/mod.rs
+
+diff --git a/drivers/soc/apple/Kconfig b/drivers/soc/apple/Kconfig
+index ddd1d80747e7..d3544df0d36f 100644
+--- a/drivers/soc/apple/Kconfig
++++ b/drivers/soc/apple/Kconfig
+@@ -74,6 +74,12 @@ config APPLE_TUNABLE
+ 	tristate
+ 	depends on ARCH_APPLE || COMPILE_TEST
+ 
++config RUST_APPLE_RTKIT
++	bool
++	depends on PM
++	depends on RUST
++	select APPLE_RTKIT
++
+ endmenu
+ 
+ endif
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index 3791af0aadc7..ccf92684e01c 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -89,6 +89,7 @@
+ #include <linux/security.h>
+ #include <linux/serdev.h>
+ #include <linux/slab.h>
++#include <linux/soc/apple/rtkit.h>
+ #include <linux/sys_soc.h>
+ #include <linux/task_work.h>
+ #include <linux/tracepoint.h>
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index 1ab41129d557..98e485fb5633 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -133,7 +133,6 @@
+ #[cfg(CONFIG_RUST_SERIAL_DEV_BUS_ABSTRACTIONS)]
+ pub mod serdev;
+ pub mod sizes;
+-#[cfg(CONFIG_SOC_BUS)]
+ pub mod soc;
+ #[doc(hidden)]
+ pub mod std_vendor;
+diff --git a/rust/kernel/soc/apple/mod.rs b/rust/kernel/soc/apple/mod.rs
+new file mode 100644
+index 000000000000..964a5267bafb
+--- /dev/null
++++ b/rust/kernel/soc/apple/mod.rs
+@@ -0,0 +1,6 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++
++//! Apple SoC drivers
++
++#[cfg(CONFIG_RUST_APPLE_RTKIT = "y")]
++pub mod rtkit;
+diff --git a/rust/kernel/soc/apple/rtkit.rs b/rust/kernel/soc/apple/rtkit.rs
+new file mode 100644
+index 000000000000..d1a52bd5e2b9
+--- /dev/null
++++ b/rust/kernel/soc/apple/rtkit.rs
+@@ -0,0 +1,256 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++
++//! Support for Apple RTKit coprocessors.
++//!
++//! C header: [`include/linux/soc/apple/rtkit.h`](srctree/include/linux/soc/apple/rtkit.h)
++
++use crate::{
++    bindings,
++    device::{
++        Bound,
++        Device, //
++    },
++    error::{
++        from_err_ptr,
++        to_result, //
++    },
++    prelude::*,
++    sync::atomic::{
++        Acquire,
++        Atomic,
++        Relaxed,
++        Release, //
++    },
++    types::Opaque, //
++};
++use core::{
++    ffi::c_void,
++    marker::PhantomPinned,
++    ptr,
++    slice, //
++};
++
++/// Callbacks for an RTKit client.
++#[vtable]
++pub trait Operations: Sync {
++    /// Called when the coprocessor has crashed, with its crash log if it sent one.
++    fn crashed(&self, _crashlog: Option<&[u8]>) {}
++
++    /// Called in process context for a message on an application endpoint.
++    ///
++    /// Messages are delivered one at a time, in the order they arrive.
++    fn recv_message(&self, _rtkit: &RtKit, _endpoint: u8, _message: u64) {}
++}
++
++/// An RTKit instance, `struct apple_rtkit`.
++///
++/// # Invariants
++///
++/// A `&RtKit` refers to an initialised `struct apple_rtkit` that stays valid for the lifetime of
++/// the reference.
++#[repr(transparent)]
++pub struct RtKit(Opaque<bindings::apple_rtkit>);
++
++// SAFETY: The C functions `RtKit` exposes may be called from any thread; the mailbox serialises
++// the messages they send.
++unsafe impl Sync for RtKit {}
++
++impl RtKit {
++    /// # Safety
++    ///
++    /// `ptr` must point to an initialised `struct apple_rtkit` that stays valid for `'a`.
++    unsafe fn from_raw<'a>(ptr: *mut bindings::apple_rtkit) -> &'a Self {
++        // SAFETY: `RtKit` is a transparent wrapper, and `ptr` is valid for `'a` by the safety
++        // requirement.
++        unsafe { &*ptr.cast() }
++    }
++
++    fn as_raw(&self) -> *mut bindings::apple_rtkit {
++        self.0.get()
++    }
++
++    /// Starts an application endpoint.
++    pub fn start_endpoint(&self, endpoint: u8) -> Result {
++        // SAFETY: `self.as_raw()` is valid by the type invariant.
++        to_result(unsafe { bindings::apple_rtkit_start_ep(self.as_raw(), endpoint) })
++    }
++
++    /// Sends a message to an endpoint.
++    pub fn send_message(&self, endpoint: u8, message: u64) -> Result {
++        // SAFETY: `self.as_raw()` is valid by the type invariant.
++        to_result(unsafe {
++            bindings::apple_rtkit_send_message(
++                self.as_raw(),
++                endpoint,
++                message,
++                ptr::null_mut(),
++                false,
++            )
++        })
++    }
++}
++
++/// An RTKit client for a bound device.
++///
++/// The handler's callbacks run until the [`Registration`] is dropped. Dropping it stops the
++/// mailbox and waits for any running callback, so the handler and anything it borrows outlive
++/// every callback.
++///
++/// # Invariants
++///
++/// Once initialised, `rtk` points to the instance `apple_rtkit_init()` created, whose cookie is a
++/// pointer to `Self`.
++#[pin_data(PinnedDrop)]
++pub struct Registration<'a, T: Operations> {
++    dev: &'a Device<Bound>,
++
++    rtk: Atomic<*mut bindings::apple_rtkit>,
++
++    #[pin]
++    handler: T,
++
++    /// RTKit holds a pointer to `Self`.
++    #[pin]
++    _pin: PhantomPinned,
++}
++
++// SAFETY: `rtk` is only used through C functions that may be called from any thread, or that
++// take `Pin<&mut Self>`.
++unsafe impl<T: Operations + Send> Send for Registration<'_, T> {}
++
++// SAFETY: As above; the handler is `Sync`.
++unsafe impl<T: Operations> Sync for Registration<'_, T> {}
++
++impl<'a, T: Operations + 'a> Registration<'a, T> {
++    const OPS: bindings::apple_rtkit_ops = bindings::apple_rtkit_ops {
++        crashed: if T::HAS_CRASHED {
++            Some(crashed_callback::<T>)
++        } else {
++            None
++        },
++        recv_message: if T::HAS_RECV_MESSAGE {
++            Some(recv_message_callback::<T>)
++        } else {
++            None
++        },
++        recv_message_early: None,
++        shmem_setup: None,
++        shmem_destroy: None,
++    };
++
++    /// Creates an RTKit client on the device's mailbox `mbox_name`, or its first mailbox.
++    ///
++    /// # Safety
++    ///
++    /// The [`Registration`] must not be forgotten (e.g. with `mem::forget()`): its destructor has
++    /// to run before `'a` ends.
++    pub unsafe fn new(
++        dev: &'a Device<Bound>,
++        mbox_name: Option<&'static CStr>,
++        handler: impl PinInit<T, Error> + 'a,
++    ) -> impl PinInit<Self, Error> + 'a {
++        // INVARIANT: `rtk` is set once `apple_rtkit_init()` succeeds, with a pointer to `Self` as
++        // the cookie.
++        try_pin_init!(&this in Self {
++            dev,
++            rtk: Atomic::new(ptr::null_mut()),
++            handler <- handler,
++            _pin: PhantomPinned,
++            _: {
++                let name = mbox_name.map_or(ptr::null(), |name| name.as_char_ptr());
++
++                // SAFETY:
++                // - `dev` is a bound device and `OPS` is static.
++                // - The cookie points to `Self`, which is pinned. Its destructor frees the
++                //   instance, waiting for running callbacks, before the memory goes away.
++                // - All fields are initialised, so a callback may run at once.
++                let rtk = from_err_ptr(unsafe {
++                    bindings::apple_rtkit_init(
++                        dev.as_raw(),
++                        this.as_ptr().cast(),
++                        name,
++                        0,
++                        &Self::OPS,
++                    )
++                })?;
++
++                // SAFETY: `this` points to `Self`, whose `rtk` is initialised.
++                unsafe { (*this.as_ptr()).rtk.store(rtk, Release) };
++            },
++        })
++    }
++}
++
++impl<T: Operations> Registration<'_, T> {
++    /// Returns the RTKit instance.
++    pub fn rtkit(&self) -> &RtKit {
++        // SAFETY: By the type invariant, `rtk` is valid until `self` is dropped.
++        unsafe { RtKit::from_raw(self.rtk.load(Relaxed)) }
++    }
++
++    /// Returns the handler.
++    pub fn handler(&self) -> &T {
++        &self.handler
++    }
++
++    /// Boots the coprocessor and waits until it is running.
++    pub fn wake(self: Pin<&mut Self>) -> Result {
++        // SAFETY: `rtk` is valid by the type invariant, and `Pin<&mut Self>` keeps power state
++        // changes exclusive.
++        to_result(unsafe { bindings::apple_rtkit_wake(self.rtk.load(Relaxed)) })
++    }
++}
++
++#[pinned_drop]
++impl<T: Operations> PinnedDrop for Registration<'_, T> {
++    fn drop(self: Pin<&mut Self>) {
++        // SAFETY: `rtk` is valid by the type invariant. This stops the mailbox and waits for
++        // running callbacks, so none can reach `self` after it returns.
++        unsafe { bindings::apple_rtkit_free(self.rtk.load(Relaxed)) };
++    }
++}
++
++/// # Safety
++///
++/// `cookie` must be the pointer [`Registration::new`] passed to `apple_rtkit_init()`.
++unsafe extern "C" fn crashed_callback<T: Operations>(
++    cookie: *mut c_void,
++    crashlog: *const c_void,
++    size: usize,
++) {
++    // SAFETY: By the safety requirement, `cookie` points to a live `Registration<'_, T>`.
++    let reg = unsafe { &*cookie.cast::<Registration<'_, T>>() };
++
++    let crashlog = (!crashlog.is_null() && size > 0)
++        // SAFETY: RTKit passes a crash log of `size` bytes, valid for the call.
++        .then(|| unsafe { slice::from_raw_parts(crashlog.cast::<u8>(), size) });
++
++    reg.handler.crashed(crashlog);
++}
++
++/// # Safety
++///
++/// `cookie` must be the pointer [`Registration::new`] passed to `apple_rtkit_init()`.
++unsafe extern "C" fn recv_message_callback<T: Operations>(
++    cookie: *mut c_void,
++    endpoint: u8,
++    message: u64,
++) {
++    // SAFETY: By the safety requirement, `cookie` points to a live `Registration<'_, T>`.
++    let reg = unsafe { &*cookie.cast::<Registration<'_, T>>() };
++
++    // Messages can arrive as soon as the mailbox starts, before `apple_rtkit_init()` returns.
++    // No application endpoint has been started then, so there is nothing to deliver to.
++    let rtk = reg.rtk.load(Acquire);
++    if rtk.is_null() {
++        dev_warn!(
++            reg.dev,
++            "RTKit: early message to EP{endpoint:02x}: {message:#x}\n"
++        );
++        return;
++    }
++
++    // SAFETY: `rtk` is valid while `reg` is.
++    let rtkit = unsafe { RtKit::from_raw(rtk) };
++    reg.handler.recv_message(rtkit, endpoint, message);
++}
+diff --git a/rust/kernel/soc.rs b/rust/kernel/soc/bus.rs
+similarity index 100%
+rename from rust/kernel/soc.rs
+rename to rust/kernel/soc/bus.rs
+diff --git a/rust/kernel/soc/mod.rs b/rust/kernel/soc/mod.rs
+new file mode 100644
+index 000000000000..1a9ee319429d
+--- /dev/null
++++ b/rust/kernel/soc/mod.rs
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! SoC drivers
++
++pub mod apple;
++#[cfg(CONFIG_SOC_BUS)]
++mod bus;
++#[cfg(CONFIG_SOC_BUS)]
++pub use bus::*;

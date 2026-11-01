@@ -1,0 +1,28 @@
+From b8a5f53b46b98240ee7749dbbcae2906fc2173f0 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 2 Dec 2023 10:26:13 +0100
+Subject: [PATCH] drm: apple: Be less noisy about teardown notifies without
+ service
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/afk.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index 7e295141fe85..d9d8cd4cd486 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -507,6 +507,12 @@ static void afk_recv_handle(struct apple_dcp_afkep *ep, u32 channel, u32 type,
+ 				ep->endpoint, eshdr->category, channel);
+ 			return;
+ 		}
++		if (subtype == EPIC_SUBTYPE_TEARDOWN) {
++			dev_dbg(ep->dcp->dev,
++				"AFK[ep:%02x]: teardown without service on channel %d\n",
++				ep->endpoint, channel);
++			return;
++		}
+ 		if (subtype != EPIC_SUBTYPE_ANNOUNCE) {
+ 			dev_err(ep->dcp->dev,
+ 				"AFK[ep:%02x]: expected announce but got 0x%x on channel %d\n",

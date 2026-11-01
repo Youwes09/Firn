@@ -1,0 +1,122 @@
+From b2415387d7c084aad8b5950b2e1935ec2d1e1813 Mon Sep 17 00:00:00 2001
+From: Daniel Berlin <dberlin@dberlin.org>
+Date: Wed, 18 Oct 2023 19:03:58 -0400
+Subject: [PATCH] [brcmfmac] Support high power/low power/etc scan flags
+
+This patch adds support for handling the scan flags that come from the
+802.11 stack.  This enables the stack to control whether we are doing
+high/low power scans, as well as other options.
+
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+(cherry picked from commit 84654d1292965b1975339e42326d29c1628b1efa)
+
+Original-Commit: 0f786556f7492553c44df7aa073154e9786f8366
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/cfg80211.c    | 41 ++++++++++++++++++-
+ .../broadcom/brcm80211/brcmfmac/fwil_types.h  |  9 ++++
+ 2 files changed, 48 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 56b8ff280286..6961bc87c0ed 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -1108,6 +1108,28 @@ static void brcmf_scan_params_v2_to_v1(struct brcmf_scan_params_v2_le *params_v2
+ 	       &params_v2_le->channel_list[0], params_size);
+ }
+ 
++static u32 brcmf_nl80211_scan_flags_to_scan_flags(u32 nl80211_flags)
++{
++	u32 scan_flags = 0;
++	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_SPAN) {
++		scan_flags |= BRCMF_SCANFLAGS_LOW_SPAN;
++		brcmf_dbg(SCAN, "requested low span scan\n");
++	}
++	if (nl80211_flags & NL80211_SCAN_FLAG_HIGH_ACCURACY) {
++		scan_flags |= BRCMF_SCANFLAGS_HIGH_ACCURACY;
++		brcmf_dbg(SCAN, "requested high accuracy scan\n");
++	}
++	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_POWER) {
++		scan_flags |= BRCMF_SCANFLAGS_LOW_POWER;
++		brcmf_dbg(SCAN, "requested low power scan\n");
++	}
++	if (nl80211_flags & NL80211_SCAN_FLAG_LOW_PRIORITY) {
++		scan_flags |= BRCMF_SCANFLAGS_LOW_PRIO;
++		brcmf_dbg(SCAN, "requested low priority scan\n");
++	}
++	return scan_flags;
++}
++
+ static void brcmf_escan_prep(struct brcmf_cfg80211_info *cfg,
+ 			     struct brcmf_if *ifp,
+ 			     struct brcmf_scan_params_v2_le *params_le,
+@@ -1121,6 +1143,7 @@ static void brcmf_escan_prep(struct brcmf_cfg80211_info *cfg,
+ 	char *ptr;
+ 	int length;
+ 	struct brcmf_ssid_le ssid_le;
++	u32 scan_type = BRCMF_SCANTYPE_ACTIVE;
+ 
+ 	eth_broadcast_addr(params_le->bssid);
+ 
+@@ -1133,7 +1156,6 @@ static void brcmf_escan_prep(struct brcmf_cfg80211_info *cfg,
+ 
+ 	params_le->bss_type = DOT11_BSSTYPE_ANY;
+ 	params_le->ssid_type = 0;
+-	params_le->scan_type = cpu_to_le32(BRCMF_SCANTYPE_ACTIVE);
+ 	params_le->channel_num = 0;
+ 	params_le->nprobes = cpu_to_le32(-1);
+ 	params_le->active_time = cpu_to_le32(-1);
+@@ -1193,9 +1215,17 @@ static void brcmf_escan_prep(struct brcmf_cfg80211_info *cfg,
+ 		}
+ 	} else {
+ 		brcmf_dbg(SCAN, "Performing passive scan\n");
+-		params_le->scan_type = cpu_to_le32(BRCMF_SCANTYPE_PASSIVE);
++		scan_type = BRCMF_SCANTYPE_PASSIVE;
+ 	}
++	scan_type |= brcmf_nl80211_scan_flags_to_scan_flags(request->flags);
++	params_le->scan_type = cpu_to_le32(scan_type);
+ 	params_le->length = cpu_to_le16(length);
++
++	/* Include RNR results if requested */
++	if (request->flags & NL80211_SCAN_FLAG_COLOCATED_6GHZ) {
++		params_le->ssid_type |= BRCMF_SCANSSID_INC_RNR;
++	}
++
+ 	/* Adding mask to channel numbers */
+ 	params_le->channel_num =
+ 		cpu_to_le32((n_ssids << BRCMF_SCAN_PARAMS_NSSID_SHIFT) |
+@@ -8132,6 +8162,13 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
+ 	    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OKC))
+ 		wiphy_ext_feature_set(wiphy,
+ 				      NL80211_EXT_FEATURE_FAST_ROAM_OFFLOAD);
++
++	/* High accuracy and low power scans are always supported. */
++	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_HIGH_ACCURACY_SCAN);
++	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_LOW_POWER_SCAN);
++	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_LOW_SPAN_SCAN);
++	wiphy->features |= NL80211_FEATURE_LOW_PRIORITY_SCAN;
++
+ 	wiphy->mgmt_stypes = brcmf_txrx_stypes;
+ 	wiphy->max_remain_on_channel_duration = 5000;
+ 	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_PNO)) {
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index 27ec9a414338..70deae792860 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -64,6 +64,15 @@
+ #define BRCMF_SCANTYPE_ACTIVE		0
+ #define BRCMF_SCANTYPE_PASSIVE		1
+ 
++/* Additional scanning flags */
++#define BRCMF_SCANFLAGS_LOW_PRIO 	0x2
++#define BRCMF_SCANFLAGS_LOW_POWER	0x1000
++#define BRCMF_SCANFLAGS_HIGH_ACCURACY	0x2000
++#define BRCMF_SCANFLAGS_LOW_SPAN	0x4000
++
++/* scan ssid_type flags */
++#define BRCMF_SCANSSID_INC_RNR		0x02 /* Include RNR channels*/
++
+ #define BRCMF_WSEC_MAX_PSK_LEN		32
+ #define	BRCMF_WSEC_PASSPHRASE		BIT(0)
+ 

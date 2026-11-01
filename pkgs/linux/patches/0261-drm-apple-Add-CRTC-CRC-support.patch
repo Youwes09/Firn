@@ -1,0 +1,156 @@
+From 33f8e96ffd5312b953def3f37bd6adacf0ccc239 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Mon, 22 Jul 2024 20:26:55 +0200
+Subject: [PATCH] drm: apple: Add CRTC CRC support
+
+The DCP firmware has CRC support. While this is not yet reverse
+engineering report always 0 to at least be able to run tests from
+igt-gpu-tools with "--skip-crc-compare".
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c      | 57 ++++++++++++++++++++++++++
+ drivers/gpu/drm/apple/dcp-internal.h   |  3 ++
+ drivers/gpu/drm/apple/dcp.c            | 11 +++++
+ drivers/gpu/drm/apple/dcp.h            |  1 +
+ drivers/gpu/drm/apple/iomfb_template.c |  4 ++
+ 5 files changed, 76 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 613856d0af58..8d36c579b90f 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -261,6 +261,59 @@ static void apple_crtc_cleanup(struct drm_crtc *crtc)
+ 	kfree(to_apple_crtc(crtc));
+ }
+ 
++static int apple_crtc_parse_crc_source(const char *source, bool *enabled)
++{
++	int ret = 0;
++
++	if (!source) {
++		*enabled = false;
++	} else if (strcmp(source, "auto") == 0) {
++		*enabled = true;
++	} else {
++		*enabled = false;
++		ret = -EINVAL;
++	}
++
++	return ret;
++}
++
++static int apple_crtc_set_crc_source(struct drm_crtc *crtc, const char *source)
++{
++	bool enabled = false;
++
++	int ret = apple_crtc_parse_crc_source(source, &enabled);
++
++	if (!ret)
++		dcp_set_crc(crtc, enabled);
++
++	return ret;
++}
++
++static int apple_crtc_verify_crc_source(struct drm_crtc *crtc,
++					const char *source,
++					size_t *values_cnt)
++{
++	bool enabled;
++
++	if (apple_crtc_parse_crc_source(source, &enabled) < 0) {
++		pr_warn("dcp: Invalid CRC source name %s\n", source);
++		return -EINVAL;
++	}
++
++	*values_cnt = 1;
++
++	return 0;
++}
++
++static const char * const apple_crtc_crc_sources[] = {"auto"};
++
++static const char *const * apple_crtc_get_crc_sources(struct drm_crtc *crtc,
++						      size_t *count)
++{
++	*count = ARRAY_SIZE(apple_crtc_crc_sources);
++	return apple_crtc_crc_sources;
++}
++
+ static const struct drm_crtc_funcs apple_crtc_funcs = {
+ 	.atomic_destroy_state	= drm_atomic_helper_crtc_destroy_state,
+ 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
+@@ -268,6 +321,10 @@ static const struct drm_crtc_funcs apple_crtc_funcs = {
+ 	.page_flip		= drm_atomic_helper_page_flip,
+ 	.reset			= drm_atomic_helper_crtc_reset,
+ 	.set_config             = drm_atomic_helper_set_config,
++	.set_crc_source		= apple_crtc_set_crc_source,
++	.verify_crc_source	= apple_crtc_verify_crc_source,
++	.get_crc_sources	= apple_crtc_get_crc_sources,
++
+ };
+ 
+ static const struct drm_mode_config_funcs apple_mode_config_funcs = {
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index d678a1965b5f..793d32dafe84 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -198,6 +198,9 @@ struct apple_dcp {
+ 	/* clear all surfaces on init */
+ 	bool surfaces_cleared;
+ 
++	/* enable CRC calculation */
++	bool crc_enabled;
++
+ 	/* Modes valid for the connected display */
+ 	struct dcp_display_mode *modes;
+ 	unsigned int nr_modes;
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 2ffc376dc6a3..447168440596 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -191,6 +191,17 @@ bool dcp_has_panel(struct apple_dcp *dcp)
+ 	return dcp->panel.width_mm > 0;
+ }
+ 
++int dcp_set_crc(struct drm_crtc *crtc, bool enabled)
++{
++	struct apple_crtc *ac = to_apple_crtc(crtc);
++	struct apple_dcp *dcp = platform_get_drvdata(ac->dcp);
++
++	dcp->crc_enabled = enabled;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(dcp_set_crc);
++
+ /*
+  * Helper to send a DRM vblank event. We do not know how call swap_submit_dcp
+  * without surfaces. To avoid timeouts in drm_atomic_helper_wait_for_vblanks
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index b1a151140c90..0505032abe54 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -31,6 +31,7 @@ struct apple_encoder {
+ 
+ void dcp_poweroff(struct platform_device *pdev);
+ void dcp_poweron(struct platform_device *pdev);
++int dcp_set_crc(struct drm_crtc *crtc, bool enabled);
+ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state);
+ int dcp_get_connector_type(struct platform_device *pdev);
+ void dcp_link(struct platform_device *pdev, struct apple_crtc *apple,
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index bd110ed1b12b..ae616a05aa58 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -125,6 +125,10 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
+ 	dcp->last_swap_id = resp->swap_id;
+ 
+ 	dcp_drm_crtc_page_flip(dcp, now);
++	if (dcp->crc_enabled) {
++		u32 crc32 = 0;
++		drm_crtc_add_crc_entry(&dcp->crtc->base, true, resp->swap_id, &crc32);
++	}
+ }
+ 
+ /* special */

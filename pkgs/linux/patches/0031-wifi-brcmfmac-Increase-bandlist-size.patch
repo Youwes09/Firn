@@ -1,0 +1,30 @@
+From b8b53b499ea8e8c817b87e68fd4d78bbbabec00e Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Wed, 4 Oct 2023 04:55:02 +0900
+Subject: [PATCH] wifi: brcmfmac: Increase bandlist size
+
+BCM4388 supports more bands, so make space for them.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit a65e88de53a374e583721c2e3495b30e2e53ddfb)
+
+Original-Commit: def9252e84425df08ff412a376c33af335cbd1c9
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 46714d871260..620d2a2f1ebf 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -7856,7 +7856,7 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
+ 	struct ieee80211_supported_band *band;
+ 	u16 max_interfaces = 0;
+ 	bool gscan;
+-	__le32 bandlist[3];
++	__le32 bandlist[16];
+ 	u32 n_bands;
+ 	int err, i;
+ 

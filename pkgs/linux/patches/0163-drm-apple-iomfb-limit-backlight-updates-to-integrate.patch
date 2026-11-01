@@ -1,0 +1,39 @@
+From 941b07360d5de867f99c5a0058cce5b58743c4e9 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 30 Apr 2023 16:34:14 +0200
+Subject: [PATCH] drm: apple: iomfb: limit backlight updates to integrated
+ panels
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb_template.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index e9b5eb3ff6ea..bcd04c89cc25 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -876,9 +876,11 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	 * subsequent update on poweron an actual change and restore the
+ 	 * brightness.
+ 	 */
+-	swap->swap.bl_unk = 1;
+-	swap->swap.bl_value = 0;
+-	swap->swap.bl_power = 0;
++	if (dcp_has_panel(dcp)) {
++		swap->swap.bl_unk = 1;
++		swap->swap.bl_value = 0;
++		swap->swap.bl_power = 0;
++	}
+ 
+ 	for (int l = 0; l < SWAP_SURFACES; l++)
+ 		swap->surf_null[l] = true;
+@@ -1324,7 +1326,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 	req->swap.swap_completed = req->swap.swap_enabled;
+ 
+ 	/* update brightness if changed */
+-	if (dcp->brightness.update) {
++	if (dcp_has_panel(dcp) && dcp->brightness.update) {
+ 		req->swap.bl_unk = 1;
+ 		req->swap.bl_value = dcp->brightness.dac;
+ 		req->swap.bl_power = 0x40;

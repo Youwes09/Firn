@@ -1,0 +1,110 @@
+From 33e0e439456335e80a86d9095afbad49101026b8 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Wed, 28 Oct 2026 21:36:50 -0700
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Enable the PMP
+
+m1n1 finds PMP through its alias, passes it its configuration and
+enables it. No driver reports most blocks to PMP yet, so vote them on.
+
+[Youwes09: from Gravity Linux 898c9da9c905; the pmp alias]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 78 ++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index f95aff4902ad..cbccf6f3cbbc 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -21,6 +21,8 @@ aliases {
+ 		/* m1n1 fills in the layout and maps the MTP firmware through these. */
+ 		keyboard = &keyboard;
+ 		mtp = &mtp;
++		/* m1n1 passes PMP its configuration and enables it through this. */
++		pmp = &pmp;
+ 	};
+ 
+ 	led-controller {
+@@ -91,6 +93,82 @@ &mtp_mbox {
+ 	status = "okay";
+ };
+ 
++&pmp_dart {
++	status = "okay";
++};
++
++&pmp_mbox {
++	status = "okay";
++};
++
++&pmp_report {
++	status = "okay";
++};
++
++/*
++ * No driver reports these blocks to PMP yet, so vote them on for as long
++ * as the system runs.
++ */
++&pmp_report_ans {
++	apple,always-on;
++};
++
++&pmp_report_atc0_common {
++	apple,always-on;
++};
++
++&pmp_report_atc1 {
++	apple,always-on;
++};
++
++&pmp_report_atc2 {
++	apple,always-on;
++};
++
++&pmp_report_atc3_common {
++	apple,always-on;
++};
++
++&pmp_report_boot_f {
++	apple,always-on;
++};
++
++&pmp_report_boot_10 {
++	apple,always-on;
++};
++
++&pmp_report_boot_18 {
++	apple,always-on;
++};
++
++&pmp_report_disp {
++	apple,always-on;
++};
++
++&pmp_report_pcie {
++	apple,always-on;
++};
++
++&pmp_report_soc_ni0 {
++	apple,always-on;
++};
++
++&pmp_report_soc_ni1 {
++	apple,always-on;
++};
++
++&pmp_report_soc_ni3 {
++	apple,always-on;
++};
++
++&pmp_report_soc_ni4 {
++	apple,always-on;
++};
++
++&pmp_report_soc_ni5 {
++	apple,always-on;
++};
++
+ #include "hwmon-laptop.dtsi"
+ 
+ &smc_hwmon {

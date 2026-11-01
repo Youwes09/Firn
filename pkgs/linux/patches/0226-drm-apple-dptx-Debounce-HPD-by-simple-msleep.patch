@@ -1,0 +1,30 @@
+From d7f27e621ef6b2b51d63141db7fa0b304e0aa907 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 26 Mar 2024 22:05:50 +0100
+Subject: [PATCH] drm: apple: dptx: Debounce HPD by simple msleep()
+
+Not necessarily only a debounce but 500ms sleep in the HPD interrupt
+handler seems to make the modeset more reliable on M2* desktop devices.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index bda0802e692c..cc19e2bc00f0 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -329,6 +329,12 @@ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
+ 	 */
+ 	dev_info(dcp->dev, "DP2HDMI HPD irq, connected:%d\n", connected);
+ 
++	if (connected) {
++		msleep(500);
++		connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
++		dev_info(dcp->dev, "DP2HDMI HPD irq, 500ms debounce: connected:%d\n", connected);
++	}
++
+ 	if (connected)
+ 		dcp_dptx_connect(dcp, 0);
+ 

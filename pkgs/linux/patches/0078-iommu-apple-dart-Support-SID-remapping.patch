@@ -1,0 +1,174 @@
+From 6e7d17c25ddd94303b47adb26e29574e50b6b5b2 Mon Sep 17 00:00:00 2001
+From: Josh Rodd <josh@rodd.us>
+Date: Mon, 21 Sep 2026 07:42:37 -0400
+Subject: [PATCH] iommu: apple-dart: Support SID remapping
+
+T8110 DARTs can point a stream's TCR at another SID's translation
+context. Program the aliases from apple,sid-remap when the DART is
+reset, resolve aliased SIDs to their target in of_xlate so they share
+its domain and IOMMU group, and leave alias streams alone across
+suspend and resume.
+
+Signed-off-by: Josh Rodd <josh@rodd.us>
+Assisted-by: oh-my-pi:gpt-6-astra
+[Youwes09: split from Gravity Linux 3f56fba5e1c3f and ported to the
+ mainline driver, which already refuses locked DARTs in reset]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/iommu/apple-dart.c | 92 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+
+diff --git a/drivers/iommu/apple-dart.c b/drivers/iommu/apple-dart.c
+index ebf4547d32b4..0cd53415a918 100644
+--- a/drivers/iommu/apple-dart.c
++++ b/drivers/iommu/apple-dart.c
+@@ -202,6 +202,7 @@ struct apple_dart_hw {
+  * @lock: lock for hardware operations involving this dart
+  * @pgsize: pagesize supported by this DART
+  * @supports_bypass: indicates if this DART supports bypass mode
++ * @sid_remap: optional requestor SID to translation SID mapping
+  * @sid2group: maps stream ids to iommu_groups
+  * @iommu: iommu core device
+  */
+@@ -224,6 +225,8 @@ struct apple_dart {
+ 	u32 supports_bypass : 1;
+ 	u32 four_level : 1;
+ 
++	u8 *sid_remap;
++
+ 	struct iommu_group *sid2group[DART_MAX_STREAMS];
+ 	struct iommu_device iommu;
+ 
+@@ -490,6 +493,21 @@ static int apple_dart_hw_reset(struct apple_dart *dart)
+ 	apple_dart_hw_disable_dma(&stream_map);
+ 	apple_dart_hw_clear_all_ttbrs(&stream_map);
+ 
++	/*
++	 * Alias TCRs belong to the DART, not to a domain. All domain stream maps
++	 * contain only canonical target SIDs, so attach/detach cannot overwrite
++	 * these registers. Their TTBRs remain clear.
++	 */
++	if (dart->sid_remap) {
++		for (i = 0; i < dart->num_streams; i++) {
++			if (dart->sid_remap[i] == i)
++				continue;
++			writel(DART_T8110_TCR_REMAP_EN |
++			       FIELD_PREP(DART_T8110_TCR_REMAP, dart->sid_remap[i]),
++			       dart->regs + DART_TCR(dart, i));
++		}
++	}
++
+ 	/* enable all streams globally since TCR is used to control isolation */
+ 	for (i = 0; i < BITS_TO_U32(dart->num_streams); i++)
+ 		writel(U32_MAX, dart->regs + dart->hw->enable_streams + 4 * i);
+@@ -822,8 +840,13 @@ static int apple_dart_of_xlate(struct device *dev,
+ 
+ 	if (args->args_count != 1 && args->args_count != 5)
+ 		return -EINVAL;
++	if (args->args[0] >= dart->num_streams)
++		return -EINVAL;
+ 
+ 	sid = args->args[0];
++	/* Aliases must share both the translation context and IOMMU group. */
++	if (dart->sid_remap)
++		sid = dart->sid_remap[sid];
+ 
+ 	if (args->args_count == 5) {
+ 		dma_addr_t length = ((dma_addr_t)args->args[3] << 32) | args->args[4];
+@@ -1158,6 +1181,64 @@ static irqreturn_t apple_dart_t8110_irq(int irq, void *dev)
+ 	return IRQ_HANDLED;
+ }
+ 
++static int apple_dart_parse_sid_remap(struct apple_dart *dart)
++{
++	struct device *dev = dart->dev;
++	const struct property *prop;
++	const __be32 *map;
++	int count, i;
++	u32 source, target;
++
++	prop = of_find_property(dev->of_node, "apple,sid-remap", NULL);
++	if (!prop)
++		return 0;
++
++	if (dart->hw->type != DART_T8110)
++		return dev_err_probe(dev, -EINVAL,
++				     "SID remapping requires a T8110 DART\n");
++	if (!prop->value || prop->length <= 0 ||
++	    prop->length % (2 * sizeof(*map)))
++		return dev_err_probe(dev, -EINVAL,
++				     "apple,sid-remap must contain SID pairs\n");
++
++	count = prop->length / (2 * sizeof(*map));
++	if (count >= dart->num_streams)
++		return dev_err_probe(dev, -EINVAL, "Too many SID remaps\n");
++
++	dart->sid_remap = devm_kmalloc(dev, dart->num_streams, GFP_KERNEL);
++	if (!dart->sid_remap)
++		return -ENOMEM;
++	for (i = 0; i < dart->num_streams; i++)
++		dart->sid_remap[i] = i;
++
++	map = prop->value;
++	for (i = 0; i < count; i++) {
++		source = be32_to_cpup(map++);
++		target = be32_to_cpup(map++);
++
++		if (source >= dart->num_streams || target >= dart->num_streams ||
++		    !FIELD_FIT(DART_T8110_TCR_REMAP, target) || source == target)
++			return dev_err_probe(dev, -EINVAL,
++					     "Invalid SID remap %u -> %u\n",
++					     source, target);
++		if (dart->sid_remap[source] != source)
++			return dev_err_probe(dev, -EINVAL,
++					     "Duplicate SID remap for %u\n", source);
++
++		dart->sid_remap[source] = target;
++	}
++
++	/* Reject chains (including cycles), regardless of property ordering. */
++	for (i = 0; i < dart->num_streams; i++) {
++		target = dart->sid_remap[i];
++		if (dart->sid_remap[target] != target)
++			return dev_err_probe(dev, -EINVAL,
++					     "Chained SID remap through %u\n", target);
++	}
++
++	return 0;
++}
++
+ static int apple_dart_probe(struct platform_device *pdev)
+ {
+ 	int ret;
+@@ -1226,6 +1307,10 @@ static int apple_dart_probe(struct platform_device *pdev)
+ 		goto err_clk_disable;
+ 	}
+ 
++	ret = apple_dart_parse_sid_remap(dart);
++	if (ret)
++		goto err_clk_disable;
++
+ 	ret = apple_dart_hw_reset(dart);
+ 	if (ret)
+ 		goto err_clk_disable;
+@@ -1386,6 +1471,10 @@ static __maybe_unused int apple_dart_suspend(struct device *dev)
+ 	unsigned int sid, idx;
+ 
+ 	for (sid = 0; sid < dart->num_streams; sid++) {
++		/* Reset owns alias TCRs and keeps their TTBRs empty. */
++		if (dart->sid_remap && dart->sid_remap[sid] != sid)
++			continue;
++
+ 		dart->save_tcr[sid] = readl(dart->regs + DART_TCR(dart, sid));
+ 		for (idx = 0; idx < dart->hw->ttbr_count; idx++)
+ 			dart->save_ttbr[sid][idx] =
+@@ -1408,6 +1497,9 @@ static __maybe_unused int apple_dart_resume(struct device *dev)
+ 	}
+ 
+ 	for (sid = 0; sid < dart->num_streams; sid++) {
++		if (dart->sid_remap && dart->sid_remap[sid] != sid)
++			continue;
++
+ 		for (idx = 0; idx < dart->hw->ttbr_count; idx++)
+ 			writel(dart->save_ttbr[sid][idx],
+ 			       dart->regs + DART_TTBR(dart, sid, idx));

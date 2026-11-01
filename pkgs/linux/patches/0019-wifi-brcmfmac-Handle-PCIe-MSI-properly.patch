@@ -1,0 +1,74 @@
+From 9c366175e7a9202922bf3a3addb800bf52ed9ffd Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Tue, 18 Oct 2022 22:02:10 +0900
+Subject: [PATCH] wifi: brcmfmac: Handle PCIe MSI properly
+
+On newer firmwares under at least certain conditions, MSI mode does not
+leave interrupt flags set (they are cleared by the firmware). Handle
+this by always checking for ring data when we get an MSI, regardless of
+whether any IRQ flags were set.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 22b70f8bc401b294deac80ec678486aff06afbe3)
+
+Original-Commit: 2f98f1385a6af7afc1a5a0bb92af9fc370b2c9da
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/pcie.c        | 21 +++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 599ae0a25dbf..6a29d3ad6bcc 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -405,6 +405,7 @@ struct brcmf_pciedev_info {
+ 	wait_queue_head_t mbdata_resp_wait;
+ 	bool mbdata_completed;
+ 	bool irq_allocated;
++	bool have_msi;
+ 	bool wowl_enabled;
+ 	u8 dma_idx_sz;
+ 	void *idxbuf;
+@@ -992,6 +993,11 @@ static irqreturn_t brcmf_pcie_quick_check_isr(int irq, void *arg)
+ 		brcmf_dbg(PCIE, "Enter\n");
+ 		return IRQ_WAKE_THREAD;
+ 	}
++
++	/* mailboxint is cleared by the firmware in MSI mode */
++	if (devinfo->have_msi)
++		return IRQ_WAKE_THREAD;
++
+ 	return IRQ_NONE;
+ }
+ 
+@@ -1009,12 +1015,12 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
+ 				       status);
+ 		if (status & devinfo->reginfo->int_fn0)
+ 			brcmf_pcie_handle_mb_data(devinfo);
+-		if (status & devinfo->reginfo->int_d2h_db) {
+-			if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
+-				brcmf_proto_msgbuf_rx_trigger(
+-							&devinfo->pdev->dev);
+-		}
+ 	}
++	if (devinfo->have_msi || status & devinfo->reginfo->int_d2h_db) {
++		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
++			brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
++	}
++
+ 	brcmf_pcie_bus_console_read(devinfo, false);
+ 	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
+ 		brcmf_pcie_intr_enable(devinfo);
+@@ -1032,7 +1038,10 @@ static int brcmf_pcie_request_irq(struct brcmf_pciedev_info *devinfo)
+ 
+ 	brcmf_dbg(PCIE, "Enter\n");
+ 
+-	pci_enable_msi(pdev);
++	devinfo->have_msi = pci_enable_msi(pdev) >= 0;
++	if (devinfo->have_msi)
++		brcmf_dbg(PCIE, "MSI enabled\n");
++
+ 	if (request_threaded_irq(pdev->irq, brcmf_pcie_quick_check_isr,
+ 				 brcmf_pcie_isr_thread, IRQF_SHARED,
+ 				 "brcmf_pcie_intr", devinfo)) {

@@ -1,0 +1,461 @@
+From 1669bdb7bd1b8909908189c3374699557547a3be Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
+Date: Mon, 13 Feb 2023 14:56:24 +0100
+Subject: [PATCH] gpu: drm: apple: Set up client of AV endpoint
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Martin Povišer <povik+lin@cutebit.org>
+---
+ drivers/gpu/drm/apple/Makefile       |   1 +
+ drivers/gpu/drm/apple/audio.h        |  26 +++
+ drivers/gpu/drm/apple/av.c           | 284 +++++++++++++++++++++++++++
+ drivers/gpu/drm/apple/av.h           |   9 +
+ drivers/gpu/drm/apple/dcp-internal.h |   6 +
+ drivers/gpu/drm/apple/dcp.c          |  16 ++
+ drivers/gpu/drm/apple/dcp.h          |   2 +
+ 7 files changed, 344 insertions(+)
+ create mode 100644 drivers/gpu/drm/apple/audio.h
+ create mode 100644 drivers/gpu/drm/apple/av.c
+ create mode 100644 drivers/gpu/drm/apple/av.h
+
+diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
+index 20796e2e5899..4c6d3947b024 100644
+--- a/drivers/gpu/drm/apple/Makefile
++++ b/drivers/gpu/drm/apple/Makefile
+@@ -5,6 +5,7 @@ CFLAGS_trace.o = -I$(src)
+ appledrm-y := apple_drv.o
+ 
+ apple_dcp-y := afk.o dcp.o dcp_backlight.o dptxep.o iomfb.o parser.o systemep.o
++apple_dcp-$(CONFIG_DRM_APPLE_AUDIO) += av.o
+ apple_dcp-y += connector.o
+ apple_dcp-y += ibootep.o
+ apple_dcp-y += iomfb_v12_3.o
+diff --git a/drivers/gpu/drm/apple/audio.h b/drivers/gpu/drm/apple/audio.h
+new file mode 100644
+index 000000000000..3cf4d3141769
+--- /dev/null
++++ b/drivers/gpu/drm/apple/audio.h
+@@ -0,0 +1,26 @@
++#ifndef __AUDIO_H__
++#define __AUDIO_H__
++
++#include <linux/types.h>
++
++struct device;
++struct device_node;
++struct dcp_sound_cookie;
++
++typedef void (*dcp_audio_hotplug_callback)(struct device *dev, bool connected);
++
++struct dcp_audio_pdata {
++	struct device *dcp_dev;
++	struct device_node *dpaudio_node;
++};
++
++void dcp_audiosrv_set_hotplug_cb(struct device *dev, struct device *audio_dev,
++								 dcp_audio_hotplug_callback cb);
++int dcp_audiosrv_prepare(struct device *dev, struct dcp_sound_cookie *cookie);
++int dcp_audiosrv_startlink(struct device *dev, struct dcp_sound_cookie *cookie);
++int dcp_audiosrv_stoplink(struct device *dev);
++int dcp_audiosrv_unprepare(struct device *dev);
++int dcp_audiosrv_get_elements(struct device *dev, void *elements, size_t maxsize);
++int dcp_audiosrv_get_product_attrs(struct device *dev, void *attrs, size_t maxsize);
++
++#endif /* __AUDIO_H__ */
+diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
+new file mode 100644
+index 000000000000..bd4c7ec51bdb
+--- /dev/null
++++ b/drivers/gpu/drm/apple/av.c
+@@ -0,0 +1,284 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright 2023 Martin Povišer <povik+lin@cutebit.org> */
++
++// #define DEBUG
++
++#include <linux/debugfs.h>
++#include <linux/kconfig.h>
++#include <linux/rwsem.h>
++#include <linux/types.h>
++
++#include "audio.h"
++#include "afk.h"
++#include "dcp.h"
++
++struct audiosrv_data {
++	struct device *audio_dev;
++	dcp_audio_hotplug_callback hotplug_cb;
++	bool plugged;
++	struct mutex plug_lock;
++
++	struct apple_epic_service *srv;
++	struct rw_semaphore srv_rwsem;
++};
++
++static void av_interface_init(struct apple_epic_service *service, const char *name,
++			      const char *class, s64 unit)
++{
++}
++
++static void av_audiosrv_init(struct apple_epic_service *service, const char *name,
++			     const char *class, s64 unit)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	int err;
++
++	mutex_lock(&asrv->plug_lock);
++
++	down_write(&asrv->srv_rwsem);
++	asrv->srv = service;
++	up_write(&asrv->srv_rwsem);
++
++	/* TODO: this must be done elsewhere */
++	err = afk_service_call(asrv->srv, 0, 6, NULL, 0, 32, NULL, 0, 32);
++	if (err)
++		dev_err(dcp->dev, "error opening audio service: %d\n", err);
++
++	asrv->plugged = true;
++	if (asrv->hotplug_cb)
++		asrv->hotplug_cb(asrv->audio_dev, true);
++
++	mutex_unlock(&asrv->plug_lock);
++}
++
++static void av_audiosrv_teardown(struct apple_epic_service *service)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	struct audiosrv_data *asrv = dcp->audiosrv;
++
++	mutex_lock(&asrv->plug_lock);
++
++	down_write(&asrv->srv_rwsem);
++	asrv->srv = NULL;
++	up_write(&asrv->srv_rwsem);
++
++	asrv->plugged = false;
++	if (asrv->hotplug_cb)
++		asrv->hotplug_cb(asrv->audio_dev, false);
++
++	mutex_unlock(&asrv->plug_lock);
++}
++
++void dcp_audiosrv_set_hotplug_cb(struct device *dev, struct device *audio_dev,
++								 dcp_audio_hotplug_callback cb)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++
++	mutex_lock(&asrv->plug_lock);
++	asrv->audio_dev = audio_dev;
++	asrv->hotplug_cb = cb;
++
++	if (cb)
++		cb(audio_dev, asrv->plugged);
++	mutex_unlock(&asrv->plug_lock);
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_set_hotplug_cb);
++
++int dcp_audiosrv_prepare(struct device *dev, struct dcp_sound_cookie *cookie)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	int ret;
++
++	down_write(&asrv->srv_rwsem);
++	ret = afk_service_call(asrv->srv, 0, 8, cookie, sizeof(*cookie),
++			       64 - sizeof(*cookie), NULL, 0, 64);
++	up_write(&asrv->srv_rwsem);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_prepare);
++
++int dcp_audiosrv_startlink(struct device *dev, struct dcp_sound_cookie *cookie)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	int ret;
++
++	down_write(&asrv->srv_rwsem);
++	ret = afk_service_call(asrv->srv, 0, 9, cookie, sizeof(*cookie),
++			       64 - sizeof(*cookie), NULL, 0, 64);
++	up_write(&asrv->srv_rwsem);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_startlink);
++
++int dcp_audiosrv_stoplink(struct device *dev)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	int ret;
++
++	down_write(&asrv->srv_rwsem);
++	ret = afk_service_call(asrv->srv, 0, 12, NULL, 0, 64, NULL, 0, 64);
++	up_write(&asrv->srv_rwsem);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_stoplink);
++
++int dcp_audiosrv_unprepare(struct device *dev)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	int ret;
++
++	down_write(&asrv->srv_rwsem);
++	ret = afk_service_call(asrv->srv, 0, 13, NULL, 0, 64, NULL, 0, 64);
++	up_write(&asrv->srv_rwsem);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_unprepare);
++
++static int
++dcp_audiosrv_osobject_call(struct apple_epic_service *service, u16 group,
++			   u32 command, void *output, size_t output_maxsize,
++			   size_t *output_size)
++{
++	struct {
++		__le64 max_size;
++		u8 _pad1[24];
++		__le64 used_size;
++		u8 _pad2[8];
++	} __attribute__((packed)) *hdr;
++	static_assert(sizeof(*hdr) == 48);
++	size_t bfr_len = output_maxsize + sizeof(*hdr);
++	void *bfr;
++	int ret;
++
++	bfr = kzalloc(bfr_len, GFP_KERNEL);
++	if (!bfr)
++		return -ENOMEM;
++
++	hdr = bfr;
++	hdr->max_size = cpu_to_le64(output_maxsize);
++	ret = afk_service_call(service, group, command, hdr, sizeof(*hdr), output_maxsize,
++			       bfr, sizeof(*hdr) + output_maxsize, 0);
++	if (ret)
++		return ret;
++
++	if (output)
++		memcpy(output, bfr + sizeof(*hdr), output_maxsize);
++
++	if (output_size)
++		*output_size = le64_to_cpu(hdr->used_size);
++
++	return 0;
++}
++
++int dcp_audiosrv_get_elements(struct device *dev, void *elements, size_t maxsize)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	size_t size;
++	int ret;
++
++	down_write(&asrv->srv_rwsem);
++	ret = dcp_audiosrv_osobject_call(asrv->srv, 1, 18, elements, maxsize, &size);
++	up_write(&asrv->srv_rwsem);
++
++	if (ret)
++		dev_err(dev, "audiosrv: error getting elements: %d\n", ret);
++	else
++		dev_dbg(dev, "audiosrv: got %zd bytes worth of elements\n", size);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_get_elements);
++
++int dcp_audiosrv_get_product_attrs(struct device *dev, void *attrs, size_t maxsize)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	size_t size;
++	int ret;
++
++	down_write(&asrv->srv_rwsem);
++	ret = dcp_audiosrv_osobject_call(asrv->srv, 1, 20, attrs, maxsize, &size);
++	up_write(&asrv->srv_rwsem);
++
++	if (ret)
++		dev_err(dev, "audiosrv: error getting product attributes: %d\n", ret);
++	else
++		dev_dbg(dev, "audiosrv: got %zd bytes worth of product attributes\n", size);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(dcp_audiosrv_get_product_attrs);
++
++static int av_audiosrv_report(struct apple_epic_service *service, u32 idx,
++						  const void *data, size_t data_size)
++{
++	dev_dbg(service->ep->dcp->dev, "got audio report %d size %zx\n", idx, data_size);
++#ifdef DEBUG
++	print_hex_dump(KERN_DEBUG, "audio report: ", DUMP_PREFIX_NONE, 16, 1, data, data_size, true);
++#endif
++
++	return 0;
++}
++
++static const struct apple_epic_service_ops avep_ops[] = {
++	{
++		.name = "DCPAVSimpleVideoInterface",
++		.init = av_interface_init,
++	},
++	{
++		.name = "DCPAVAudioInterface",
++		.init = av_audiosrv_init,
++		.report = av_audiosrv_report,
++		.teardown = av_audiosrv_teardown,
++	},
++	{}
++};
++
++int avep_init(struct apple_dcp *dcp)
++{
++	struct dcp_audio_pdata *audio_pdata;
++	struct platform_device *audio_pdev;
++	struct audiosrv_data *audiosrv_data;
++	struct device *dev = dcp->dev;
++
++	audiosrv_data = devm_kzalloc(dcp->dev, sizeof(*audiosrv_data), GFP_KERNEL);
++	audio_pdata = devm_kzalloc(dcp->dev, sizeof(*audio_pdata), GFP_KERNEL);
++	if (!audiosrv_data || !audio_pdata)
++		return -ENOMEM;
++	init_rwsem(&audiosrv_data->srv_rwsem);
++	mutex_init(&audiosrv_data->plug_lock);
++	dcp->audiosrv = audiosrv_data;
++
++	audio_pdata->dcp_dev = dcp->dev;
++	/* TODO: free OF reference */
++	audio_pdata->dpaudio_node = \
++			of_parse_phandle(dev->of_node, "apple,audio-xmitter", 0);
++	if (!audio_pdata->dpaudio_node ||
++	    !of_device_is_available(audio_pdata->dpaudio_node)) {
++		dev_info(dev, "No audio support\n");
++		return 0;
++	}
++
++	audio_pdev = platform_device_register_data(dev, "dcp-hdmi-audio",
++						   PLATFORM_DEVID_AUTO,
++						   audio_pdata, sizeof(*audio_pdata));
++	if (IS_ERR(audio_pdev))
++		return dev_err_probe(dev, PTR_ERR(audio_pdev), "registering audio device\n");
++
++	dcp->avep = afk_init(dcp, AV_ENDPOINT, avep_ops);
++	if (IS_ERR(dcp->avep))
++		return PTR_ERR(dcp->avep);
++	dcp->avep->debugfs_entry = dcp->ep_debugfs[AV_ENDPOINT - 0x20];
++	return afk_start(dcp->avep);
++}
+diff --git a/drivers/gpu/drm/apple/av.h b/drivers/gpu/drm/apple/av.h
+new file mode 100644
+index 000000000000..b1f92fb5d07f
+--- /dev/null
++++ b/drivers/gpu/drm/apple/av.h
+@@ -0,0 +1,9 @@
++#ifndef __AV_H__
++#define __AV_H__
++
++#include "parser.h"
++
++//int avep_audiosrv_startlink(struct apple_dcp *dcp, struct dcp_sound_cookie *cookie);
++//int avep_audiosrv_stoplink(struct apple_dcp *dcp);
++
++#endif /* __AV_H__ */
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index a3991aab78df..b8df2f5c6e02 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -34,6 +34,7 @@ enum {
+ 	TEST_ENDPOINT = 0x21,
+ 	DCP_EXPERT_ENDPOINT = 0x22,
+ 	DISP0_ENDPOINT = 0x23,
++	AV_ENDPOINT = 0x29,
+ 	DPTX_ENDPOINT = 0x2a,
+ 	HDCP_ENDPOINT = 0x2b,
+ 	REMOTE_ALLOC_ENDPOINT = 0x2d,
+@@ -89,6 +90,8 @@ struct dcp_brightness {
+ 	bool update;
+ };
+ 
++struct audiosrv_data;
++
+ /** laptop/AiO integrated panel parameters from DT */
+ struct dcp_panel {
+ 	/// panel width in millimeter
+@@ -223,6 +226,9 @@ struct apple_dcp {
+ 
+ 	struct apple_dcp_afkep *ibootep;
+ 
++	struct apple_dcp_afkep *avep;
++	struct audiosrv_data *audiosrv;
++
+ 	struct apple_dcp_afkep *dptxep;
+ 
+ 	struct dptx_port dptxport[2];
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index cc19e2bc00f0..eecd46d8510a 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -11,6 +11,7 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/iommu.h>
+ #include <linux/jiffies.h>
++#include <linux/kconfig.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/moduleparam.h>
+@@ -45,6 +46,10 @@ static bool show_notch;
+ module_param(show_notch, bool, 0644);
+ MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
+ 
++static bool noaudio;
++module_param(noaudio, bool, 0644);
++MODULE_PARM_DESC(noaudio, "Skip audio support");
++
+ /* HACK: moved here to avoid circular dependency between apple_drv and dcp */
+ void dcp_drm_crtc_vblank(struct apple_crtc *crtc)
+ {
+@@ -118,6 +123,9 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
+ 	switch (endpoint) {
+ 	case IOMFB_ENDPOINT:
+ 		return iomfb_recv_msg(dcp, message);
++	case AV_ENDPOINT:
++		afk_receive_message(dcp->avep, message);
++		return;
+ 	case SYSTEM_ENDPOINT:
+ 		afk_receive_message(dcp->systemep, message);
+ 		return;
+@@ -363,6 +371,14 @@ int dcp_start(struct platform_device *pdev)
+ 	if (ret)
+ 		dev_warn(dcp->dev, "Failed to start system endpoint: %d\n", ret);
+ 
++#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
++	if (!noaudio) {
++		ret = avep_init(dcp);
++		if (ret)
++			dev_warn(dcp->dev, "Failed to start AV endpoint: %d", ret);
++	}
++#endif
++
+ 	if (dcp->phy && dcp->fw_compat >= DCP_FIRMWARE_V_13_5) {
+ 		ret = ibootep_init(dcp);
+ 		if (ret)
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 557d42c1d875..257439118f0c 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -60,4 +60,6 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message);
+ int systemep_init(struct apple_dcp *dcp);
+ int dptxep_init(struct apple_dcp *dcp);
+ int ibootep_init(struct apple_dcp *dcp);
++int avep_init(struct apple_dcp *dcp);
++
+ #endif

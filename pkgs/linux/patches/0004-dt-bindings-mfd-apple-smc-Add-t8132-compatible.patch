@@ -1,0 +1,28 @@
+From b1026ed7c2a0b085498dad975bac943106ca0ddf Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 12:13:14 -0500
+Subject: [PATCH] dt-bindings: mfd: apple,smc: Add t8132 compatible
+
+The M4 (t8132) SMC is compatible with the t8103 SMC. Follow t6020 and
+add it with the apple,t8103-smc fallback.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ Documentation/devicetree/bindings/mfd/apple,smc.yaml | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/mfd/apple,smc.yaml b/Documentation/devicetree/bindings/mfd/apple,smc.yaml
+index 34ce048619f5..d1ce6fefb775 100644
+--- a/Documentation/devicetree/bindings/mfd/apple,smc.yaml
++++ b/Documentation/devicetree/bindings/mfd/apple,smc.yaml
+@@ -17,7 +17,9 @@ properties:
+   compatible:
+     oneOf:
+       - items:
+-          - const: apple,t6020-smc
++          - enum:
++              - apple,t6020-smc
++              - apple,t8132-smc
+           - const: apple,t8103-smc
+       - items:
+           - enum:

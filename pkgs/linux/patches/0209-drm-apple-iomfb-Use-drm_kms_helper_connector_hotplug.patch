@@ -1,0 +1,46 @@
+From 434a66348c96b7c23b03eae7d8be97612e9a4190 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 23 Nov 2023 23:04:47 +0100
+Subject: [PATCH] drm: apple: iomfb: Use drm_kms_helper_connector_hotplug_event
+
+Avoid device wide hotplugs as DCP knowns the affected connector.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/iomfb.c | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index f2a17c1b92c2..f5ae64ea5862 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -229,11 +229,9 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context)
+ void dcp_hotplug(struct work_struct *work)
+ {
+ 	struct apple_connector *connector;
+-	struct drm_device *dev;
+ 	struct apple_dcp *dcp;
+ 
+ 	connector = container_of(work, struct apple_connector, hotplug_wq);
+-	dev = connector->base.dev;
+ 
+ 	dcp = platform_get_drvdata(connector->dcp);
+ 	dev_info(dcp->dev, "%s() connected:%d valid_mode:%d\n", __func__,
+@@ -244,13 +242,11 @@ void dcp_hotplug(struct work_struct *work)
+ 	 * display modes from atomic_flush, so userspace needs to trigger a
+ 	 * flush, or the CRTC gets no signal.
+ 	 */
+-	if (connector->base.state && !dcp->valid_mode && connector->connected) {
+-		drm_connector_set_link_status_property(
+-			&connector->base, DRM_MODE_LINK_STATUS_BAD);
+-	}
++	if (connector->base.state && !dcp->valid_mode && connector->connected)
++		drm_connector_set_link_status_property(&connector->base,
++						       DRM_MODE_LINK_STATUS_BAD);
+ 
+-	if (dev && dev->registered)
+-		drm_kms_helper_hotplug_event(dev);
++	drm_kms_helper_connector_hotplug_event(&connector->base);
+ }
+ EXPORT_SYMBOL_GPL(dcp_hotplug);
+ 

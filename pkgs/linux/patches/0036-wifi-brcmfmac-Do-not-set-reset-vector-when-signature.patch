@@ -1,0 +1,50 @@
+From da67698ef08aad7516d05c26d7ac228ac11d201b Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Wed, 4 Oct 2023 05:21:22 +0900
+Subject: [PATCH] wifi: brcmfmac: Do not set reset vector when signatures are
+ in use
+
+With secure boot, the vector is not accessible and trying to write it
+triggers PCIe errors. Skip it in that case.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 25046e8e7b8b8cc031e31e40d97bd3038beacaf1)
+
+Original-Commit: ce1432c41d8978e280a75c3b8377620c72d96ab3
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index fabf7edab092..603b31661002 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -402,6 +402,7 @@ struct brcmf_pciedev_info {
+ 	void __iomem *regs;
+ 	void __iomem *tcm;
+ 	u32 fw_size;
++	bool skip_reset_vector;
+ 	struct brcmf_chip *ci;
+ 	u32 coreid;
+ 	struct brcmf_pcie_shared_info shared;
+@@ -1972,6 +1973,8 @@ static int brcmf_pcie_add_signature(struct brcmf_pciedev_info *devinfo,
+ 	if (err)
+ 		return err;
+ 
++	devinfo->skip_reset_vector = true;
++
+ 	return 0;
+ }
+ 
+@@ -2212,7 +2215,8 @@ static void brcmf_pcie_buscore_activate(void *ctx, struct brcmf_chip *chip,
+ {
+ 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)ctx;
+ 
+-	brcmf_pcie_write_tcm32(devinfo, 0, rstvec);
++	if (!devinfo->skip_reset_vector)
++		brcmf_pcie_write_tcm32(devinfo, 0, rstvec);
+ }
+ 
+ 

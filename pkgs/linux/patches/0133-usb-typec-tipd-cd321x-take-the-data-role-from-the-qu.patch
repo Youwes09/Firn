@@ -1,0 +1,29 @@
+From 8621244db0b1dee4d58e6c914d712eca3b126f5f Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 26 Oct 2026 02:03:39 -0400
+Subject: [PATCH] usb: typec: tipd: cd321x: take the data role from the queued
+ status
+
+cd321x_update_work() works on the status snapshot that the interrupt
+handler queued, but read the USB data role from tps->data_status, which
+the next interrupt may already have overwritten. The connection bits
+and the role could then come from two different updates, so a port
+could be switched to host for a partner that the snapshot reports as a
+device, or the other way around. Use the snapshot for both.
+---
+ drivers/usb/typec/tipd/core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/usb/typec/tipd/core.c b/drivers/usb/typec/tipd/core.c
+index 7eb2f3930437..11db70cc2389 100644
+--- a/drivers/usb/typec/tipd/core.c
++++ b/drivers/usb/typec/tipd/core.c
+@@ -696,7 +696,7 @@ static void cd321x_update_work(struct work_struct *work)
+ 	enum typec_orientation orientation = TYPEC_ORIENTATION_NONE;
+ 
+ 	if (usb_connection) {
+-		if (tps->data_status & TPS_DATA_STATUS_USB_DATA_ROLE)
++		if (st.data_status & TPS_DATA_STATUS_USB_DATA_ROLE)
+ 			new_role = USB_ROLE_DEVICE;
+ 		else
+ 			new_role = USB_ROLE_HOST;

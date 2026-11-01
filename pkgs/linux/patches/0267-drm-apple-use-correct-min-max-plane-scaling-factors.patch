@@ -1,0 +1,28 @@
+From 270a102966a5633cf11acb6051f9d5b3fecd5450 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Tue, 14 May 2024 22:04:28 +1000
+Subject: [PATCH] drm: apple: use correct min/max plane scaling factors
+
+Fix the call to drm_atomic_helper_check_plane_state to use
+the correct scaling factors.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 350da9e71e42..45bdc4340bf3 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -118,8 +118,8 @@ static int apple_plane_atomic_check(struct drm_plane *plane,
+ 	 */
+ 	return drm_atomic_helper_check_plane_state(new_plane_state,
+ 						   crtc_state,
+-						   FRAC_16_16(1, 4),
+-						   FRAC_16_16(2, 1),
++						   FRAC_16_16(1, 2),
++						   FRAC_16_16(4, 1),
+ 						   true, true);
+ }
+ 

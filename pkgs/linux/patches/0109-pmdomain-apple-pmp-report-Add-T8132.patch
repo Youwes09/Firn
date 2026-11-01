@@ -1,0 +1,172 @@
+From a0a56e5681c146ac3097e9991f45caae01eac410 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 26 Oct 2026 19:00:00 -0400
+Subject: [PATCH] pmdomain: apple: pmp-report: Add T8132
+
+T8132 moves the report registers and adds an event-config region. Once
+PMP is up, macOS stages event channel 0x20, has PMP enable report 12,
+enables the other event channels and drops the boot-time vote on
+report 18. Do the same from a work item that polls for PMP to become
+ready.
+
+[Youwes09: split from niklassheth/linux 86255757f52d; give up after
+ 120 s as in Gravity Linux; post-ready logging trimmed]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/pmdomain/apple/pmp-report.c | 95 +++++++++++++++++++++++++++++
+ 1 file changed, 95 insertions(+)
+
+diff --git a/drivers/pmdomain/apple/pmp-report.c b/drivers/pmdomain/apple/pmp-report.c
+index c8089ee2ed4c..3894a17cd1d7 100644
+--- a/drivers/pmdomain/apple/pmp-report.c
++++ b/drivers/pmdomain/apple/pmp-report.c
+@@ -12,23 +12,85 @@
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
++#include <linux/workqueue.h>
+ 
+ #define PMP_REPORT_READY 0x1
++#define PMP_REPORT_READY_TIMEOUT_MS 120000
+ 
+ struct apple_pmp_report_offsets {
+ 	u32 tgt_read;
+ 	u32 tgt_write;
+ 	u32 actual;
+ 	u32 status;
++	/* Has an event-config region and a sequence to run once PMP is up */
++	bool post_ready;
+ };
+ 
+ struct apple_pmp_report {
+ 	struct device *dev;
+ 	const struct apple_pmp_report_offsets *offsets;
+ 	void __iomem *base;
++	void __iomem *event_config;
+ 	spinlock_t lock;
++	struct delayed_work post_ready_work;
++	unsigned long ready_deadline;
+ };
+ 
++static int apple_pmp_report_vote(struct apple_pmp_report *rep, u64 bit,
++				 bool enable)
++{
++	unsigned long flags;
++	u64 val;
++
++	spin_lock_irqsave(&rep->lock, flags);
++	val = readq(rep->base + rep->offsets->tgt_read);
++	val = enable ? val | bit : val & ~bit;
++	writeq(val, rep->base + rep->offsets->tgt_write);
++	spin_unlock_irqrestore(&rep->lock, flags);
++
++	return readq_poll_timeout(rep->base + rep->offsets->actual, val,
++				  !!(val & bit) == enable, 10, 500000);
++}
++
++/*
++ * Once PMP is up, macOS on T8132 stages event channel 0x20, has PMP
++ * enable report 12, enables the other event channels, and drops the
++ * boot-time vote on report 18.
++ */
++static void apple_pmp_report_post_ready(struct work_struct *work)
++{
++	struct apple_pmp_report *rep =
++		container_of(to_delayed_work(work), struct apple_pmp_report,
++			     post_ready_work);
++	void __iomem *ev = rep->event_config;
++	int ret;
++
++	if (!(readq(rep->base + rep->offsets->status) & PMP_REPORT_READY)) {
++		if (time_after(jiffies, rep->ready_deadline)) {
++			dev_warn(rep->dev, "PMP did not become ready\n");
++			return;
++		}
++		schedule_delayed_work(&rep->post_ready_work, msecs_to_jiffies(1));
++		return;
++	}
++
++	writel(readl(ev + 0x20) | BIT(2), ev + 0x20);
++	ret = apple_pmp_report_vote(rep, BIT_ULL(12), true);
++	if (ret) {
++		dev_err(rep->dev, "PMP did not enable report 12: %d\n", ret);
++		return;
++	}
++
++	writel(readl(ev + 0x00) | BIT(2), ev + 0x00);
++	writel(readl(ev + 0x04) | BIT(2), ev + 0x04);
++	writel(readl(ev + 0x08) | BIT(2), ev + 0x08);
++
++	ret = apple_pmp_report_vote(rep, BIT_ULL(18), false);
++	if (ret)
++		dev_err(rep->dev, "PMP did not drop report 18: %d\n", ret);
++	writel(readl(ev + 0x20) & ~BIT(2), ev + 0x20);
++}
++
+ static int apple_pmp_report_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -46,14 +108,37 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
+ 	if (IS_ERR(rep->base))
+ 		return PTR_ERR(rep->base);
+ 	rep->offsets = of_device_get_match_data(dev);
++	if (rep->offsets->post_ready) {
++		rep->event_config =
++			devm_platform_ioremap_resource_byname(pdev, "event-config");
++		if (IS_ERR(rep->event_config))
++			return PTR_ERR(rep->event_config);
++	}
+ 	dev_set_drvdata(dev, rep);
+ 	ret = of_platform_populate(np, NULL, NULL, dev);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to create child devices\n");
+ 
++	if (rep->offsets->post_ready) {
++		rep->ready_deadline = jiffies +
++				      msecs_to_jiffies(PMP_REPORT_READY_TIMEOUT_MS);
++		INIT_DELAYED_WORK(&rep->post_ready_work,
++				  apple_pmp_report_post_ready);
++		schedule_delayed_work(&rep->post_ready_work, 0);
++	}
++
+ 	return 0;
+ }
+ 
++static void apple_pmp_report_remove(struct platform_device *pdev)
++{
++	struct apple_pmp_report *rep = platform_get_drvdata(pdev);
++
++	if (rep->offsets->post_ready)
++		cancel_delayed_work_sync(&rep->post_ready_work);
++	of_platform_depopulate(&pdev->dev);
++}
++
+ static const struct apple_pmp_report_offsets apple_pmp_offsets_t600x = {
+ 	.tgt_read = 0xf80,
+ 	.tgt_write = 0x107c0,
+@@ -75,15 +160,25 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t8112 = {
+ 	.status = 0x10,
+ };
+ 
++static const struct apple_pmp_report_offsets apple_pmp_offsets_t8132 = {
++	.tgt_read = 0x1880,
++	.tgt_write = 0x10c40,
++	.actual = 0x1900,
++	.status = 0x10,
++	.post_ready = true,
++};
++
+ static const struct of_device_id apple_pmp_report_of_match[] = {
+ 	{ .compatible = "apple,t6000-pmp-v2-report", .data = &apple_pmp_offsets_t600x },
+ 	{ .compatible = "apple,t6020-pmp-v2-report", .data = &apple_pmp_offsets_t602x },
+ 	{ .compatible = "apple,t8112-pmp-v2-report", .data = &apple_pmp_offsets_t8112 },
++	{ .compatible = "apple,t8132-pmp-v2-report", .data = &apple_pmp_offsets_t8132 },
+ 	{}
+ };
+ 
+ static struct platform_driver apple_pmp_report_driver = {
+ 	.probe = apple_pmp_report_probe,
++	.remove = apple_pmp_report_remove,
+ 	.driver = {
+ 		.name = "apple-pmp-report",
+ 		.of_match_table = apple_pmp_report_of_match,

@@ -1,0 +1,22 @@
+From 7db990e064e1338c58ee2082be13b4ac5540252b Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 23 Aug 2026 22:56:48 +0200
+Subject: [PATCH] fixup! drm: apple: Extract modeset crtc's atomic_flush()
+
+---
+ drivers/gpu/drm/apple/iomfb_template.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index 8efab49cc53d..567914b60c81 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -157,7 +157,7 @@ struct apple_dcp;
+ 
+ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 			       struct drm_crtc_state *crtc_state);
+-void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_state *state);
++void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_commit *commit);
+ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp);
+ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp);
+ void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp);

@@ -1,0 +1,25 @@
+From eb858e3d36ed0e1e502559c07fac63ba81b36b76 Mon Sep 17 00:00:00 2001
+From: Daniel Berlin <dberlin@dberlin.org>
+Date: Sun, 12 Nov 2023 15:49:54 -0500
+Subject: [PATCH] wifi: brcmfmac: Size the bss_info SSID with
+ IEEE80211_MAX_SSID_LEN
+
+Signed-off-by: Daniel Berlin <dberlin@dberlin.org>
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index d8f8101c6252..b8376ec39e43 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -332,7 +332,7 @@ struct brcmf_bss_info_le {
+ 	__le16 beacon_period;	/* units are Kusec */
+ 	__le16 capability;	/* Capability information */
+ 	u8 SSID_len;
+-	u8 SSID[32];
++	u8 SSID[IEEE80211_MAX_SSID_LEN];
+ 	u8 bcnflags;		/* additional flags w.r.t. beacon */
+ 	struct {
+ 		__le32 count;   /* # rates in this set */

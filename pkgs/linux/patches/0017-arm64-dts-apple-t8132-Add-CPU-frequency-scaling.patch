@@ -1,0 +1,290 @@
+From 0cb81ad9636c2e22428b14577c587e7206897723 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 14:05:00 -0500
+Subject: [PATCH] arm64: dts: apple: t8132: Add CPU frequency scaling
+
+Add the cluster performance controllers and the CPU OPP tables. The
+frequencies are the J713 ADT's pmgr voltage-states1-sram (E cluster)
+and voltage-states5-sram (P cluster).
+
+Based on work by Niklas Sheth, as carried in Gravity Linux
+877c574dfa4f3.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 185 +++++++++++++++++++++++++++
+ 1 file changed, 185 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 33ae343442a2..5dc916d50553 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -68,6 +68,8 @@ cpu_e0: cpu@0 {
+ 			next-level-cache = <&l2_cache_0>;
+ 			i-cache-size = <0x20000>;
+ 			d-cache-size = <0x10000>;
++			operating-points-v2 = <&ecluster_opp>;
++			performance-domains = <&cpufreq_e>;
+ 		};
+ 
+ 		cpu_e1: cpu@1 {
+@@ -79,6 +81,8 @@ cpu_e1: cpu@1 {
+ 			next-level-cache = <&l2_cache_0>;
+ 			i-cache-size = <0x20000>;
+ 			d-cache-size = <0x10000>;
++			operating-points-v2 = <&ecluster_opp>;
++			performance-domains = <&cpufreq_e>;
+ 		};
+ 
+ 		cpu_e2: cpu@2 {
+@@ -90,6 +94,8 @@ cpu_e2: cpu@2 {
+ 			next-level-cache = <&l2_cache_0>;
+ 			i-cache-size = <0x20000>;
+ 			d-cache-size = <0x10000>;
++			operating-points-v2 = <&ecluster_opp>;
++			performance-domains = <&cpufreq_e>;
+ 		};
+ 
+ 		cpu_e3: cpu@3 {
+@@ -101,6 +107,8 @@ cpu_e3: cpu@3 {
+ 			next-level-cache = <&l2_cache_0>;
+ 			i-cache-size = <0x20000>;
+ 			d-cache-size = <0x10000>;
++			operating-points-v2 = <&ecluster_opp>;
++			performance-domains = <&cpufreq_e>;
+ 		};
+ 
+ 		cpu_e4: cpu@4 {
+@@ -112,6 +120,8 @@ cpu_e4: cpu@4 {
+ 			next-level-cache = <&l2_cache_0>;
+ 			i-cache-size = <0x20000>;
+ 			d-cache-size = <0x10000>;
++			operating-points-v2 = <&ecluster_opp>;
++			performance-domains = <&cpufreq_e>;
+ 		};
+ 
+ 		cpu_e5: cpu@5 {
+@@ -123,6 +133,8 @@ cpu_e5: cpu@5 {
+ 			next-level-cache = <&l2_cache_0>;
+ 			i-cache-size = <0x20000>;
+ 			d-cache-size = <0x10000>;
++			operating-points-v2 = <&ecluster_opp>;
++			performance-domains = <&cpufreq_e>;
+ 		};
+ 
+ 		cpu_p0: cpu@10100 {
+@@ -134,6 +146,8 @@ cpu_p0: cpu@10100 {
+ 			next-level-cache = <&l2_cache_1>;
+ 			i-cache-size = <0x30000>;
+ 			d-cache-size = <0x20000>;
++			operating-points-v2 = <&pcluster_opp>;
++			performance-domains = <&cpufreq_p>;
+ 		};
+ 
+ 		cpu_p1: cpu@10101 {
+@@ -145,6 +159,8 @@ cpu_p1: cpu@10101 {
+ 			next-level-cache = <&l2_cache_1>;
+ 			i-cache-size = <0x30000>;
+ 			d-cache-size = <0x20000>;
++			operating-points-v2 = <&pcluster_opp>;
++			performance-domains = <&cpufreq_p>;
+ 		};
+ 
+ 		cpu_p2: cpu@10102 {
+@@ -156,6 +172,8 @@ cpu_p2: cpu@10102 {
+ 			next-level-cache = <&l2_cache_1>;
+ 			i-cache-size = <0x30000>;
+ 			d-cache-size = <0x20000>;
++			operating-points-v2 = <&pcluster_opp>;
++			performance-domains = <&cpufreq_p>;
+ 		};
+ 
+ 		cpu_p3: cpu@10103 {
+@@ -167,6 +185,8 @@ cpu_p3: cpu@10103 {
+ 			next-level-cache = <&l2_cache_1>;
+ 			i-cache-size = <0x30000>;
+ 			d-cache-size = <0x20000>;
++			operating-points-v2 = <&pcluster_opp>;
++			performance-domains = <&cpufreq_p>;
+ 		};
+ 
+ 		l2_cache_0: l2-cache-0 {
+@@ -184,6 +204,159 @@ l2_cache_1: l2-cache-1 {
+ 		};
+ 	};
+ 
++	ecluster_opp: opp-table-0 {
++		compatible = "operating-points-v2";
++		opp-shared;
++
++		opp01 {
++			opp-hz = /bits/ 64 <900000000>;
++			opp-level = <1>;
++		};
++
++		opp02 {
++			opp-hz = /bits/ 64 <1080000000>;
++			opp-level = <2>;
++		};
++
++		opp03 {
++			opp-hz = /bits/ 64 <1476000000>;
++			opp-level = <3>;
++		};
++
++		opp04 {
++			opp-hz = /bits/ 64 <1860000000>;
++			opp-level = <4>;
++		};
++
++		opp05 {
++			opp-hz = /bits/ 64 <2172000000>;
++			opp-level = <5>;
++		};
++
++		opp06 {
++			opp-hz = /bits/ 64 <2496000000>;
++			opp-level = <6>;
++		};
++
++		opp07 {
++			opp-hz = /bits/ 64 <2808000000>;
++			opp-level = <7>;
++		};
++
++		opp08 {
++			opp-hz = /bits/ 64 <2892000000>;
++			opp-level = <8>;
++			turbo-mode;
++		};
++	};
++
++	pcluster_opp: opp-table-1 {
++		compatible = "operating-points-v2";
++		opp-shared;
++
++		opp01 {
++			opp-hz = /bits/ 64 <912000000>;
++			opp-level = <1>;
++		};
++
++		opp02 {
++			opp-hz = /bits/ 64 <1260000000>;
++			opp-level = <2>;
++		};
++
++		opp03 {
++			opp-hz = /bits/ 64 <1512000000>;
++			opp-level = <3>;
++		};
++
++		opp04 {
++			opp-hz = /bits/ 64 <1800000000>;
++			opp-level = <4>;
++		};
++
++		opp05 {
++			opp-hz = /bits/ 64 <2088000000>;
++			opp-level = <5>;
++		};
++
++		opp06 {
++			opp-hz = /bits/ 64 <2352000000>;
++			opp-level = <6>;
++		};
++
++		opp07 {
++			opp-hz = /bits/ 64 <2616000000>;
++			opp-level = <7>;
++		};
++
++		opp08 {
++			opp-hz = /bits/ 64 <2868000000>;
++			opp-level = <8>;
++		};
++
++		opp09 {
++			opp-hz = /bits/ 64 <3096000000>;
++			opp-level = <9>;
++		};
++
++		opp10 {
++			opp-hz = /bits/ 64 <3300000000>;
++			opp-level = <10>;
++		};
++
++		opp11 {
++			opp-hz = /bits/ 64 <3468000000>;
++			opp-level = <11>;
++		};
++
++		opp12 {
++			opp-hz = /bits/ 64 <3624000000>;
++			opp-level = <12>;
++		};
++
++		opp13 {
++			opp-hz = /bits/ 64 <3756000000>;
++			opp-level = <13>;
++		};
++
++		opp14 {
++			opp-hz = /bits/ 64 <3876000000>;
++			opp-level = <14>;
++		};
++
++		opp15 {
++			opp-hz = /bits/ 64 <3936000000>;
++			opp-level = <15>;
++		};
++
++		opp16 {
++			opp-hz = /bits/ 64 <3984000000>;
++			opp-level = <16>;
++		};
++
++		opp17 {
++			opp-hz = /bits/ 64 <4044000000>;
++			opp-level = <17>;
++		};
++
++		opp18 {
++			opp-hz = /bits/ 64 <4104000000>;
++			opp-level = <18>;
++		};
++
++		opp19 {
++			opp-hz = /bits/ 64 <4416000000>;
++			opp-level = <19>;
++			turbo-mode;
++		};
++
++		opp20 {
++			opp-hz = /bits/ 64 <4464000000>;
++			opp-level = <20>;
++			turbo-mode;
++		};
++	};
++
+ 	clkref: clock-ref {
+ 		compatible = "fixed-clock";
+ 		#clock-cells = <0>;
+@@ -201,6 +374,18 @@ soc: soc {
+ 		/* Required to get >32-bit DMA via DARTs */
+ 		dma-ranges = <0 0 0 0 0xffffffff 0xffffc000>;
+ 
++		cpufreq_e: cpufreq@210e20000 {
++			compatible = "apple,t8132-cluster-cpufreq", "apple,t8112-cluster-cpufreq";
++			reg = <0x2 0x10e20000 0x0 0x1000>;
++			#performance-domain-cells = <0>;
++		};
++
++		cpufreq_p: cpufreq@211e20000 {
++			compatible = "apple,t8132-cluster-cpufreq", "apple,t8112-cluster-cpufreq";
++			reg = <0x2 0x11e20000 0x0 0x1000>;
++			#performance-domain-cells = <0>;
++		};
++
+ 		pmgr: power-management@380700000 {
+ 			compatible = "apple,t8132-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+ 			#address-cells = <1>;

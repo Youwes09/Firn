@@ -1,0 +1,4894 @@
+From 765bdf8a375f7ab6f68ae71b7cc9f3ae86127192 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 18 Aug 2026 05:57:36 -0400
+Subject: [PATCH] drm/apple: bring up T8132 DCP hotplug [dcp]
+
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(split from commit 877c574dfa4f31434129b05da6d907abfb21bbef: dcp changes only)
+[Niklas: v7.3 renamed the atomic_check argument to "commit"]
+---
+ drivers/gpu/drm/apple/Makefile          |   1 +
+ drivers/gpu/drm/apple/afk.c             | 716 ++++++++++++++++++++++-
+ drivers/gpu/drm/apple/afk.h             |  49 +-
+ drivers/gpu/drm/apple/apple_drv.c       | 387 ++++++++++++-
+ drivers/gpu/drm/apple/av.c              |   1 +
+ drivers/gpu/drm/apple/connector.c       | 136 +++++
+ drivers/gpu/drm/apple/dcp-internal.h    |  38 ++
+ drivers/gpu/drm/apple/dcp.c             | 736 +++++++++++++++++++++++-
+ drivers/gpu/drm/apple/dcp.h             |   7 +
+ drivers/gpu/drm/apple/dptxep.c          |  65 ++-
+ drivers/gpu/drm/apple/epic/dpavservep.c |  48 +-
+ drivers/gpu/drm/apple/ibootep.c         | 106 ++++
+ drivers/gpu/drm/apple/iomfb.c           |  36 +-
+ drivers/gpu/drm/apple/iomfb.h           |  63 +-
+ drivers/gpu/drm/apple/iomfb_template.c  | 544 +++++++++++++++---
+ drivers/gpu/drm/apple/iomfb_template.h  |  96 +++-
+ drivers/gpu/drm/apple/iomfb_v12_3.c     |   1 +
+ drivers/gpu/drm/apple/iomfb_v13_3.c     |   1 +
+ drivers/gpu/drm/apple/iomfb_v26_6.c     | 167 ++++++
+ drivers/gpu/drm/apple/iomfb_v26_6.h     |  29 +
+ drivers/gpu/drm/apple/parser.c          |  21 +-
+ drivers/gpu/drm/apple/parser.h          |   2 +
+ drivers/gpu/drm/apple/plane.c           |   3 +
+ 23 files changed, 3070 insertions(+), 183 deletions(-)
+ create mode 100644 drivers/gpu/drm/apple/iomfb_v26_6.c
+ create mode 100644 drivers/gpu/drm/apple/iomfb_v26_6.h
+
+diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
+index b22839bdd611..d624045a0db5 100644
+--- a/drivers/gpu/drm/apple/Makefile
++++ b/drivers/gpu/drm/apple/Makefile
+@@ -10,6 +10,7 @@ appledrm-y += connector.o
+ appledrm-y += ibootep.o
+ appledrm-y += iomfb_v12_3.o
+ appledrm-y += iomfb_v13_3.o
++appledrm-y += iomfb_v26_6.o
+ appledrm-y += epic/dpavservep.o
+ appledrm-y += plane.o
+ 
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index b7f162988269..6237cbb2779a 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -5,6 +5,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/kconfig.h>
++#include <linux/moduleparam.h>
+ #include <linux/of_platform.h>
+ #include <linux/slab.h>
+ #include <linux/workqueue.h>
+@@ -13,12 +14,44 @@
+ #include "afk.h"
+ #include "trace.h"
+ 
++static bool compact_trace;
++module_param_named(compact_trace, compact_trace, bool, 0644);
++MODULE_PARM_DESC(compact_trace,
++		 "Trace compact EPIC calls and reports for DCP protocol debugging");
++
+ struct afk_receive_message_work {
+ 	struct apple_dcp_afkep *ep;
+ 	u64 message;
+ 	struct work_struct work;
+ };
+ 
++struct afk_compact_cmd {
++	struct list_head node;
++	struct completion done;
++	u16 channel;
++	u8 type;
++	bool service_call;
++	u16 group;
++	u32 command;
++	u32 request_status;
++	void *output;
++	size_t output_len;
++	u32 retcode;
++	int status;
++};
++
++static u32 afk_compact_next_status(struct apple_epic_service *service)
++{
++	unsigned long flags;
++	u32 status;
++
++	spin_lock_irqsave(&service->lock, flags);
++	status = (u32)service->cmd_tag++ << 8;
++	spin_unlock_irqrestore(&service->lock, flags);
++
++	return status;
++}
++
+ #define RBEP_TYPE GENMASK(63, 48)
+ 
+ enum rbep_msg_type {
+@@ -77,6 +110,7 @@ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
+ 
+ 	init_completion(&afkep->started);
+ 	init_completion(&afkep->stopped);
++	INIT_LIST_HEAD(&afkep->compact_cmds);
+ 	spin_lock_init(&afkep->lock);
+ 
+ 	return afkep;
+@@ -86,8 +120,24 @@ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
+ 	return ERR_PTR(ret);
+ }
+ 
++void afk_cancel_commands(struct apple_dcp_afkep *afkep)
++{
++	struct afk_compact_cmd *cmd, *tmp;
++	unsigned long flags;
++
++	spin_lock_irqsave(&afkep->lock, flags);
++	afkep->compact_shutting_down = true;
++	list_for_each_entry_safe(cmd, tmp, &afkep->compact_cmds, node) {
++		list_del_init(&cmd->node);
++		cmd->status = -ESHUTDOWN;
++		complete(&cmd->done);
++	}
++	spin_unlock_irqrestore(&afkep->lock, flags);
++}
++
+ void afk_shutdown(struct apple_dcp_afkep *afkep)
+ {
++	afk_cancel_commands(afkep);
+ 	afk_send(afkep, FIELD_PREP(RBEP_TYPE, RBEP_SHUTDOWN));
+ 	int ret;
+ 
+@@ -138,7 +188,6 @@ static void afk_getbuf(struct apple_dcp_afkep *ep, u64 message)
+ 
+ 	ep->bfr_size = size;
+ 	ep->bfr_tag = tag;
+-
+ 	reply = FIELD_PREP(RBEP_TYPE, RBEP_GETBUF_ACK);
+ 	reply |= FIELD_PREP(GETBUF_ACK_DVA, ep->bfr_dma);
+ 	afk_send(ep, reply);
+@@ -151,6 +200,7 @@ static void afk_init_rxtx(struct apple_dcp_afkep *ep, u64 message,
+ 	u16 size = FIELD_GET(INITRB_SIZE, message) << BLOCK_SHIFT;
+ 	u16 tag = FIELD_GET(INITRB_TAG, message);
+ 	u32 bufsz, end;
++	size_t block_size;
+ 
+ 	if (tag != ep->bfr_tag) {
+ 		dev_err(ep->dcp->dev, "AFK[ep:%02x]: expected tag 0x%x but got 0x%x\n",
+@@ -181,16 +231,35 @@ static void afk_init_rxtx(struct apple_dcp_afkep *ep, u64 message,
+ 
+ 	bfr->hdr = ep->bfr + base;
+ 	bufsz = le32_to_cpu(bfr->hdr->bufsz);
+-	if (bufsz + sizeof(*bfr->hdr) != size) {
++	if (bufsz > size || (size - bufsz) % 3) {
++		dev_err(ep->dcp->dev,
++			"AFK[ep:%02x]: invalid ring buffer layout: size 0x%x, data 0x%x\n",
++			ep->endpoint, size, bufsz);
++		return;
++	}
++
++	block_size = (size - bufsz) / 3;
++	if (block_size < sizeof(*bfr->hdr) || block_size % (1 << BLOCK_SHIFT)) {
+ 		dev_err(ep->dcp->dev,
+-			"AFK[ep:%02x]: ring buffer size 0x%x != expected 0x%lx\n",
+-			ep->endpoint, bufsz, sizeof(*bfr->hdr));
++			"AFK[ep:%02x]: invalid ring buffer block size 0x%lx\n",
++			ep->endpoint, block_size);
+ 		return;
+ 	}
+ 
+-	bfr->buf = bfr->hdr + 1;
++	bfr->rptr = ep->bfr + base + block_size;
++	bfr->wptr = ep->bfr + base + 2 * block_size;
++	bfr->buf = ep->bfr + base + 3 * block_size;
+ 	bfr->bufsz = bufsz;
++	bfr->block_size = block_size;
+ 	bfr->ready = true;
++	dev_dbg(ep->dcp->dev,
++		 "AFK[ep:%02x]: %s base=%#x size=%#x hdr=%pad rptr=%pad wptr=%pad data=%pad data-size=%#x block=%#lx\n",
++		 ep->endpoint, bfr == &ep->txbfr ? "TX" : "RX", base, size,
++		 &(dma_addr_t){ ep->bfr_dma + base },
++		 &(dma_addr_t){ ep->bfr_dma + base + block_size },
++		 &(dma_addr_t){ ep->bfr_dma + base + 2 * block_size },
++		 &(dma_addr_t){ ep->bfr_dma + base + 3 * block_size },
++		 bufsz, block_size);
+ 
+ 	if (ep->rxbfr.ready && ep->txbfr.ready)
+ 		afk_send(ep, FIELD_PREP(RBEP_TYPE, RBEP_START));
+@@ -212,14 +281,28 @@ static const struct apple_epic_service_ops *
+ afk_match_service(struct apple_dcp_afkep *ep, const char *name)
+ {
+ 	const struct apple_epic_service_ops *ops;
++	const char *service_name;
++	size_t len;
+ 
+ 	if (!name[0])
+ 		return NULL;
+ 	if (!ep->ops)
+ 		return NULL;
+ 
++	service_name = strchr(name, ':');
++	if (service_name)
++		service_name++;
++	else
++		service_name = name;
++
+ 	for (ops = ep->ops; ops->name[0]; ops++) {
+-		if (strcmp(ops->name, name))
++		if (!strcmp(ops->name, "*"))
++			return ops;
++
++		len = strlen(ops->name);
++		if (strncmp(ops->name, service_name, len))
++			continue;
++		if (service_name[len] && service_name[len] != ':')
+ 			continue;
+ 
+ 		return ops;
+@@ -238,6 +321,117 @@ static struct apple_epic_service *afk_epic_find_service(struct apple_dcp_afkep *
+     return NULL;
+ }
+ 
++static int afk_send_compact(struct apple_dcp_afkep *ep, u16 intf_id, u8 type,
++			    u8 category, const void *payload, size_t payload_size,
++			    size_t wire_size)
++{
++	struct epic_compact_hdr *chdr;
++	struct epic_compact_sub_hdr *cshdr;
++	struct afk_qe *qhdr, *qhdr2 = NULL;
++	unsigned long flags;
++	void *message;
++	size_t message_size, advance;
++	u32 rptr, wptr, old_wptr;
++	int ret = 0;
++
++	if (payload_size > wire_size)
++		return -EINVAL;
++	if (!ep->txbfr.ready)
++		return -EIO;
++
++	message_size = sizeof(*chdr) + sizeof(*cshdr) + wire_size;
++	message = kzalloc(message_size, GFP_KERNEL);
++	if (!message)
++		return -ENOMEM;
++
++	chdr = message;
++	cshdr = message + sizeof(*chdr);
++	chdr->intf_id = cpu_to_le16(intf_id);
++	chdr->length = cpu_to_le32(message_size -
++					   offsetof(struct epic_compact_hdr, timestamp));
++	cshdr->type = type;
++	cshdr->category = category;
++	cshdr->unk = type == 0x12;
++	if (payload_size)
++		memcpy(cshdr + 1, payload, payload_size);
++
++	spin_lock_irqsave(&ep->lock, flags);
++	chdr->seq = ep->qe_seq++;
++
++	dma_rmb();
++	rptr = le32_to_cpu(READ_ONCE(*ep->txbfr.rptr));
++	wptr = le32_to_cpu(READ_ONCE(*ep->txbfr.wptr));
++	old_wptr = wptr;
++	advance = ALIGN(sizeof(*qhdr) + message_size, ep->txbfr.block_size);
++
++	if (advance > ep->txbfr.bufsz) {
++		ret = -EMSGSIZE;
++		goto out_unlock;
++	}
++	if (wptr < rptr && advance >= rptr - wptr) {
++		ret = -ENOMEM;
++		goto out_unlock;
++	}
++	if (wptr >= rptr) {
++		bool fits_above = advance < ep->txbfr.bufsz - wptr ||
++			(advance == ep->txbfr.bufsz - wptr && rptr != 0);
++
++		if (!fits_above && advance >= rptr) {
++			ret = -ENOMEM;
++			goto out_unlock;
++		}
++	}
++
++	qhdr = ep->txbfr.buf + wptr;
++	qhdr->magic = cpu_to_le32(QE_MAGIC);
++	qhdr->size = cpu_to_le32(message_size);
++	qhdr->channel = cpu_to_le32(0);
++	qhdr->type = cpu_to_le32(0);
++	wptr += sizeof(*qhdr);
++
++	if (message_size > ep->txbfr.bufsz - wptr) {
++		qhdr2 = ep->txbfr.buf;
++		memcpy(qhdr2, qhdr, sizeof(*qhdr));
++		qhdr = qhdr2;
++		wptr = sizeof(*qhdr);
++	}
++
++	memcpy(qhdr->data, message, message_size);
++	wptr = ALIGN(wptr + message_size, ep->txbfr.block_size);
++	if (wptr == ep->txbfr.bufsz)
++		wptr = 0;
++
++	dma_wmb();
++	WRITE_ONCE(*ep->txbfr.wptr, cpu_to_le32(wptr));
++	dma_wmb();
++	afk_send(ep, FIELD_PREP(RBEP_TYPE, RBEP_RECV) |
++		     ((u64)(rptr & 0xffff) << 32) |
++		     ((u64)(wptr & 0xffff) << 16) | (old_wptr & 0xffff));
++
++out_unlock:
++	spin_unlock_irqrestore(&ep->lock, flags);
++	kfree(message);
++	return ret;
++}
++
++int afk_start_service(struct apple_epic_service *service)
++{
++	int ret;
++
++	if (!service || !service->enabled)
++		return -EINVAL;
++	if (!service->ep->compact)
++		return 0;
++	if (service->started)
++		return 0;
++
++	ret = afk_send_compact(service->ep, service->channel, 0x12, 0,
++			       NULL, 0, 0);
++	if (!ret)
++		service->started = true;
++	return ret;
++}
++
+ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
+ 				 u8 *payload, size_t payload_size)
+ {
+@@ -324,6 +518,343 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
+ 	kfree(epic_class);
+ }
+ 
++static void afk_recv_handle_compact_init(struct apple_dcp_afkep *ep,
++					 u16 channel, const void *payload,
++					 size_t payload_size)
++{
++	char wire_name[33], service_name[33];
++	const char *name;
++	char *unit_suffix;
++	const struct apple_epic_service_ops *ops;
++	struct apple_epic_service *service;
++	s64 unit = -1;
++	u32 ch_idx;
++	int ret;
++
++	if (payload_size < 32) {
++		dev_err(ep->dcp->dev,
++			"AFK[ep:%02x]: short compact service announcement\n",
++			ep->endpoint);
++		return;
++	}
++	if (afk_epic_find_service(ep, channel)) {
++		dev_warn(ep->dcp->dev,
++			 "AFK[ep:%02x]: duplicate compact service on interface %u\n",
++			 ep->endpoint, channel);
++		return;
++	}
++	memcpy(wire_name, payload, 32);
++	wire_name[32] = '\0';
++	name = strchr(wire_name, ':');
++	if (name)
++		name++;
++	else
++		name = wire_name;
++	strscpy(service_name, name, sizeof(service_name));
++
++	unit_suffix = strrchr(service_name, ':');
++	if (unit_suffix && !kstrtos64(unit_suffix + 1, 10, &unit))
++		*unit_suffix = '\0';
++	else
++		unit = -1;
++
++	ops = afk_match_service(ep, wire_name);
++	if (!ops) {
++		dev_err(ep->dcp->dev,
++			"AFK[ep:%02x]: unable to match compact service %s on interface %u\n",
++			ep->endpoint, wire_name, channel);
++		return;
++	}
++
++	/* Compact AV services are republished under fresh interface IDs after
++	 * every external-display hotplug, without a teardown message for the
++	 * previous interface.  Replace the same logical service in place so the
++	 * fixed service table does not fill after a handful of reconnects.
++	 * This behavior is specific to DPDEV, DPAVSERV, and AV.  Other compact
++	 * endpoints (notably DPAVCTRL) may publish several simultaneous services
++	 * with the same name and no unit, so name/unit is not a unique key there. */
++	ch_idx = ep->num_channels;
++	if (ep->endpoint >= DPDEV_ENDPOINT && ep->endpoint <= AV_ENDPOINT) {
++		for (u32 i = 0; i < ep->num_channels; i++) {
++			service = &ep->services[i];
++			if (service->ops == ops && service->unit == unit &&
++			    !strcmp(service->name, service_name)) {
++				ch_idx = i;
++				break;
++			}
++		}
++	}
++
++	if (ch_idx == ep->num_channels) {
++		for (u32 i = 0; i < ep->num_channels; i++) {
++			if (!ep->services[i].enabled) {
++				ch_idx = i;
++				break;
++			}
++		}
++	}
++
++	if (ch_idx == ep->num_channels) {
++		if (ep->num_channels >= AFK_MAX_CHANNEL) {
++			dev_err(ep->dcp->dev,
++				"AFK[ep:%02x]: too many enabled compact services\n",
++				ep->endpoint);
++			return;
++		}
++		ep->num_channels++;
++	} else if (ep->services[ch_idx].enabled) {
++		service = &ep->services[ch_idx];
++		dev_info(ep->dcp->dev,
++			 "AFK[ep:%02x]: replacing compact service %s interface %u with %u\n",
++			 ep->endpoint, service_name, service->channel, channel);
++		afk_remove_service_debugfs(service);
++		service->torndown = true;
++		if (service->ops->teardown)
++			service->ops->teardown(service);
++		service->enabled = false;
++	}
++
++	service = &ep->services[ch_idx];
++	memset(service, 0, sizeof(*service));
++	spin_lock_init(&service->lock);
++	service->enabled = true;
++	service->torndown = false;
++	service->ops = ops;
++	service->ep = ep;
++	service->channel = channel;
++	strscpy(service->name, service_name, sizeof(service->name));
++	service->unit = unit;
++	service->cmd_tag = 0;
++	ops->init(service, service_name, service_name, unit);
++
++	dev_info(ep->dcp->dev,
++		 "AFK[ep:%02x]: new compact service %s on interface %u%s\n",
++		 ep->endpoint, wire_name, channel,
++		 service->defer_start ? " (deferred)" : "");
++	afk_populate_service_debugfs(service);
++
++	if (!service->defer_start) {
++		ret = afk_start_service(service);
++		if (ret)
++			dev_err(ep->dcp->dev,
++				"AFK[ep:%02x]: failed to start compact service %u: %d\n",
++				ep->endpoint, channel, ret);
++	}
++}
++
++static void afk_recv_handle_compact_reply(struct apple_dcp_afkep *ep,
++					  u16 channel, u8 type,
++					  const void *payload,
++					  size_t payload_size)
++{
++	const struct epic_compact_desc *desc = payload;
++	const struct epic_service_call *call = NULL;
++	struct afk_compact_cmd *pending, *match = NULL;
++	unsigned long flags;
++	size_t copy_size;
++
++	if (payload_size < sizeof(*desc)) {
++		dev_err(ep->dcp->dev,
++			"AFK[ep:%02x]: compact reply is missing its descriptor\n",
++			ep->endpoint);
++		return;
++	}
++
++	if (payload_size >= sizeof(*desc) + sizeof(*call)) {
++		call = (const void *)(desc + 1);
++		if (le32_to_cpu(call->magic) != EPIC_SERVICE_CALL_MAGIC)
++			call = NULL;
++	}
++
++	spin_lock_irqsave(&ep->lock, flags);
++	list_for_each_entry(pending, &ep->compact_cmds, node) {
++		if (pending->channel != channel || pending->type != type)
++			continue;
++		if (pending->request_status != le32_to_cpu(desc->status))
++			continue;
++		if (pending->service_call &&
++		    (!call || pending->group != le16_to_cpu(call->group) ||
++		     pending->command != le32_to_cpu(call->command)))
++			continue;
++		match = pending;
++		break;
++	}
++	if (!match) {
++		spin_unlock_irqrestore(&ep->lock, flags);
++		dev_warn(ep->dcp->dev,
++			 "AFK[ep:%02x]: unexpected compact reply %02x on interface %u\n",
++			 ep->endpoint, type, channel);
++		return;
++	}
++
++	list_del_init(&match->node);
++	copy_size = min(match->output_len, payload_size - sizeof(*desc));
++	if (copy_size && match->output)
++		memcpy(match->output, desc + 1, copy_size);
++	match->retcode = le32_to_cpu(desc->status);
++	match->status = 0;
++	complete(&match->done);
++	spin_unlock_irqrestore(&ep->lock, flags);
++}
++
++static void afk_recv_handle_compact_call(struct apple_dcp_afkep *ep,
++					 u16 channel, const void *payload,
++					 size_t payload_size)
++{
++	const struct epic_compact_desc *request_desc = payload;
++	const struct epic_service_call *call;
++	struct epic_compact_desc *reply_desc;
++	struct epic_service_call *reply_call;
++	struct apple_epic_service *service;
++	void *reply;
++	size_t inner_size, call_size;
++	int ret;
++
++	if (payload_size < sizeof(*request_desc) + sizeof(*call))
++		return;
++
++	call = payload + sizeof(*request_desc);
++	inner_size = payload_size - sizeof(*request_desc);
++	call_size = le32_to_cpu(call->data_len);
++	if (le32_to_cpu(call->magic) != EPIC_SERVICE_CALL_MAGIC ||
++	    inner_size < sizeof(*call) + call_size) {
++		dev_err(ep->dcp->dev,
++			"AFK[ep:%02x]: malformed compact service call on interface %u\n",
++			ep->endpoint, channel);
++		return;
++	}
++
++	if (compact_trace)
++		dev_info(ep->dcp->dev,
++			 "AFK-COMPACT call ep=%02x intf=%u group=%u command=%u status=%#x size=%zu in=%*phN\n",
++			 ep->endpoint, channel, le16_to_cpu(call->group),
++			 le32_to_cpu(call->command),
++			 le32_to_cpu(request_desc->status), call_size,
++			 min_t(int, call_size, 64), call + 1);
++
++	reply = kzalloc(payload_size, GFP_KERNEL);
++	if (!reply)
++		return;
++	reply_desc = reply;
++	reply_desc->status = request_desc->status;
++	reply_call = reply + sizeof(*reply_desc);
++	memcpy(reply_call, call, sizeof(*call));
++
++	service = afk_epic_find_service(ep, channel);
++	if (!service || !service->ops->call) {
++		ret = -ENOSYS;
++		dev_warn(ep->dcp->dev,
++			 "AFK[ep:%02x]: no handler for compact service %u call %u:%u\n",
++			 ep->endpoint, channel, le16_to_cpu(call->group),
++			 le32_to_cpu(call->command));
++	} else {
++		ret = service->ops->call(service, le32_to_cpu(call->command),
++					call + 1, call_size, reply_call + 1,
++					call_size);
++	}
++	if (ret)
++		reply_desc->status = cpu_to_le32(ret);
++	if (compact_trace)
++		dev_info(ep->dcp->dev,
++			 "AFK-COMPACT reply ep=%02x intf=%u group=%u command=%u ret=%d status=%#x size=%zu out=%*phN\n",
++			 ep->endpoint, channel, le16_to_cpu(call->group),
++			 le32_to_cpu(call->command), ret,
++			 le32_to_cpu(reply_desc->status), call_size,
++			 min_t(int, call_size, 64), reply_call + 1);
++
++	ret = afk_send_compact(ep, channel, EPIC_SUBTYPE_STD_SERVICE, 2,
++			       reply, payload_size, payload_size);
++	if (ret)
++		dev_err(ep->dcp->dev,
++			"AFK[ep:%02x]: failed to reply to compact service call: %d\n",
++			ep->endpoint, ret);
++	kfree(reply);
++}
++
++static bool afk_recv_handle_compact(struct apple_dcp_afkep *ep, u32 channel,
++				    u32 type, const void *data,
++				    size_t data_size)
++{
++	const struct epic_compact_hdr *hdr = data;
++	const struct epic_compact_sub_hdr *sub;
++	struct apple_epic_service *service;
++	const void *payload;
++	size_t payload_size;
++	u16 intf_id;
++
++	if (channel || type ||
++	    data_size < sizeof(*hdr) + sizeof(*sub))
++		return false;
++	sub = data + sizeof(*hdr);
++	if (le32_to_cpu(hdr->length) !=
++	    data_size - offsetof(struct epic_compact_hdr, timestamp))
++		return false;
++
++	ep->compact = true;
++	intf_id = le16_to_cpu(hdr->intf_id);
++	payload = sub + 1;
++	payload_size = data_size - sizeof(*hdr) - sizeof(*sub);
++
++	if (sub->category == 0 && sub->type == 0x11) {
++		afk_recv_handle_compact_init(ep, intf_id, payload, payload_size);
++		return true;
++	}
++	if (sub->category == 1 && sub->type == EPIC_SUBTYPE_STD_SERVICE) {
++		afk_recv_handle_compact_call(ep, intf_id, payload, payload_size);
++		return true;
++	}
++	if (sub->category == 2) {
++		afk_recv_handle_compact_reply(ep, intf_id, sub->type, payload,
++					      payload_size);
++		return true;
++	}
++	if (sub->category == 0 && sub->type == EPIC_SUBTYPE_STD_SERVICE) {
++		service = afk_epic_find_service(ep, intf_id);
++		if (payload_size >= sizeof(struct epic_compact_desc)) {
++			payload += sizeof(struct epic_compact_desc);
++			payload_size -= sizeof(struct epic_compact_desc);
++		}
++		if (compact_trace) {
++			dev_info(ep->dcp->dev,
++				 "AFK-COMPACT report ep=%02x intf=%u service=%s size=%zu data=%*phN\n",
++				 ep->endpoint, intf_id,
++				 service ? service->ops->name : "<missing>",
++				 payload_size, min_t(int, payload_size, 64),
++				 payload);
++			if (payload_size > 64)
++				dev_info(ep->dcp->dev,
++					 "AFK-COMPACT report-tail ep=%02x intf=%u data=%*phN\n",
++					 ep->endpoint, intf_id,
++					 min_t(int, payload_size - 64, 64),
++					 payload + 64);
++		}
++		if (service && service->ops->report) {
++			service->ops->report(service, EPIC_SUBTYPE_STD_SERVICE,
++					     payload, payload_size);
++		}
++		return true;
++	}
++	if (sub->category == 0) {
++		service = afk_epic_find_service(ep, intf_id);
++		if (compact_trace)
++			dev_info(ep->dcp->dev,
++				 "AFK-COMPACT notification ep=%02x intf=%u service=%s type=%02x size=%zu data=%*phN\n",
++				 ep->endpoint, intf_id,
++				 service ? service->ops->name : "<missing>",
++				 sub->type, payload_size,
++				 min_t(int, payload_size, 64), payload);
++		if (service && service->ops->report)
++			service->ops->report(service, sub->type, payload,
++					     payload_size);
++		return true;
++	}
++
++	dev_dbg(ep->dcp->dev,
++		"AFK[ep:%02x]: unhandled compact message %02x:%02x on interface %u\n",
++		ep->endpoint, sub->category, sub->type, intf_id);
++	return true;
++}
++
+ static void afk_recv_handle_teardown(struct apple_dcp_afkep *ep, u32 channel)
+ {
+ 	struct apple_epic_service *service;
+@@ -512,18 +1043,24 @@ static void afk_recv_handle(struct apple_dcp_afkep *ep, u32 channel, u32 type,
+ 			    u8 *data, size_t data_size)
+ {
+ 	struct apple_epic_service *service;
+-	struct epic_hdr *ehdr = (struct epic_hdr *)data;
+-	struct epic_sub_hdr *eshdr =
+-		(struct epic_sub_hdr *)(data + sizeof(*ehdr));
+-	u16 subtype = le16_to_cpu(eshdr->type);
+-	u8 *payload = data + sizeof(*ehdr) + sizeof(*eshdr);
++	struct epic_hdr *ehdr;
++	struct epic_sub_hdr *eshdr;
++	u16 subtype;
++	u8 *payload;
+ 	size_t payload_size;
+ 
++	if (afk_recv_handle_compact(ep, channel, type, data, data_size))
++		return;
++
++	ehdr = (struct epic_hdr *)data;
++	eshdr = (struct epic_sub_hdr *)(data + sizeof(*ehdr));
+ 	if (data_size < sizeof(*ehdr) + sizeof(*eshdr)) {
+ 		dev_err(ep->dcp->dev, "AFK[ep:%02x]: payload too small: %lx\n",
+ 			ep->endpoint, data_size);
+ 		return;
+ 	}
++	subtype = le16_to_cpu(eshdr->type);
++	payload = data + sizeof(*ehdr) + sizeof(*eshdr);
+ 	payload_size = data_size - sizeof(*ehdr) - sizeof(*eshdr);
+ 
+ 	trace_afk_recv_handle(ep, channel, type, data_size, ehdr, eshdr);
+@@ -596,8 +1133,8 @@ static bool afk_recv(struct apple_dcp_afkep *ep)
+ 		return false;
+ 	}
+ 
+-	rptr = le32_to_cpu(ep->rxbfr.hdr->rptr);
+-	wptr = le32_to_cpu(ep->rxbfr.hdr->wptr);
++	rptr = le32_to_cpu(READ_ONCE(*ep->rxbfr.rptr));
++	wptr = le32_to_cpu(READ_ONCE(*ep->rxbfr.wptr));
+ 	trace_afk_recv_rwptr_pre(ep, rptr, wptr);
+ 
+ 	if (rptr == wptr)
+@@ -642,7 +1179,7 @@ static bool afk_recv(struct apple_dcp_afkep *ep)
+ 			return false;
+ 		}
+ 
+-		ep->rxbfr.hdr->rptr = cpu_to_le32(rptr);
++		WRITE_ONCE(*ep->rxbfr.rptr, cpu_to_le32(rptr));
+ 	}
+ 
+ 	if (rptr + size + sizeof(*hdr) > ep->rxbfr.bufsz) {
+@@ -655,7 +1192,7 @@ static bool afk_recv(struct apple_dcp_afkep *ep)
+ 	channel = le32_to_cpu(hdr->channel);
+ 	type = le32_to_cpu(hdr->type);
+ 
+-	rptr = ALIGN(rptr + sizeof(*hdr) + size, 1 << BLOCK_SHIFT);
++	rptr = ALIGN(rptr + sizeof(*hdr) + size, ep->rxbfr.block_size);
+ 	if (WARN_ON(rptr > ep->rxbfr.bufsz))
+ 		rptr = 0;
+ 	if (rptr == ep->rxbfr.bufsz)
+@@ -663,7 +1200,7 @@ static bool afk_recv(struct apple_dcp_afkep *ep)
+ 
+ 	dma_mb();
+ 
+-	ep->rxbfr.hdr->rptr = cpu_to_le32(rptr);
++	WRITE_ONCE(*ep->rxbfr.rptr, cpu_to_le32(rptr));
+ 	trace_afk_recv_rwptr_post(ep, rptr, wptr);
+ 
+ 	/*
+@@ -755,8 +1292,8 @@ int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
+ 	spin_lock_irqsave(&ep->lock, flags);
+ 
+ 	dma_rmb();
+-	rptr = le32_to_cpu(ep->txbfr.hdr->rptr);
+-	wptr = le32_to_cpu(ep->txbfr.hdr->wptr);
++	rptr = le32_to_cpu(READ_ONCE(*ep->txbfr.rptr));
++	wptr = le32_to_cpu(READ_ONCE(*ep->txbfr.wptr));
+ 	trace_afk_send_rwptr_pre(ep, rptr, wptr);
+ 	total_epic_size = sizeof(*ehdr) + sizeof(*eshdr) + payload_len;
+ 	total_size = sizeof(*hdr) + total_epic_size;
+@@ -869,12 +1406,12 @@ int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
+ 
+ 	memcpy(ep->txbfr.buf + wptr, payload, payload_len);
+ 	wptr += payload_len;
+-	wptr = ALIGN(wptr, 1 << BLOCK_SHIFT);
++	wptr = ALIGN(wptr, ep->txbfr.block_size);
+ 	if (wptr == ep->txbfr.bufsz)
+ 		wptr = 0;
+ 	trace_afk_send_rwptr_post(ep, rptr, wptr);
+ 
+-	ep->txbfr.hdr->wptr = cpu_to_le32(wptr);
++	WRITE_ONCE(*ep->txbfr.wptr, cpu_to_le32(wptr));
+ 	afk_send(ep, FIELD_PREP(RBEP_TYPE, RBEP_SEND) |
+ 			     FIELD_PREP(SEND_WPTR, wptr));
+ 	ret = 0;
+@@ -884,6 +1421,85 @@ int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
+ 	return ret;
+ }
+ 
++static int afk_send_compact_command(struct apple_epic_service *service, u8 type,
++				    const void *payload, size_t payload_len,
++				    void *output, size_t output_len,
++				    u32 request_status, u32 *retcode,
++				    unsigned long timeout)
++{
++	struct apple_dcp_afkep *ep = service->ep;
++	const struct epic_service_call *call = payload;
++	struct afk_compact_cmd pending;
++	struct epic_compact_desc *desc;
++	unsigned long flags;
++	void *wrapped;
++	size_t wire_size = max(payload_len, output_len);
++	unsigned long waited;
++	int ret;
++
++	wrapped = kzalloc(sizeof(*desc) + wire_size, GFP_KERNEL);
++	if (!wrapped)
++		return -ENOMEM;
++	desc = wrapped;
++	desc->status = cpu_to_le32(request_status);
++	desc->length = cpu_to_le32(wire_size);
++	if (payload_len)
++		memcpy(desc + 1, payload, payload_len);
++
++	memset(&pending, 0, sizeof(pending));
++	INIT_LIST_HEAD(&pending.node);
++	init_completion(&pending.done);
++	pending.channel = service->channel;
++	pending.type = type;
++	pending.request_status = request_status;
++	pending.output = output;
++	pending.output_len = output_len;
++	pending.status = -EINPROGRESS;
++	if (payload_len >= sizeof(*call) &&
++	    le32_to_cpu(call->magic) == EPIC_SERVICE_CALL_MAGIC) {
++		pending.service_call = true;
++		pending.group = le16_to_cpu(call->group);
++		pending.command = le32_to_cpu(call->command);
++	}
++
++	spin_lock_irqsave(&ep->lock, flags);
++	if (ep->compact_shutting_down) {
++		spin_unlock_irqrestore(&ep->lock, flags);
++		ret = -ESHUTDOWN;
++		goto out;
++	}
++	list_add_tail(&pending.node, &ep->compact_cmds);
++	spin_unlock_irqrestore(&ep->lock, flags);
++
++	ret = afk_send_compact(ep, service->channel, type, 1, wrapped,
++			       sizeof(*desc) + payload_len,
++			       sizeof(*desc) + wire_size);
++	if (ret)
++		goto remove_pending;
++
++	waited = wait_for_completion_timeout(&pending.done, timeout);
++	spin_lock_irqsave(&ep->lock, flags);
++	if (!waited && !list_empty(&pending.node)) {
++		list_del_init(&pending.node);
++		pending.status = -ETIMEDOUT;
++	}
++	ret = pending.status;
++	if (retcode)
++		*retcode = pending.retcode;
++	spin_unlock_irqrestore(&ep->lock, flags);
++	goto out;
++
++remove_pending:
++	spin_lock_irqsave(&ep->lock, flags);
++	if (!list_empty(&pending.node))
++		list_del_init(&pending.node);
++	pending.status = ret;
++	spin_unlock_irqrestore(&ep->lock, flags);
++out:
++	kfree(wrapped);
++	return ret;
++}
++
+ int afk_send_command(struct apple_epic_service *service, u8 type,
+ 		     const void *payload, size_t payload_len, void *output,
+ 		     size_t output_len, u32 *retcode)
+@@ -897,6 +1513,12 @@ int afk_send_command(struct apple_epic_service *service, u8 type,
+ 	struct apple_dcp_afkep *ep = service->ep;
+ 	DECLARE_COMPLETION_ONSTACK(completion);
+ 
++	if (ep->compact)
++		return afk_send_compact_command(service, type, payload,
++						payload_len, output, output_len,
++						afk_compact_next_status(service),
++						retcode, msecs_to_jiffies(5000));
++
+ 	rxbuf = dma_alloc_coherent(ep->dcp->dev, output_len, &rxbuf_dma,
+ 				   GFP_KERNEL);
+ 	if (!rxbuf)
+@@ -984,16 +1606,18 @@ int afk_send_command(struct apple_epic_service *service, u8 type,
+ 	return ret;
+ }
+ 
+-int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
+-		     const void *data, size_t data_len, size_t data_pad,
+-		     void *output, size_t output_len, size_t output_pad)
++static int __afk_service_call(struct apple_epic_service *service, u16 group,
++			      u32 command, const void *data, size_t data_len,
++			      size_t data_pad, void *output, size_t output_len,
++			      size_t output_pad, u32 *wire_status,
++			      unsigned long timeout)
+ {
+ 	struct epic_service_call *call;
+ 	void *bfr;
+ 	size_t bfr_len = max(data_len + data_pad, output_len + output_pad) +
+ 			 sizeof(*call);
+ 	int ret;
+-	u32 retcode;
++	u32 request_status = 0, retcode = 0;
+ 	u32 retlen;
+ 
+ 	bfr = kzalloc(bfr_len, GFP_KERNEL);
+@@ -1010,11 +1634,26 @@ int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
+ 
+ 	memcpy(bfr + sizeof(*call), data, data_len);
+ 
+-	ret = afk_send_command(service, EPIC_SUBTYPE_STD_SERVICE, bfr, bfr_len,
+-			       bfr, bfr_len, &retcode);
++	if (service->ep->compact) {
++		request_status = wire_status ? *wire_status :
++			afk_compact_next_status(service);
++		ret = afk_send_compact_command(service,
++					       EPIC_SUBTYPE_STD_SERVICE,
++					       bfr, bfr_len, bfr, bfr_len,
++					       request_status, &retcode, timeout);
++	} else {
++		ret = afk_send_command(service, EPIC_SUBTYPE_STD_SERVICE, bfr,
++				       bfr_len, bfr, bfr_len, &retcode);
++	}
+ 	if (ret)
+ 		goto out;
+-	if (retcode) {
++	if (wire_status)
++		*wire_status = retcode;
++	if (service->ep->compact && retcode != request_status) {
++		ret = -EIO;
++		goto out;
++	}
++	if (!service->ep->compact && retcode) {
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+@@ -1038,6 +1677,29 @@ int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
+ 	return ret;
+ }
+ 
++int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
++		     const void *data, size_t data_len, size_t data_pad,
++		     void *output, size_t output_len, size_t output_pad)
++{
++	return __afk_service_call(service, group, command, data, data_len,
++				  data_pad, output, output_len, output_pad,
++				  NULL, msecs_to_jiffies(5000));
++}
++
++int afk_service_call_status(struct apple_epic_service *service, u16 group,
++			    u32 command, const void *data, size_t data_len,
++			    size_t data_pad, void *output, size_t output_len,
++			    size_t output_pad, u32 *status,
++			    unsigned long timeout)
++{
++	if (!service->ep->compact)
++		return -EOPNOTSUPP;
++
++	return __afk_service_call(service, group, command, data, data_len,
++				  data_pad, output, output_len, output_pad,
++				  status, timeout);
++}
++
+ #if IS_ENABLED(CONFIG_DRM_APPLE_DEBUG)
+ 
+ #define AFK_DEBUGFS_MAX_REPLY 8192
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index a339c00a2a01..4582513dd66e 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/completion.h>
+ #include <linux/kconfig.h>
++#include <linux/list.h>
+ #include <linux/types.h>
+ 
+ #include "dcp.h"
+@@ -38,6 +39,8 @@ struct epic_cmd_info {
+ struct apple_epic_service {
+ 	const struct apple_epic_service_ops *ops;
+ 	struct apple_dcp_afkep *ep;
++	char name[33];
++	s64 unit;
+ 
+ 	struct epic_cmd_info cmds[MAX_PENDING_CMDS];
+ 	DECLARE_BITMAP(cmd_map, MAX_PENDING_CMDS);
+@@ -47,6 +50,8 @@ struct apple_epic_service {
+ 	u32 channel;
+ 	bool enabled;
+ 	bool torndown;
++	bool defer_start;
++	bool started;
+ 
+ 	void *cookie;
+ 
+@@ -73,12 +78,7 @@ struct apple_epic_service_ops {
+ 
+ struct afk_ringbuffer_header {
+ 	__le32 bufsz;
+-	u32 unk;
+-	u32 _pad1[14];
+-	__le32 rptr;
+-	u32 _pad2[15];
+-	__le32 wptr;
+-	u32 _pad3[15];
++	__le32 unk;
+ };
+ 
+ struct afk_qe {
+@@ -130,6 +130,27 @@ struct epic_service_call {
+ } __attribute__((packed));
+ static_assert(sizeof(struct epic_service_call) == 64);
+ 
++struct epic_compact_hdr {
++	u8 seq;
++	u8 flags;
++	__le16 intf_id;
++	__le32 length;
++	__le64 timestamp;
++} __packed;
++
++struct epic_compact_sub_hdr {
++	u8 type;
++	u8 category;
++	u8 unk;
++	u8 flags;
++	__le32 reserved;
++} __packed;
++
++struct epic_compact_desc {
++	__le32 status;
++	__le32 length;
++} __packed;
++
+ enum epic_type {
+ 	EPIC_TYPE_NOTIFY = 0,
+ 	EPIC_TYPE_COMMAND = 3,
+@@ -145,6 +166,7 @@ enum epic_category {
+ };
+ 
+ enum epic_subtype {
++	EPIC_SUBTYPE_NOTIFY = 0x14,
+ 	EPIC_SUBTYPE_ANNOUNCE = 0x30,
+ 	EPIC_SUBTYPE_TEARDOWN = 0x32,
+ 	EPIC_SUBTYPE_STD_SERVICE = 0xc0,
+@@ -153,9 +175,11 @@ enum epic_subtype {
+ struct afk_ringbuffer {
+ 	bool ready;
+ 	struct afk_ringbuffer_header *hdr;
+-	u32 rptr;
++	__le32 *rptr;
++	__le32 *wptr;
+ 	void *buf;
+ 	size_t bufsz;
++	size_t block_size;
+ };
+ 
+ struct apple_dcp_afkep {
+@@ -177,6 +201,10 @@ struct apple_dcp_afkep {
+ 
+ 	spinlock_t lock;
+ 	u16 qe_seq;
++	bool compact;
++
++	struct list_head compact_cmds;
++	bool compact_shutting_down;
+ 
+ 	const struct apple_epic_service_ops *ops;
+ 	struct apple_epic_service services[AFK_MAX_CHANNEL];
+@@ -190,6 +218,8 @@ struct apple_dcp_afkep {
+ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
+ 				 const struct apple_epic_service_ops *ops);
+ int afk_start(struct apple_dcp_afkep *ep);
++int afk_start_service(struct apple_epic_service *service);
++void afk_cancel_commands(struct apple_dcp_afkep *ep);
+ void afk_shutdown(struct apple_dcp_afkep *ep);
+ int afk_receive_message(struct apple_dcp_afkep *ep, u64 message);
+ int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
+@@ -201,4 +231,9 @@ int afk_send_command(struct apple_epic_service *service, u8 type,
+ int afk_service_call(struct apple_epic_service *service, u16 group, u32 command,
+ 		     const void *data, size_t data_len, size_t data_pad,
+ 		     void *output, size_t output_len, size_t output_pad);
++int afk_service_call_status(struct apple_epic_service *service, u16 group,
++			    u32 command, const void *data, size_t data_len,
++			    size_t data_pad, void *output, size_t output_len,
++			    size_t output_pad, u32 *status,
++			    unsigned long timeout);
+ #endif
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index d8386f3e1f54..028c45201169 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -10,13 +10,21 @@
+ #include <linux/aperture.h>
+ #include <linux/component.h>
+ #include <linux/delay.h>
++#include <linux/dma-direct.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/jiffies.h>
++#include <linux/mm.h>
+ #include <linux/module.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
+ #include <linux/of_platform.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/set_memory.h>
++#include <linux/scatterlist.h>
++
++#include <asm/cacheflush.h>
++#include <asm/tlbflush.h>
+ 
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
+@@ -34,6 +42,7 @@
+ #include <drm/drm_modeset_helper.h>
+ #include <drm/drm_module.h>
+ #include <drm/drm_of.h>
++#include <drm/drm_print.h>
+ #include <drm/drm_probe_helper.h>
+ #include <drm/drm_vblank.h>
+ #include <drm/drm_fixed.h>
+@@ -48,25 +57,258 @@
+ 
+ struct apple_drm_private {
+ 	struct drm_device drm;
++	struct resource scanout_pool;
++	bool scanout_pool_attached;
++};
++
++struct apple_drm_gem_object {
++	struct drm_gem_dma_object dma;
++	struct sg_table *scanout_sgt;
++	dma_addr_t pool_dma_addr;
++	bool pool_fixed_iova;
+ };
+ 
++static void apple_drm_gem_restore_direct_map(struct apple_drm_gem_object *obj)
++{
++	struct scatterlist *sg;
++	unsigned int i;
++
++	if (!obj->scanout_sgt)
++		return;
++
++	for_each_sg(obj->scanout_sgt->sgl, sg,
++		    obj->scanout_sgt->orig_nents, i) {
++		struct page *page = sg_page(sg);
++		unsigned int nr_pages = PAGE_ALIGN(sg->offset + sg->length) >> PAGE_SHIFT;
++		unsigned int j;
++
++		for (j = 0; j < nr_pages; j++)
++			set_direct_map_default_noflush(page + j);
++	}
++
++	flush_tlb_all();
++	sg_free_table(obj->scanout_sgt);
++	kfree(obj->scanout_sgt);
++	obj->scanout_sgt = NULL;
++}
++
++static void apple_drm_gem_free(struct drm_gem_object *gem_obj)
++{
++	struct apple_drm_gem_object *obj =
++		container_of(to_drm_gem_dma_obj(gem_obj),
++			     struct apple_drm_gem_object, dma);
++
++	if (obj->pool_fixed_iova) {
++		obj->dma.dma_addr = obj->pool_dma_addr;
++		obj->pool_fixed_iova = false;
++	}
++
++	apple_drm_gem_restore_direct_map(obj);
++	drm_gem_dma_free(&obj->dma);
++}
++
++static void apple_drm_gem_print_info(struct drm_printer *p,
++				     unsigned int indent,
++				     const struct drm_gem_object *gem_obj)
++{
++	const struct apple_drm_gem_object *obj =
++		container_of(to_drm_gem_dma_obj(gem_obj),
++			     struct apple_drm_gem_object, dma);
++	phys_addr_t run_start = 0, run_end = 0;
++	struct scatterlist *sg;
++	unsigned int i;
++
++	drm_gem_dma_object_print_info(p, indent, gem_obj);
++	if (!obj->scanout_sgt)
++		return;
++
++	drm_printf_indent(p, indent, "scanout physical backing:\n");
++	for_each_sg(obj->scanout_sgt->sgl, sg,
++		    obj->scanout_sgt->orig_nents, i) {
++		phys_addr_t start = sg_phys(sg);
++		phys_addr_t end = start + sg->length;
++
++		if (!run_end) {
++			run_start = start;
++			run_end = end;
++			continue;
++		}
++		if (start == run_end) {
++			run_end = end;
++			continue;
++		}
++
++		drm_printf_indent(p, indent + 1, "%pa..%pa (%pa bytes)\n",
++				  &run_start, &run_end,
++				  &(phys_addr_t){ run_end - run_start });
++		run_start = start;
++		run_end = end;
++	}
++	if (run_end)
++		drm_printf_indent(p, indent + 1, "%pa..%pa (%pa bytes)\n",
++				  &run_start, &run_end,
++				  &(phys_addr_t){ run_end - run_start });
++}
++
++static const struct drm_gem_object_funcs apple_drm_gem_funcs = {
++	.free = apple_drm_gem_free,
++	.print_info = apple_drm_gem_print_info,
++	.get_sg_table = drm_gem_dma_object_get_sg_table,
++	.vmap = drm_gem_dma_object_vmap,
++	.mmap = drm_gem_dma_object_mmap,
++	.vm_ops = &drm_gem_dma_vm_ops,
++};
++
++static struct drm_gem_object *
++apple_drm_gem_create_object(struct drm_device *drm, size_t size)
++{
++	struct apple_drm_gem_object *obj;
++
++	obj = kzalloc_obj(*obj);
++	if (!obj)
++		return ERR_PTR(-ENOMEM);
++
++	obj->dma.base.funcs = &apple_drm_gem_funcs;
++	return &obj->dma.base;
++}
++
++static int apple_drm_gem_remove_direct_map(struct drm_gem_dma_object *dma_obj)
++{
++	struct apple_drm_gem_object *obj =
++		container_of(dma_obj, struct apple_drm_gem_object, dma);
++	struct scatterlist *sg;
++	unsigned int i;
++	int ret = 0;
++
++	if (!can_set_direct_map())
++		return -EOPNOTSUPP;
++
++	obj->scanout_sgt = drm_gem_dma_get_sg_table(dma_obj);
++	if (IS_ERR(obj->scanout_sgt)) {
++		ret = PTR_ERR(obj->scanout_sgt);
++		obj->scanout_sgt = NULL;
++		return ret;
++	}
++
++	for_each_sg(obj->scanout_sgt->sgl, sg,
++		    obj->scanout_sgt->orig_nents, i) {
++		struct page *page = sg_page(sg);
++		unsigned int nr_pages = PAGE_ALIGN(sg->offset + sg->length) >> PAGE_SHIFT;
++		unsigned int j;
++
++		for (j = 0; j < nr_pages; j++) {
++			unsigned long start = (unsigned long)page_address(page + j);
++
++			/* dma_alloc_wc() cleans the allocator's WB alias, but a clean
++			 * can leave an AMCC cache-directory entry behind.  DCP scanout
++			 * is realtime, so retire the entry before removing that alias. */
++			dcache_clean_inval_poc(start, start + PAGE_SIZE);
++			ret = set_direct_map_invalid_noflush(page + j);
++			if (ret)
++				goto err_restore;
++		}
++	}
++
++	flush_tlb_all();
++	return 0;
++
++err_restore:
++	apple_drm_gem_restore_direct_map(obj);
++	return ret;
++}
++
++static int apple_drm_gem_map_nomap_pool(struct drm_gem_dma_object *dma_obj)
++{
++	struct apple_drm_gem_object *obj =
++		container_of(dma_obj, struct apple_drm_gem_object, dma);
++	struct apple_drm_private *apple =
++		container_of(dma_obj->base.dev, struct apple_drm_private, drm);
++	struct device *dev = dma_obj->base.dev->dev;
++	dma_addr_t pool_dma = dma_obj->dma_addr;
++	phys_addr_t phys = dma_to_phys(dev, pool_dma);
++	dma_addr_t iova;
++	u64 iova_base;
++	resource_size_t size = dma_obj->base.size;
++
++	if (!apple->scanout_pool_attached ||
++	    phys < apple->scanout_pool.start ||
++	    size > resource_size(&apple->scanout_pool) ||
++	    phys - apple->scanout_pool.start >
++		resource_size(&apple->scanout_pool) - size) {
++		dev_err(dev,
++			"scanout allocation %pa+%pa is outside no-map pool %pr\n",
++			&phys, &size, &apple->scanout_pool);
++		return -ERANGE;
++	}
++
++	if (of_property_read_u64(dev->of_node, "apple,scanout-iova-base",
++				 &iova_base))
++		return -EINVAL;
++
++	/* m1n1 installs this entire mapping before Linux and leaves the locked
++	 * realtime DART hierarchy untouched. Selecting a buffer is therefore an
++	 * offset calculation, not a Linux page-table update. */
++	iova = iova_base + (phys - apple->scanout_pool.start);
++
++	obj->pool_dma_addr = pool_dma;
++	obj->pool_fixed_iova = true;
++	dma_obj->dma_addr = iova;
++	dev_info(dev, "pre-mapped no-map scanout buffer: phys %pa -> iova %pad (%zu bytes)\n",
++		 &phys, &iova, dma_obj->base.size);
++	return 0;
++}
++
+ DEFINE_DRM_GEM_DMA_FOPS(apple_fops);
+ 
+ #define DART_PAGE_SIZE 16384
+ 
++static struct drm_gem_dma_object *
++apple_drm_gem_create_scanout(struct drm_device *drm, size_t size)
++{
++	struct drm_gem_dma_object *dma_obj;
++	int ret;
++
++	dma_obj = drm_gem_dma_create(drm, round_up(size, DART_PAGE_SIZE));
++	if (IS_ERR(dma_obj))
++		return dma_obj;
++
++	if (of_property_read_bool(drm->dev->of_node,
++				  "apple,scanout-memory-is-nomap"))
++		ret = apple_drm_gem_map_nomap_pool(dma_obj);
++	else
++		ret = apple_drm_gem_remove_direct_map(dma_obj);
++	if (ret) {
++		drm_gem_object_put(&dma_obj->base);
++		return ERR_PTR(ret);
++	}
++
++	return dma_obj;
++}
++
+ static int apple_drm_gem_dumb_create(struct drm_file *file_priv,
+                             struct drm_device *drm,
+                             struct drm_mode_create_dumb *args)
+ {
++	struct drm_gem_dma_object *dma_obj;
++	int ret;
++
+         args->pitch = ALIGN(DIV_ROUND_UP(args->width * args->bpp, 8), 64);
+         args->size = round_up(args->pitch * args->height, DART_PAGE_SIZE);
+ 
+-	return drm_gem_dma_dumb_create_internal(file_priv, drm, args);
++	dma_obj = apple_drm_gem_create_scanout(drm, args->size);
++	if (IS_ERR(dma_obj))
++		return PTR_ERR(dma_obj);
++
++	ret = drm_gem_handle_create(file_priv, &dma_obj->base, &args->handle);
++
++	drm_gem_object_put(&dma_obj->base);
++	return ret;
+ }
+ 
+ static const struct drm_driver apple_drm_driver = {
+-	DRM_GEM_DMA_DRIVER_OPS_WITH_DUMB_CREATE(apple_drm_gem_dumb_create),
++	DRM_GEM_DMA_DRIVER_OPS_VMAP_WITH_DUMB_CREATE(apple_drm_gem_dumb_create),
+ 	DRM_FBDEV_DMA_DRIVER_OPS,
++	.gem_create_object	= apple_drm_gem_create_object,
+ 	.name			= DRIVER_NAME,
+ 	.desc			= DRIVER_DESC,
+ 	.major			= 1,
+@@ -272,36 +514,79 @@ static int apple_probe_per_dcp(struct device *dev,
+ 	struct apple_crtc *crtc;
+ 	struct apple_connector *connector;
+ 	struct apple_encoder *enc;
++	struct drm_plane *primary_plane = NULL;
+ 	struct drm_plane *planes[DCP_MAX_PLANES];
+ 	unsigned long *iomfb_surfaces = dcp_get_iomfb_surfaces(dcp);
++	u32 surface_order[DCP_MAX_PLANES];
++	DECLARE_BITMAP(ordered_surfaces, DCP_MAX_PLANES);
++	int surface_count;
++	int order_count;
+ 	int ret;
++	u32 primary_surface;
+ 	u32 surf;
+ 	int zpos = 0;
+ 	bool supports_l10r = !dcp_fw_compat_is_12_x(dcp);
+ 	enum drm_plane_type plane_type;
+ 
+-	for_each_set_bit(surf, iomfb_surfaces, DCP_MAX_PLANES) {
+-		plane_type = (zpos == 0) ? DRM_PLANE_TYPE_PRIMARY : DRM_PLANE_TYPE_OVERLAY;
++	surface_count = bitmap_weight(iomfb_surfaces, DCP_MAX_PLANES);
++	order_count = of_property_count_u32_elems(dcp->dev.of_node,
++						  "apple,iomfb-surface-order");
++	if (order_count >= 0) {
++		if (order_count != surface_count) {
++			dev_err(dev, "iomfb surface order has %d entries, expected %d\n",
++				order_count, surface_count);
++			return -EINVAL;
++		}
++		ret = of_property_read_u32_array(dcp->dev.of_node,
++						 "apple,iomfb-surface-order",
++						 surface_order, surface_count);
++		if (ret)
++			return ret;
++	} else {
++		for_each_set_bit(surf, iomfb_surfaces, DCP_MAX_PLANES)
++			surface_order[zpos++] = surf;
++	}
++	primary_surface = surface_order[0];
++	of_property_read_u32(dcp->dev.of_node, "apple,iomfb-primary-surface",
++			     &primary_surface);
++	if (primary_surface >= DCP_MAX_PLANES ||
++	    !test_bit(primary_surface, iomfb_surfaces)) {
++		dev_err(dev, "invalid primary iomfb surface %u\n",
++			primary_surface);
++		return -EINVAL;
++	}
++
++	bitmap_zero(ordered_surfaces, DCP_MAX_PLANES);
++	for (zpos = 0; zpos < surface_count; zpos++) {
++		surf = surface_order[zpos];
++		if (surf >= DCP_MAX_PLANES ||
++		    !test_bit(surf, iomfb_surfaces) ||
++		    test_and_set_bit(surf, ordered_surfaces)) {
++			dev_err(dev, "invalid iomfb surface %u at zpos %d\n",
++				surf, zpos);
++			return -EINVAL;
++		}
++
++		if (surf == primary_surface)
++			plane_type = DRM_PLANE_TYPE_PRIMARY;
++		else
++			plane_type = DRM_PLANE_TYPE_OVERLAY;
+ 		planes[zpos] = apple_plane_init(drm, 1U << num, surf,
+-						supports_l10r, plane_type);
++						supports_l10r,
++						plane_type);
+ 		if (IS_ERR(planes[zpos]))
+ 			return PTR_ERR(planes[zpos]);
+ 
+ 		ret = drm_plane_create_zpos_immutable_property(planes[zpos], zpos);
+ 		if (ret)
+ 			return ret;
+-
+-		zpos++;
++		if (plane_type == DRM_PLANE_TYPE_PRIMARY)
++			primary_plane = planes[zpos];
+ 	}
+ 
+-	/*
+-	 * Even though we have an overlay plane, we cannot expose it to legacy
+-	 * userspace for cursors as we cannot make the same guarantees as ye olde
+-	 * hardware cursor planes such userspace would expect us to. Modern userspace
+-	 * knows what to do with overlays.
+-	 */
+ 	crtc = kzalloc(sizeof(*crtc), GFP_KERNEL);
+-	ret = drm_crtc_init_with_planes(drm, &crtc->base, planes[0], NULL,
++	ret = drm_crtc_init_with_planes(drm, &crtc->base, primary_plane,
++					NULL,
+ 					&apple_crtc_funcs, NULL);
+ 	if (ret)
+ 		return ret;
+@@ -373,6 +658,35 @@ static int apple_get_fb_resource(struct device *dev, const char *name,
+ 	return ret;
+ }
+ 
++static int apple_get_scanout_pool_resource(struct device *dev,
++					    struct resource *pool_r)
++{
++	struct device_node *node;
++	int idx, ret = -ENODEV;
++
++	idx = of_property_match_string(dev->of_node, "memory-region-names",
++				       "scanout-pool");
++	if (idx < 0)
++		return idx;
++
++	node = of_parse_phandle(dev->of_node, "memory-region", idx);
++	if (!node)
++		return -ENODEV;
++
++	if (!of_device_is_available(node) ||
++	    !of_device_is_compatible(node, "shared-dma-pool") ||
++	    !of_property_read_bool(node, "no-map")) {
++		dev_err(dev, "scanout-pool must be an available no-map shared-dma-pool\n");
++		goto out_put;
++	}
++
++	ret = of_address_to_resource(node, 0, pool_r);
++
++out_put:
++	of_node_put(node);
++	return ret;
++}
++
+ static const struct of_device_id apple_dcp_id_tbl[] = {
+ 	{ .compatible = "apple,dcp" },
+ 	{ .compatible = "apple,dcpext" },
+@@ -408,11 +722,14 @@ static int apple_drm_init_dcp(struct device *dev)
+ 		if (ret)
+ 			continue;
+ 
+-		ret = dcp_start(dcp[num_dcp]);
++		/* apple_probe_per_dcp() has permanently allocated a CRTC and its
++		 * planes.  Count it even if firmware startup fails so later DCPs get
++		 * the CRTC index used by their possible_crtcs masks, and retain the
++		 * matching platform device in the readiness array. */
++		num_dcp++;
++		ret = dcp_start(dcp[num_dcp - 1]);
+ 		if (ret)
+ 			continue;
+-
+-		num_dcp++;
+ 	}
+ 
+ 	if (num_dcp < 1)
+@@ -447,6 +764,7 @@ static int apple_drm_init(struct device *dev)
+ 	struct apple_drm_private *apple;
+ 	struct resource fb_r;
+ 	resource_size_t fb_size;
++	bool use_nomap_pool;
+ 	int ret;
+ 
+ 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(42));
+@@ -463,19 +781,35 @@ static int apple_drm_init(struct device *dev)
+ 		return PTR_ERR(apple);
+ 
+ 	dev_set_drvdata(dev, apple);
++	use_nomap_pool = of_property_read_bool(dev->of_node,
++					       "apple,scanout-memory-is-nomap");
++	if (use_nomap_pool) {
++		ret = apple_get_scanout_pool_resource(dev, &apple->scanout_pool);
++		if (ret) {
++			dev_err(dev, "invalid scanout-pool reserved memory: %d\n", ret);
++			return ret;
++		}
++
++		ret = of_reserved_mem_device_init_by_name(dev, dev->of_node,
++							  "scanout-pool");
++		if (ret) {
++			dev_err(dev, "failed to attach scanout-pool: %d\n", ret);
++			return ret;
++		}
++		apple->scanout_pool_attached = true;
++		dev_info(dev, "using no-map scanout pool %pr\n",
++			 &apple->scanout_pool);
++	}
+ 
+ 	ret = component_bind_all(dev, apple);
+ 	if (ret)
+-		return ret;
++		goto err_release_rmem;
+ 
+ 	ret = drmm_mode_config_init(&apple->drm);
+ 	if (ret)
+ 		goto err_unbind;
+ 
+-	/*
+-	 * IOMFB::UPPipeDCP_H13P::verify_surfaces produces the error "plane
+-	 * requires a minimum of 32x32 for the source buffer" if smaller
+-	 */
++	/* DCP requires source buffers to be at least 32x32 pixels. */
+ 	apple->drm.mode_config.min_width = 32;
+ 	apple->drm.mode_config.min_height = 32;
+ 
+@@ -516,6 +850,11 @@ static int apple_drm_init(struct device *dev)
+ 
+ err_unbind:
+ 	component_unbind_all(dev, NULL);
++err_release_rmem:
++	if (apple->scanout_pool_attached) {
++		of_reserved_mem_device_release(dev);
++		apple->scanout_pool_attached = false;
++	}
+ 	return ret;
+ }
+ 
+@@ -527,6 +866,10 @@ static void apple_drm_uninit(struct device *dev)
+ 	drm_atomic_helper_shutdown(&apple->drm);
+ 
+ 	component_unbind_all(dev, NULL);
++	if (apple->scanout_pool_attached) {
++		of_reserved_mem_device_release(dev);
++		apple->scanout_pool_attached = false;
++	}
+ 
+ 	dev_set_drvdata(dev, NULL);
+ }
+diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
+index 0d3c752f62d5..0a0e59872dee 100644
+--- a/drivers/gpu/drm/apple/av.c
++++ b/drivers/gpu/drm/apple/av.c
+@@ -393,6 +393,7 @@ int avep_init(struct apple_dcp *dcp)
+ 		audiosrv_data->cmds = dcp_av_audio_cmds_v12_3;
+ 		break;
+ 	case DCP_FIRMWARE_V_13_5:
++	case DCP_FIRMWARE_V_26_6:
+ 		audiosrv_data->cmds = dcp_av_audio_cmds_v13_5;
+ 		break;
+ 	default:
+diff --git a/drivers/gpu/drm/apple/connector.c b/drivers/gpu/drm/apple/connector.c
+index 15b3664d8563..185212f9fea7 100644
+--- a/drivers/gpu/drm/apple/connector.c
++++ b/drivers/gpu/drm/apple/connector.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include "connector.h"
++#include "dcp.h"
+ 
+ #include "linux/err.h"
+ #include <linux/debugfs.h>
+@@ -79,6 +80,127 @@ CONNECTOR_DEBUGFS_ENTRY(timing, DCP_CHUNK_TIMING_ELELMENTS);
+ CONNECTOR_DEBUGFS_ENTRY(display_attribs, DCP_CHUNK_DISPLAY_ATTRIBUTES);
+ CONNECTOR_DEBUGFS_ENTRY(transport, DCP_CHUNK_TRANSPORT);
+ 
++static ssize_t dptx_connect_write(struct file *file, const char __user *buf,
++				  size_t len, loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++	int ret;
++
++	ret = dcp_dptx_connect_oob(apple_con->dcp, 0);
++	return ret ? ret : len;
++}
++
++static const struct file_operations dptx_connect_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_connect_write,
++	.llseek = noop_llseek,
++};
++
++static ssize_t dptx_disconnect_write(struct file *file,
++				     const char __user *buf, size_t len,
++				     loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++	int ret;
++
++	ret = dcp_dptx_disconnect_oob(apple_con->dcp, 0);
++	return ret ? ret : len;
++}
++
++static const struct file_operations dptx_disconnect_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_disconnect_write,
++	.llseek = noop_llseek,
++};
++
++static ssize_t dptx_mark_disconnected_write(struct file *file,
++					    const char __user *buf, size_t len,
++					    loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++
++	dcp_hotplug_mark_disconnected_oob(apple_con->dcp);
++	return len;
++}
++
++static const struct file_operations dptx_mark_disconnected_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_mark_disconnected_write,
++	.llseek = noop_llseek,
++};
++
++static ssize_t dptx_av_disconnect_write(struct file *file,
++					const char __user *buf, size_t len,
++					loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++
++	dcp_av_disconnect_oob(apple_con->dcp);
++	return len;
++}
++
++static const struct file_operations dptx_av_disconnect_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_av_disconnect_write,
++	.llseek = noop_llseek,
++};
++
++static ssize_t dptx_hpd_low_write(struct file *file, const char __user *buf,
++				  size_t len, loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++	int ret;
++
++	ret = dcp_dptx_set_hpd_oob(apple_con->dcp, 0, false);
++	return ret ? ret : len;
++}
++
++static const struct file_operations dptx_hpd_low_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_hpd_low_write,
++	.llseek = noop_llseek,
++};
++
++static ssize_t dptx_release_write(struct file *file, const char __user *buf,
++				  size_t len, loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++	int ret;
++
++	ret = dcp_dptx_release_oob(apple_con->dcp, 0);
++	return ret ? ret : len;
++}
++
++static const struct file_operations dptx_release_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_release_write,
++	.llseek = noop_llseek,
++};
++
++static ssize_t dptx_phy_activate_write(struct file *file,
++				       const char __user *buf, size_t len,
++				       loff_t *ppos)
++{
++	struct apple_connector *apple_con = file->private_data;
++	int ret;
++
++	ret = dcp_dptx_phy_activate_oob(apple_con->dcp);
++	return ret ? ret : len;
++}
++
++static const struct file_operations dptx_phy_activate_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = dptx_phy_activate_write,
++	.llseek = noop_llseek,
++};
++
+ static void dcp_afk_debugfs_root(struct platform_device *pdev, int ep, struct dentry *root)
+ {
+ #if IS_ENABLED(CONFIG_DRM_APPLE_DEBUG)
+@@ -115,6 +237,20 @@ void apple_connector_debugfs_init(struct drm_connector *connector, struct dentry
+ 	case DRM_MODE_CONNECTOR_DisplayPort:
+ 	case DRM_MODE_CONNECTOR_HDMIA:
+ 		dcp_afk_debugfs_root(apple_con->dcp, AV_ENDPOINT, root);
++		debugfs_create_file("dptx_connect", 0200, root, apple_con,
++				    &dptx_connect_fops);
++		debugfs_create_file("dptx_disconnect", 0200, root, apple_con,
++				    &dptx_disconnect_fops);
++		debugfs_create_file("dptx_mark_disconnected", 0200, root,
++				    apple_con, &dptx_mark_disconnected_fops);
++		debugfs_create_file("dptx_av_disconnect", 0200, root, apple_con,
++				    &dptx_av_disconnect_fops);
++		debugfs_create_file("dptx_hpd_low", 0200, root, apple_con,
++				    &dptx_hpd_low_fops);
++		debugfs_create_file("dptx_release", 0200, root, apple_con,
++				    &dptx_release_fops);
++		debugfs_create_file("dptx_phy_activate", 0200, root, apple_con,
++				    &dptx_phy_activate_fops);
+ 		break;
+ 	default:
+ 		break;
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 57832487d9a4..53827fb81cb3 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -18,6 +18,7 @@
+ #include "iomfb.h"
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "iomfb_v26_6.h"
+ #include "epic/dpavservep.h"
+ 
+ #define DCP_MAX_PLANES 4
+@@ -25,12 +26,15 @@
+ struct apple_dcp;
+ struct apple_dcp_afkep;
+ 
++extern bool dcp_disable_rt_bandwidth;
++
+ struct dcpav_service_epic;
+ 
+ enum dcp_firmware_version {
+ 	DCP_FIRMWARE_UNKNOWN,
+ 	DCP_FIRMWARE_V_12_3,
+ 	DCP_FIRMWARE_V_13_5,
++	DCP_FIRMWARE_V_26_6,
+ };
+ 
+ enum {
+@@ -38,10 +42,15 @@ enum {
+ 	TEST_ENDPOINT = 0x21,
+ 	DCP_EXPERT_ENDPOINT = 0x22,
+ 	DISP0_ENDPOINT = 0x23,
++	DPAVCTRL_ENDPOINT = 0x24,
++	EPIC25_ENDPOINT = 0x25,
++	DPSAC_ENDPOINT = 0x26,
++	DPDEV_ENDPOINT = 0x27,
+ 	DPAVSERV_ENDPOINT = 0x28,
+ 	AV_ENDPOINT = 0x29,
+ 	DPTX_ENDPOINT = 0x2a,
+ 	HDCP_ENDPOINT = 0x2b,
++	EPIC2C_ENDPOINT = 0x2c,
+ 	REMOTE_ALLOC_ENDPOINT = 0x2d,
+ 	IOMFB_ENDPOINT = 0x37,
+ };
+@@ -178,6 +187,7 @@ struct apple_dcp {
+ 	union {
+ 		struct dcp_swap_submit_req_v12_3 v12_3;
+ 		struct dcp_swap_submit_req_v13_3 v13_3;
++		struct dcp_swap_submit_req_v26_6_0 v26_6_0;
+ 	} swap;
+ 
+ 	/* swap id of the last completed swap */
+@@ -187,6 +197,13 @@ struct apple_dcp {
+ 	/* Current display mode */
+ 	bool during_modeset;
+ 	bool valid_mode;
++	/*
++	 * Diagnostic 26.6 external-hotplug path: the link can disappear while
++	 * IOMFB remains powered.  Remember that atomic_disable deliberately
++	 * skipped the firmware power-off sequence so atomic_enable does not send
++	 * a mismatched power-on sequence on reconnect.
++	 */
++	bool hotplug_keepalive;
+ 	bool use_timestamps;
+ 	struct dcp_set_digital_out_mode_req mode;
+ 
+@@ -239,6 +256,25 @@ struct apple_dcp {
+ 	struct completion systemep_done;
+ 
+ 	struct apple_dcp_afkep *ibootep;
++	struct apple_epic_service *iboot_service;
++	struct apple_dcp_afkep *dpavctrlep;
++	struct apple_dcp_afkep *dpdevep;
++	struct apple_epic_service *dpdev_service;
++	struct completion dpdev_ready;
++	struct apple_dcp_afkep *avauxep;
++	struct apple_dcp_afkep *dpsacep;
++	struct apple_dcp_afkep *remoteallocep;
++	struct apple_dcp_afkep *epicep2c;
++	struct apple_dcp_afkep *expertep;
++	struct apple_dcp_afkep *epicep25;
++	struct apple_dcp_afkep *hdcpep;
++	struct completion hdcp_ready;
++	struct apple_epic_service *hdcp_service[2];
++	u32 hdcp_teardown_interface;
++	bool hdcp_mprime_attempted;
++	struct completion dpavctrl_ready;
++	struct apple_epic_service *dpavctrl_av_controller[2];
++	struct apple_epic_service *dpavctrl_late_service;
+ 	struct apple_dcp_afkep *dcpavservep;
+ 	struct dcpavserv dcpavserv;
+ 
+@@ -268,6 +304,8 @@ struct apple_dcp {
+ 	int hdmi_hpd_irq;
+ };
+ 
++void *dcp_vmap_wc(phys_addr_t phys, size_t size, void **map_base);
++
+ void dcp_drm_crtc_page_flip(struct apple_dcp *dcp, ktime_t now);
+ 
+ int dcp_backlight_register(struct apple_dcp *dcp);
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 5529a277a193..7a0e3791834f 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -7,6 +7,7 @@
+ #include <linux/completion.h>
+ #include <linux/component.h>
+ #include <linux/delay.h>
++#include <linux/device.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/iommu.h>
+@@ -24,13 +25,16 @@
+ #include <linux/usb/typec_altmode.h>
+ #include <linux/usb/typec_dp.h>
+ #include <linux/usb/typec_mux.h>
++#include <linux/vmalloc.h>
+ #include <linux/workqueue.h>
+ 
+ #include <drm/drm_fb_dma_helper.h>
++#include <drm/drm_atomic_helper.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_framebuffer.h>
+ #include <drm/drm_module.h>
+ #include <drm/drm_probe_helper.h>
++#include <drm/drm_print.h>
+ #include <drm/drm_vblank.h>
+ 
+ #include "afk.h"
+@@ -54,6 +58,21 @@ bool hdmi_audio;
+ module_param(hdmi_audio, bool, 0644);
+ MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
+ 
++static bool enable_hdcp;
++module_param(enable_hdcp, bool, 0644);
++MODULE_PARM_DESC(enable_hdcp,
++		 "Enable experimental 26.6 HDCP endpoint support");
++
++static bool enable_dpavctrl;
++module_param(enable_dpavctrl, bool, 0644);
++MODULE_PARM_DESC(enable_dpavctrl,
++		 "Activate experimental 26.6 DPAV link-control services");
++
++bool dcp_disable_rt_bandwidth;
++module_param_named(disable_rt_bandwidth, dcp_disable_rt_bandwidth, bool, 0644);
++MODULE_PARM_DESC(disable_rt_bandwidth,
++		 "Return no Dashboard registers from the D003 RT-bandwidth callback");
++
+ static bool unstable_edid = true;
+ module_param(unstable_edid, bool, 0644);
+ MODULE_PARM_DESC(unstable_edid, "Enable unstable EDID retrival support");
+@@ -229,7 +248,7 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
+ 	case IOMFB_ENDPOINT:
+ 		return iomfb_recv_msg(dcp, message);
+ 	case AV_ENDPOINT:
+-		afk_receive_message(dcp->avep, message);
++		afk_receive_message(dcp->avauxep ?: dcp->avep, message);
+ 		return;
+ 	case SYSTEM_ENDPOINT:
+ 		afk_receive_message(dcp->systemep, message);
+@@ -237,6 +256,31 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
+ 	case DISP0_ENDPOINT:
+ 		afk_receive_message(dcp->ibootep, message);
+ 		return;
++	case DPAVCTRL_ENDPOINT:
++		afk_receive_message(dcp->dpavctrlep, message);
++		return;
++	case DPDEV_ENDPOINT:
++		afk_receive_message(dcp->dpdevep, message);
++		return;
++	case DPSAC_ENDPOINT:
++		afk_receive_message(dcp->dpsacep, message);
++		return;
++	case REMOTE_ALLOC_ENDPOINT:
++		afk_receive_message(dcp->remoteallocep, message);
++		return;
++	case EPIC2C_ENDPOINT:
++		afk_receive_message(dcp->epicep2c, message);
++		return;
++	case DCP_EXPERT_ENDPOINT:
++		afk_receive_message(dcp->expertep, message);
++		return;
++	case EPIC25_ENDPOINT:
++		afk_receive_message(dcp->epicep25, message);
++		return;
++	case HDCP_ENDPOINT:
++		if (dcp->hdcpep)
++			afk_receive_message(dcp->hdcpep, message);
++		return;
+ 	case DPAVSERV_ENDPOINT:
+ 		afk_receive_message(dcp->dcpavservep, message);
+ 		return;
+@@ -253,6 +297,8 @@ static void dcp_rtk_crashed(void *cookie, const void *crashlog, size_t crashlog_
+ 	struct apple_dcp *dcp = cookie;
+ 
+ 	dcp->crashed = true;
++	if (dcp->dpdevep)
++		afk_cancel_commands(dcp->dpdevep);
+ 	dev_err(dcp->dev, "DCP has crashed\n");
+ 	if (dcp->connector) {
+ 		dcp->connector->connected = 0;
+@@ -263,6 +309,30 @@ static void dcp_rtk_crashed(void *cookie, const void *crashlog, size_t crashlog_
+ 	complete(&dcp->start_done);
+ }
+ 
++void *dcp_vmap_wc(phys_addr_t phys, size_t size, void **map_base)
++{
++	unsigned long offset = offset_in_page(phys);
++	unsigned int count = DIV_ROUND_UP(offset + size, PAGE_SIZE);
++	unsigned long first_pfn = PHYS_PFN(phys);
++	struct page **pages;
++	void *base;
++	unsigned int i;
++
++	pages = kcalloc(count, sizeof(*pages), GFP_KERNEL);
++	if (!pages)
++		return NULL;
++	for (i = 0; i < count; i++)
++		pages[i] = pfn_to_page(first_pfn + i);
++
++	base = vmap(pages, count, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
++	kfree(pages);
++	if (!base)
++		return NULL;
++
++	*map_base = base;
++	return base + offset;
++}
++
+ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
+ {
+ 	struct apple_dcp *dcp = cookie;
+@@ -280,16 +350,19 @@ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
+ 		if (!phy_addr)
+ 			return -ENOMEM;
+ 
+-		// TODO: verify phy_addr, cache attribute
+-		bfr->buffer = memremap(phy_addr, bfr->size, MEMREMAP_WB);
+-		if (!bfr->buffer)
++		/* Retained DCP buffers may be accessed through a realtime path.
++		 * A WB alias creates AMCC directory state that can fault when DCP
++		 * subsequently accesses the same memory. */
++		bfr->iomem = (void __iomem *)dcp_vmap_wc(phy_addr, bfr->size,
++							 &bfr->private);
++		if (!bfr->iomem)
+ 			return -ENOMEM;
+ 
+ 		bfr->is_mapped = true;
+ 		dev_info(dcp->dev,
+ 			 "shmem_setup: iova: %lx -> pa: %lx -> iomem: %lx\n",
+ 			 (uintptr_t)bfr->iova, (uintptr_t)phy_addr,
+-			 (uintptr_t)bfr->buffer);
++			 (uintptr_t)bfr->iomem);
+ 	} else {
+ 		bfr->buffer = dma_alloc_coherent(dcp->dev, bfr->size,
+ 						 &bfr->iova, GFP_KERNEL);
+@@ -308,7 +381,7 @@ static void dcp_rtk_shmem_destroy(void *cookie, struct apple_rtkit_shmem *bfr)
+ 	struct apple_dcp *dcp = cookie;
+ 
+ 	if (bfr->is_mapped)
+-		memunmap(bfr->buffer);
++		vunmap(bfr->private);
+ 	else
+ 		dma_free_coherent(dcp->dev, bfr->size, bfr->buffer, bfr->iova);
+ }
+@@ -332,12 +405,33 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commi
+ 	struct platform_device *pdev = to_apple_crtc(crtc)->dcp;
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+ 	struct drm_crtc_state *crtc_state;
++	struct drm_plane *plane;
++	const struct drm_plane_state *plane_state;
++	u32 max_layers;
++	u32 active_layers = 0;
+ 	bool needs_modeset;
+ 
+-	if (dcp->crashed)
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
++	/* A failed auxiliary DCP must not poison atomic transactions for the
++	 * other display pipelines.  Reject attempts to drive the crashed DCP,
++	 * but permit its already-disabled CRTC to remain disabled. */
++	if (dcp->crashed && crtc_state->active)
+ 		return -EINVAL;
+ 
+-	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
++	if (!of_property_read_u32(pdev->dev.of_node, "apple,iomfb-max-layers",
++				  &max_layers)) {
++		drm_atomic_crtc_state_for_each_plane_state(plane, plane_state,
++						     crtc_state) {
++			if (plane_state->fb && plane_state->visible)
++				active_layers++;
++		}
++		if (active_layers > max_layers) {
++			drm_dbg_kms(crtc->dev,
++				    "rejecting %u active DCP layers (maximum %u)\n",
++				    active_layers, max_layers);
++			return -EINVAL;
++		}
++	}
+ 
+ 	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state) || !dcp->valid_mode;
+ 	if (!needs_modeset && !dcp->connector->connected) {
+@@ -379,8 +473,22 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 
+ 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+ 	dcp->dptxport[port].atcphy = dcp->phy;
+-	dptxport_connect(dcp->dptxport[port].service, 0, dcp->dptx_phy, dcp->dptx_die);
+-	dptxport_request_display(dcp->dptxport[port].service);
++	dev_info(dcp->dev, "DPTX port %d: connecting remote port\n", port);
++	ret = dptxport_connect(dcp->dptxport[port].service, 0,
++			       dcp->dptx_phy, dcp->dptx_die);
++	if (ret) {
++		dev_warn(dcp->dev, "DPTX port %d: connect failed: %d\n",
++			 port, ret);
++		goto out_unlock;
++	}
++
++	dev_info(dcp->dev, "DPTX port %d: requesting display\n", port);
++	ret = dptxport_request_display(dcp->dptxport[port].service);
++	if (ret) {
++		dev_warn(dcp->dev, "DPTX port %d: display request failed: %d\n",
++			 port, ret);
++		goto out_unlock;
++	}
+ 	dcp->dptxport[port].connected = true;
+ 
+ 	mutex_unlock(&dcp->hpd_mutex);
+@@ -436,6 +544,16 @@ int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
+ 	return dcp_dptx_connect(dcp, port);
+ }
+ 
++int dcp_dptx_phy_activate_oob(struct platform_device *pdev)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	if (!dcp->phy)
++		return -ENODEV;
++
++	return phy_set_mode_ext(dcp->phy, PHY_MODE_DP, dcp->index);
++}
++
+ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
+ {
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+@@ -451,6 +569,42 @@ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port)
+ 	return dcp_dptx_disconnect(dcp, port);
+ }
+ 
++void dcp_hotplug_mark_disconnected_oob(struct platform_device *pdev)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	disconnected_hpd_event(dcp->connector);
++}
++
++void dcp_av_disconnect_oob(struct platform_device *pdev)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	if (dcp->avep)
++		av_service_disconnect(dcp);
++}
++
++int dcp_dptx_set_hpd_oob(struct platform_device *pdev, u32 port, bool hpd)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	if (port >= dcp->hw.num_dptx_ports || !dcp->dptxport[port].enabled)
++		return -ENODEV;
++
++	dev_info(dcp->dev, "%s(port=%u, hpd=%d)\n", __func__, port, hpd);
++	return dptxport_set_hpd(dcp->dptxport[port].service, hpd);
++}
++
++int dcp_dptx_release_oob(struct platform_device *pdev, u32 port)
++{
++	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++
++	if (port >= dcp->hw.num_dptx_ports)
++		return -EINVAL;
++
++	return dcp_dptx_disconnect(dcp, port);
++}
++
+ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
+ {
+ 	struct apple_dcp *dcp = data;
+@@ -500,19 +654,382 @@ unsigned long* dcp_get_iomfb_surfaces(struct platform_device *pdev)
+ 	return dcp->iomfb_surfaces;
+ }
+ 
++static void dcp_compact_aux_init(struct apple_epic_service *service,
++				 const char *name, const char *class, s64 unit)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++
++	if (service->ep->endpoint == DPDEV_ENDPOINT && name &&
++	    !strcmp(name, "dcpdp-device-epic")) {
++		if (dcp->dpdev_service && dcp->dpdev_service != service)
++			dcp->dpdev_service->enabled = false;
++		dcp->dpdev_service = service;
++		complete_all(&dcp->dpdev_ready);
++	}
++
++	dev_dbg(service->ep->dcp->dev,
++		"AFK[ep:%02x]: compact auxiliary service %s (%s, unit %lld)\n",
++		service->ep->endpoint, name ?: "", class ?: "", unit);
++}
++
++static int dcp_compact_aux_call(struct apple_epic_service *service, u32 idx,
++				const void *data, size_t data_size,
++				void *reply, size_t reply_size)
++{
++	if (reply && reply_size)
++		memset(reply, 0, reply_size);
++	return 0;
++}
++
++static int dcp_hdcp_read_mprime(struct apple_dcp *dcp)
++{
++	__le64 request[12] = { 0 };
++	u8 response[sizeof(request)] = { 0 };
++	int ret;
++
++	if (!dcp->dpdev_service)
++		return -ENODEV;
++
++	request[0] = cpu_to_le64(0x69473);
++	request[2] = cpu_to_le64(0x20);
++	request[4] = cpu_to_le64(0x1f4);
++
++	ret = afk_service_call(dcp->dpdev_service, 1, 6,
++			       request, sizeof(request), 0,
++			       response, sizeof(response), 0);
++	if (ret) {
++		dev_err(dcp->dev, "HDCP teardown MPRIME read failed: %d\n", ret);
++		return ret;
++	}
++
++	/*
++	 * This call is on the time-critical unplug path.  In particular, do not
++	 * dump the response here: synchronous console printing can delay the
++	 * following HDCP notification long enough for the link teardown to fail.
++	 */
++	dev_dbg(dcp->dev, "HDCP teardown MPRIME read completed\n");
++	return 0;
++}
++
++static int dcp_hdcp_notify_dpdev(struct apple_dcp *dcp)
++{
++	__le64 request[2] = { 0 };
++	__le64 response[2] = { 0 };
++	int ret;
++
++	if (!dcp->dpdev_service)
++		return -ENODEV;
++
++	/*
++	 * Native 26.6 performs this DPDEV transaction synchronously while
++	 * handling command 8 for each half of an HDCP auth-session pair.  In
++	 * particular it happens before the command 8 reply on unplug.  Skipping
++	 * it lets the services tear down, but DCP subsequently asserts while
++	 * finishing link shutdown.
++	 */
++	ret = afk_service_call(dcp->dpdev_service, 0, 5,
++			       request, sizeof(request), 0,
++			       response, sizeof(response), 0);
++	if (ret)
++		dev_err(dcp->dev, "HDCP DPDEV notification failed: %d\n", ret);
++
++	return ret;
++}
++
++static int dcp_hdcp_call(struct apple_epic_service *service, u32 idx,
++			 const void *data, size_t data_size,
++			 void *reply, size_t reply_size)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	__le64 ready = cpu_to_le64(1);
++
++	if (reply && reply_size) {
++		memset(reply, 0, reply_size);
++		if (data && data_size)
++			memcpy(reply, data, min(data_size, reply_size));
++	}
++
++	/*
++	 * Command 7 asks whether the upper half of an auth-session pair is
++	 * ready.  Native 26.6 returns one in the third u64; returning an all-zero
++	 * blob leaves firmware polling this callback forever and prevents it
++	 * from publishing the active 9/11 session pair.
++	 */
++	if (idx == 7 && (service->channel & 3) == 3 &&
++	    reply && reply_size >= 3 * sizeof(ready))
++		memcpy(reply + 2 * sizeof(ready), &ready, sizeof(ready));
++
++	/* Keep the nested DPDEV notification ahead of the command 8 reply. */
++	if (idx == 8)
++		dcp_hdcp_notify_dpdev(dcp);
++
++	/*
++	 * Native 26.6 reads the HDCP2 MPRIME register through DPDEV while
++	 * handling command 11 on the upper interface of the active auth-session
++	 * pair.  Keep the nested DPDEV call ahead of the command 11 reply.
++	 */
++	if (idx == 11 && service->channel == dcp->hdcp_teardown_interface &&
++	    !dcp->hdcp_mprime_attempted) {
++		dcp->hdcp_mprime_attempted = true;
++		dcp_hdcp_read_mprime(dcp);
++	}
++
++	return 0;
++}
++
++static const struct apple_epic_service_ops dcp_compact_aux_ops[] = {
++	{
++		.name = "*",
++		.init = dcp_compact_aux_init,
++		.call = dcp_compact_aux_call,
++	},
++	{},
++};
++
++static void dcp_hdcp_service_init(struct apple_epic_service *service,
++				  const char *name, const char *class,
++				  s64 unit)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++
++	/*
++	 * Interfaces 1 and 3 are the two HDCP controllers.  Native 26.6
++	 * activates both, on opposite sides of IOMFB startup.
++	 */
++	if (service->channel == 1 || service->channel == 3) {
++		dcp->hdcp_service[service->channel >> 1] = service;
++		if (dcp->hdcp_service[0] && dcp->hdcp_service[1])
++			complete_all(&dcp->hdcp_ready);
++	}
++
++	if (name && strstr(name, "hdcp-auth-sess") &&
++	    (service->channel & 3) == 3) {
++		dcp->hdcp_teardown_interface = service->channel;
++		dcp->hdcp_mprime_attempted = false;
++	}
++}
++
++static const struct apple_epic_service_ops dcp_hdcp_ops[] = {
++	{
++		.name = "*",
++		.init = dcp_hdcp_service_init,
++		.call = dcp_hdcp_call,
++	},
++	{},
++};
++
++static void dcp_dpavctrl_service_init(struct apple_epic_service *service,
++				      const char *name, const char *class,
++				      s64 unit)
++{
++	struct apple_dcp *dcp = service->ep->dcp;
++	const char *service_class = class ?: name;
++
++	if (service_class && strstr(service_class, "dcpav-controller-epic"))
++		dcp->dpavctrl_av_controller[!!(service->channel & BIT(2))] =
++			service;
++
++	if ((service->channel & 7) == 7) {
++		service->defer_start = true;
++		dcp->dpavctrl_late_service = service;
++	}
++
++	if (service->ep->num_channels >= 4)
++		complete_all(&dcp->dpavctrl_ready);
++}
++
++static const struct apple_epic_service_ops dcp_dpavctrl_ops[] = {
++	{
++		.name = "AppleDCPDPTXController",
++		.init = dcp_dpavctrl_service_init,
++		.call = dcp_compact_aux_call,
++	},
++	{
++		.name = "dcpav-controller-epic",
++		.init = dcp_dpavctrl_service_init,
++		.call = dcp_compact_aux_call,
++	},
++	{
++		.name = "dcpdp-controller-epic",
++		.init = dcp_dpavctrl_service_init,
++		.call = dcp_compact_aux_call,
++	},
++	{},
++};
++
++static int dcp_start_aux_ep(struct apple_dcp *dcp, u32 endpoint,
++			    struct apple_dcp_afkep **out)
++{
++	int ret;
++
++	*out = afk_init(dcp, endpoint, dcp_compact_aux_ops);
++	if (IS_ERR(*out)) {
++		ret = PTR_ERR(*out);
++		*out = NULL;
++		return ret;
++	}
++
++	ret = afk_start(*out);
++	if (ret) {
++		afk_shutdown(*out);
++		*out = NULL;
++	}
++
++	return ret;
++}
++
++static int dcp_start_hdcp(struct apple_dcp *dcp)
++{
++	unsigned long timeout;
++	int ret;
++
++	init_completion(&dcp->hdcp_ready);
++	dcp->hdcp_service[0] = NULL;
++	dcp->hdcp_service[1] = NULL;
++	dcp->hdcp_teardown_interface = 0;
++	dcp->hdcp_mprime_attempted = false;
++	dcp->hdcpep = afk_init(dcp, HDCP_ENDPOINT, dcp_hdcp_ops);
++	if (IS_ERR(dcp->hdcpep)) {
++		ret = PTR_ERR(dcp->hdcpep);
++		dcp->hdcpep = NULL;
++		return ret;
++	}
++
++	ret = afk_start(dcp->hdcpep);
++	if (ret)
++		return ret;
++
++	timeout = wait_for_completion_timeout(&dcp->hdcp_ready,
++					      msecs_to_jiffies(1000));
++	if (!timeout)
++		return -ETIMEDOUT;
++
++	/* Ensure afk_recv_handle_compact_init() has started the service. */
++	flush_workqueue(dcp->hdcpep->wq);
++	return 0;
++}
++
++static int dcp_activate_hdcp(struct apple_dcp *dcp, unsigned int controller)
++{
++	__le64 request[4] = { 0, 0, cpu_to_le64(3), 0 };
++
++	if (controller >= ARRAY_SIZE(dcp->hdcp_service) ||
++	    !dcp->hdcp_service[controller])
++		return -ENODEV;
++
++	return afk_service_call(dcp->hdcp_service[controller], 4, 6,
++				request, sizeof(request), 0,
++				NULL, 0, sizeof(request));
++}
++
++static int dcp_start_dpavctrl(struct apple_dcp *dcp)
++{
++	unsigned long timeout;
++	int ret;
++
++	init_completion(&dcp->dpavctrl_ready);
++	dcp->dpavctrlep = afk_init(dcp, DPAVCTRL_ENDPOINT,
++				    dcp_dpavctrl_ops);
++	if (IS_ERR(dcp->dpavctrlep)) {
++		ret = PTR_ERR(dcp->dpavctrlep);
++		dcp->dpavctrlep = NULL;
++		return ret;
++	}
++
++	ret = afk_start(dcp->dpavctrlep);
++	if (ret)
++		return ret;
++
++	timeout = wait_for_completion_timeout(&dcp->dpavctrl_ready,
++					      msecs_to_jiffies(1000));
++	if (!timeout)
++		return -ETIMEDOUT;
++
++	return 0;
++}
++
++static int dcp_activate_dpavctrl(struct apple_dcp *dcp)
++{
++	int i, ret;
++
++	/* The two AV controllers must be opened before the deferred interface. */
++	for (i = 1; i >= 0; i--) {
++		if (!dcp->dpavctrl_av_controller[i])
++			return -ENODEV;
++		ret = afk_service_call(dcp->dpavctrl_av_controller[i], 0, 12,
++				       NULL, 0, 32, NULL, 0, 32);
++		if (ret)
++			return ret;
++	}
++
++	if (!dcp->dpavctrl_late_service)
++		return -ENODEV;
++
++	return afk_start_service(dcp->dpavctrl_late_service);
++}
++
+ int dcp_start(struct platform_device *pdev)
+ {
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
++	bool v26_6 = dcp->fw_compat == DCP_FIRMWARE_V_26_6;
+ 	int ret;
+ 
+ 	init_completion(&dcp->start_done);
+ 
++	/*
++	 * Do not wake RTKit from component bind.  All DCP components are bound
++	 * before appledrm starts their application endpoints, and newer firmware
++	 * does not tolerate being left running with those endpoints unserviced.
++	 * Wake each coprocessor only once its endpoint handlers are ready to run.
++	 */
++	ret = apple_rtkit_wake(dcp->rtk);
++	if (ret)
++		return dev_err_probe(dcp->dev, ret,
++				     "Failed to acquire RTKit: %d\n", ret);
++
+ 	/* start RTKit endpoints */
+ 	ret = systemep_init(dcp);
+ 	if (ret)
+ 		dev_warn(dcp->dev, "Failed to start system endpoint: %d\n", ret);
+ 
+-	if (unstable_edid && !dcp_has_panel(dcp)) {
++	/* 26.6 starts the IOMFB transport before constructing its HDMI controller
++	 * graph, but does not bind shared memory until the graph is complete. */
++	if (v26_6) {
++		ret = apple_rtkit_start_ep(dcp->rtk, IOMFB_ENDPOINT);
++		if (ret)
++			return dev_err_probe(dcp->dev, ret,
++					     "Failed to start IOMFB transport endpoint\n");
++
++		init_completion(&dcp->dpdev_ready);
++		dcp->dpdev_service = NULL;
++		ret = dcp_start_aux_ep(dcp, DPDEV_ENDPOINT, &dcp->dpdevep);
++		if (ret)
++			return dev_err_probe(dcp->dev, ret,
++					     "Failed to start DPDEV endpoint\n");
++
++		ret = dcp_start_dpavctrl(dcp);
++		if (ret)
++			return dev_err_probe(dcp->dev, ret,
++					     "Failed to initialize DPAVCTRL endpoint\n");
++
++		ret = dcp_start_aux_ep(dcp, DPSAC_ENDPOINT, &dcp->dpsacep);
++		if (ret)
++			return dev_err_probe(dcp->dev, ret,
++					     "Failed to start DPSAC endpoint\n");
++
++		ret = dcp_start_aux_ep(dcp, AV_ENDPOINT, &dcp->avauxep);
++		if (ret)
++			return dev_err_probe(dcp->dev, ret,
++					     "Failed to start AV auxiliary endpoint\n");
++
++		ret = dcp_start_aux_ep(dcp, REMOTE_ALLOC_ENDPOINT,
++				       &dcp->remoteallocep);
++		if (ret)
++			return dev_err_probe(dcp->dev, ret,
++					     "Failed to start REMOTEALLOC endpoint\n");
++	}
++
++	if (!v26_6 && unstable_edid && !dcp_has_panel(dcp)) {
+ 		ret = dpavservep_init(dcp);
+ 		if (ret)
+ 			dev_warn(dcp->dev, "Failed to start DPAVSERV endpoint: %d",
+@@ -525,6 +1042,33 @@ int dcp_start(struct platform_device *pdev)
+ 			dev_warn(dcp->dev, "Failed to start IBOOT endpoint: %d\n",
+ 				 ret);
+ 
++		if (v26_6) {
++			ret = dcp_start_aux_ep(dcp, EPIC2C_ENDPOINT,
++					       &dcp->epicep2c);
++			if (ret)
++				return dev_err_probe(dcp->dev, ret,
++						     "Failed to start EPIC2C endpoint\n");
++
++			if (unstable_edid && !dcp_has_panel(dcp)) {
++				ret = dpavservep_init(dcp);
++				if (ret)
++					return dev_err_probe(dcp->dev, ret,
++							     "Failed to start DPAVSERV endpoint\n");
++			}
++
++			ret = dcp_start_aux_ep(dcp, DCP_EXPERT_ENDPOINT,
++					       &dcp->expertep);
++			if (ret)
++				return dev_err_probe(dcp->dev, ret,
++						     "Failed to start DCP expert endpoint\n");
++
++			ret = dcp_start_aux_ep(dcp, EPIC25_ENDPOINT,
++					       &dcp->epicep25);
++			if (ret)
++				return dev_err_probe(dcp->dev, ret,
++						     "Failed to start EPIC25 endpoint\n");
++		}
++
+ 		ret = dptxep_init(dcp);
+ 		if (ret) {
+ 			dev_warn(dcp->dev, "Failed to start DPTX endpoint: %d\n",
+@@ -553,15 +1097,52 @@ int dcp_start(struct platform_device *pdev)
+ 				dcp_dptx_connect(dcp, 0);
+ #endif
+ 		}
++		if (v26_6 && !ret && dcp->dptxport[0].enabled) {
++			ret = dcp_dptx_connect(dcp, 0);
++			if (ret)
++				dev_warn(dcp->dev,
++					 "Failed to connect DPTX port during startup: %d\n",
++					 ret);
++		}
++		if (v26_6 && enable_hdcp) {
++			ret = dcp_start_hdcp(dcp);
++			if (ret)
++				return dev_err_probe(dcp->dev, ret,
++						     "Failed to start HDCP endpoint\n");
++
++			ret = dcp_activate_hdcp(dcp, 0);
++			if (ret)
++				return dev_err_probe(dcp->dev, ret,
++						     "Failed to activate first HDCP controller\n");
++		}
++		if (v26_6 && enable_dpavctrl) {
++			/*
++			 * DPAV owns link-control services used during ordinary plug and
++			 * unplug, even when content protection is disabled.  Keeping its
++			 * activation under enable_hdcp leaves the deferred controller
++			 * unopened and DCP asserts while stopping the upstream link.
++			 */
++			ret = dcp_activate_dpavctrl(dcp);
++			if (ret)
++				return dev_err_probe(dcp->dev, ret,
++						     "Failed to activate DPAV controllers\n");
++		}
+ 	} else if (dcp->phy) {
+ 		dev_warn(dcp->dev, "OS firmware incompatible with dptxport EP\n");
+ 	}
++
+ 	ret = iomfb_start_rtkit(dcp);
+ 	if (ret)
+ 		dev_err(dcp->dev, "Failed to start IOMFB endpoint: %d\n", ret);
++	else if (v26_6 && enable_hdcp && dcp->hdcpep) {
++		ret = dcp_activate_hdcp(dcp, 1);
++		if (ret)
++			dev_err(dcp->dev, "Failed to activate second HDCP controller: %d\n",
++				ret);
++	}
+ 
+ #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+-	if (hdmi_audio) {
++	if (hdmi_audio && !dcp->avauxep) {
+ 		ret = avep_init(dcp);
+ 		if (ret)
+ 			dev_warn(dcp->dev, "Failed to start AV endpoint: %d", ret);
+@@ -581,6 +1162,9 @@ static void _dcp_poweroff(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_poweroff_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		iomfb_poweroff_v26_6_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -640,6 +1224,9 @@ static void __maybe_unused dcp_sleep(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_sleep_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		iomfb_sleep_v26_6_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -650,6 +1237,14 @@ void dcp_poweron(struct platform_device *pdev)
+ {
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+ 
++	if (dcp->hotplug_keepalive) {
++		dev_info(dcp->dev,
++			 "reusing live IOMFB state after external hotplug\n");
++		dcp->hotplug_keepalive = false;
++		dcp->valid_mode = false;
++		return;
++	}
++
+ 	if (dcp->hdmi_hpd) {
+ 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
+ 		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
+@@ -665,6 +1260,9 @@ void dcp_poweron(struct platform_device *pdev)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_poweron_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		iomfb_poweron_v26_6_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -678,6 +1276,22 @@ void dcp_poweroff(struct platform_device *pdev)
+ {
+ 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+ 
++	/*
++	 * Keep the 26.6 external IOMFB instance alive while isolating the HPD
++	 * crash.  The DPTX/AV link has already been released by the out-of-band
++	 * disconnect path, but the firmware's display-power-off sequence crashes
++	 * after disabling ALPM on T8132.  A later atomic enable must modeset the
++	 * still-live instance instead of sending a second power-on sequence.
++	 */
++	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6 && !dcp->main_display &&
++	    dcp->connector && !dcp->connector->connected) {
++		dev_info(dcp->dev,
++			 "keeping IOMFB alive across external connector disconnect\n");
++		dcp->hotplug_keepalive = true;
++		dcp->valid_mode = false;
++		return;
++	}
++
+ 	if (dcp->avep)
+ 		av_service_disconnect(dcp);
+ 
+@@ -964,6 +1578,8 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
+ 		return DCP_FIRMWARE_V_13_5;
+ 	else if (strncmp(compat_str, "13.5.0", sizeof(compat_str)) == 0)
+ 		return DCP_FIRMWARE_V_13_5;
++	else if (strncmp(compat_str, "26.6.0", sizeof(compat_str)) == 0)
++		return DCP_FIRMWARE_V_26_6;
+ 
+ 	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",
+ 		compat_str, fw_str);
+@@ -1064,7 +1680,6 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 	set_bit(0, dcp->memdesc_map);
+ 
+ 	INIT_WORK(&dcp->vblank_wq, dcp_delayed_vblank);
+-
+ 	dcp->swapped_out_fbs =
+ 		(struct list_head)LIST_HEAD_INIT(dcp->swapped_out_fbs);
+ 
+@@ -1072,17 +1687,16 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 		readl_relaxed(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+ 	writel_relaxed(cpu_ctrl | APPLE_DCP_COPROC_CPU_CONTROL_RUN,
+ 		       dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
++	readl_relaxed(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+ 
+ 	dcp->rtk = devm_apple_rtkit_init(dev, dcp, "mbox", 0, &rtkit_ops);
+ 	if (IS_ERR(dcp->rtk))
+ 		return dev_err_probe(dev, PTR_ERR(dcp->rtk),
+ 				     "Failed to initialize RTKit\n");
++	/* The crash callback can run before dcp_start() initializes IOMFB. */
++	init_completion(&dcp->start_done);
+ 
+-	ret = apple_rtkit_wake(dcp->rtk);
+-	if (ret)
+-		return dev_err_probe(dev, ret,
+-				     "Failed to boot RTKit: %d\n", ret);
+-	return ret;
++	return 0;
+ }
+ 
+ /*
+@@ -1099,6 +1713,9 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ 	if (dcp->hdmi_hpd_irq)
+ 		disable_irq(dcp->hdmi_hpd_irq);
+ 
++	if (dcp->dpdevep)
++		afk_cancel_commands(dcp->dpdevep);
++
+ 	typec_mux_put(dcp->typec_mux);
+ 
+ 	if (dcp->avep) {
+@@ -1107,6 +1724,52 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ 		dcp->avep = NULL;
+ 	}
+ 
++	if (dcp->avauxep) {
++		afk_shutdown(dcp->avauxep);
++		dcp->avauxep = NULL;
++	}
++
++	if (dcp->dpavctrlep) {
++		afk_shutdown(dcp->dpavctrlep);
++		dcp->dpavctrlep = NULL;
++	}
++
++	if (dcp->dpdevep) {
++		afk_shutdown(dcp->dpdevep);
++		dcp->dpdevep = NULL;
++		dcp->dpdev_service = NULL;
++	}
++
++	if (dcp->dpsacep) {
++		afk_shutdown(dcp->dpsacep);
++		dcp->dpsacep = NULL;
++	}
++
++	if (dcp->remoteallocep) {
++		afk_shutdown(dcp->remoteallocep);
++		dcp->remoteallocep = NULL;
++	}
++
++	if (dcp->epicep2c) {
++		afk_shutdown(dcp->epicep2c);
++		dcp->epicep2c = NULL;
++	}
++
++	if (dcp->expertep) {
++		afk_shutdown(dcp->expertep);
++		dcp->expertep = NULL;
++	}
++
++	if (dcp->epicep25) {
++		afk_shutdown(dcp->epicep25);
++		dcp->epicep25 = NULL;
++	}
++
++	if (dcp->hdcpep) {
++		afk_shutdown(dcp->hdcpep);
++		dcp->hdcpep = NULL;
++	}
++
+ 	if (dcp->dptxep) {
+ 		afk_shutdown(dcp->dptxep);
+ 		dcp->dptxep = NULL;
+@@ -1151,6 +1814,14 @@ static const struct component_ops dcp_comp_ops = {
+ 	.unbind	= dcp_comp_unbind,
+ };
+ 
++static void dcp_phy_power_off(void *data)
++{
++	struct phy *phy = data;
++
++	phy_power_off(phy);
++	phy_exit(phy);
++}
++
+ static int dcp_platform_probe(struct platform_device *pdev)
+ {
+ 	enum dcp_firmware_version fw_compat;
+@@ -1187,6 +1858,26 @@ static int dcp_platform_probe(struct platform_device *pdev)
+ 		dev_err(dev, "Failed to get dp-phy: %ld\n", PTR_ERR(dcp->phy));
+ 		return PTR_ERR(dcp->phy);
+ 	}
++	if (dcp->phy) {
++		int ret;
++
++		ret = phy_init(dcp->phy);
++		if (ret)
++			return dev_err_probe(dev, ret, "Failed to initialize dp-phy\n");
++
++		ret = phy_power_on(dcp->phy);
++		if (ret) {
++			phy_exit(dcp->phy);
++			return dev_err_probe(dev, ret, "Failed to power on dp-phy\n");
++		}
++
++		ret = devm_add_action_or_reset(dev, dcp_phy_power_off, dcp->phy);
++		if (ret)
++			return ret;
++
++		/* Match the settling time used by the working cold-boot sequence. */
++		msleep(25);
++	}
+ 
+ 	bitmap_zero(dcp->iomfb_surfaces, DCP_MAX_PLANES);
+ 	if (!of_property_present(dev->of_node, "apple,iomfb-surfaces"))
+@@ -1257,6 +1948,10 @@ static int dcp_platform_probe(struct platform_device *pdev)
+ 		if (IS_ERR(dcp->dp2hdmi_pwren))
+ 			return PTR_ERR(dcp->dp2hdmi_pwren);
+ 
++		/* The converter rails must be stable before DCP requests the link. */
++		if (dcp->hdmi_pwren || dcp->dp2hdmi_pwren)
++			msleep(100);
++
+ 		ret = of_property_read_u32(dev->of_node, "mux-index", &mux_index);
+ 		if (!ret) {
+ 			dcp->xbar = devm_mux_control_get(dev, "dp-xbar");
+@@ -1351,6 +2046,10 @@ static const struct apple_dcp_hw_data apple_dcp_hw_t8112 = {
+ 	.num_dptx_ports = 2,
+ };
+ 
++static const struct apple_dcp_hw_data apple_dcp_hw_t8132 = {
++	.num_dptx_ports = 2,
++};
++
+ static const struct apple_dcp_hw_data apple_dcp_hw_dcp = {
+ 	.num_dptx_ports = 0,
+ };
+@@ -1362,6 +2061,7 @@ static const struct apple_dcp_hw_data apple_dcp_hw_dcpext = {
+ static const struct of_device_id of_match[] = {
+ 	{ .compatible = "apple,t6020-dcp", .data = &apple_dcp_hw_t6020,  },
+ 	{ .compatible = "apple,t8112-dcp", .data = &apple_dcp_hw_t8112,  },
++	{ .compatible = "apple,t8132-dcp", .data = &apple_dcp_hw_t8132,  },
+ 	{ .compatible = "apple,dcp",       .data = &apple_dcp_hw_dcp,    },
+ 	{ .compatible = "apple,dcpext",    .data = &apple_dcp_hw_dcpext, },
+ 	{}
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 086ac70b0cc3..02efd732712b 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -56,7 +56,12 @@ void dcp_set_dimensions(struct apple_dcp *dcp);
+ void dcp_send_message(struct apple_dcp *dcp, u8 endpoint, u64 message);
+ 
+ int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port);
++int dcp_dptx_phy_activate_oob(struct platform_device *pdev);
+ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port);
++void dcp_hotplug_mark_disconnected_oob(struct platform_device *pdev);
++void dcp_av_disconnect_oob(struct platform_device *pdev);
++int dcp_dptx_set_hpd_oob(struct platform_device *pdev, u32 port, bool hpd);
++int dcp_dptx_release_oob(struct platform_device *pdev, u32 port);
+ 
+ int iomfb_start_rtkit(struct apple_dcp *dcp);
+ void iomfb_shutdown(struct apple_dcp *dcp);
+@@ -66,6 +71,8 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message);
+ int systemep_init(struct apple_dcp *dcp);
+ int dptxep_init(struct apple_dcp *dcp);
+ int ibootep_init(struct apple_dcp *dcp);
++int ibootep_set_surface(struct apple_dcp *dcp, dma_addr_t iova, u32 stride,
++			u32 width, u32 height, u32 drm_format);
+ int dpavservep_init(struct apple_dcp *dcp);
+ int avep_init(struct apple_dcp *dcp);
+ 
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index 1ea00602d476..5a919c082432 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -5,6 +5,7 @@
+ #include <linux/completion.h>
+ #include <linux/phy/phy.h>
+ #include <linux/delay.h>
++#include <linux/moduleparam.h>
+ 
+ #include "afk.h"
+ #include "dcp.h"
+@@ -12,6 +13,16 @@
+ #include "parser.h"
+ #include "trace.h"
+ 
++/*
++ * Diagnostic switch for separating the DCP-side DPTX lifecycle from AP PHY
++ * MMIO.  The T8132 DPTX windows are inaccessible until DCP has raised its
++ * internal PHY gate, so first establish that the callback transaction itself
++ * completes before allowing the callbacks to touch the PHY.
++ */
++static bool dptx_bypass_phy;
++module_param_named(dptx_bypass_phy, dptx_bypass_phy, bool, 0644);
++MODULE_PARM_DESC(dptx_bypass_phy, "Acknowledge DPTX PHY callbacks without MMIO");
++
+ struct dcpdptx_connection_cmd {
+ 	__le32 unk;
+ 	__le32 target;
+@@ -257,6 +268,13 @@ static int dptxport_call_get_max_lane_count(struct apple_epic_service *service,
+ 	if (reply_size < sizeof(*reply))
+ 		return -EINVAL;
+ 
++	if (dptx_bypass_phy) {
++		dptx->lane_count = 4;
++		reply->retcode = cpu_to_le32(0);
++		reply->lane_count = cpu_to_le64(dptx->lane_count);
++		return 0;
++	}
++
+ 	ret = phy_validate(dptx->atcphy, PHY_MODE_DP, 0, &phy_ops);
+ 	if (ret < 0) {
+ 		dev_err(dcp->dev, "phy_validate failed: %d\n", ret);
+@@ -318,7 +336,7 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
+ 	}
+ 
+ 	if (dptx->phy_ops.dp.set_lanes) {
+-		if (dptx->atcphy) {
++		if (dptx->atcphy && !dptx_bypass_phy) {
+ 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
+ 			if (ret)
+ 				return ret;
+@@ -425,7 +443,7 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
+ 		dptx->phy_ops.dp.link_rate = phy_link_rate;
+ 		dptx->phy_ops.dp.set_rate = 1;
+ 
+-		if (dptx->atcphy) {
++		if (dptx->atcphy && !dptx_bypass_phy) {
+ 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
+ 			if (ret)
+ 				return ret;
+@@ -477,17 +495,24 @@ dptxport_call_activate(struct apple_epic_service *service,
+ {
+ 	struct dptx_port *dptx = service->cookie;
+ 	const struct apple_dcp *dcp = service->ep->dcp;
++	int ret = 0;
+ 
+ 	// TODO: hack, use phy_set_mode to select the correct DCP(EXT) input
+ 	// for standalone phy (i.e. not atc phy).
+-	if (!dcp->typec_mux)
+-		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
++	dev_info(dcp->dev, "DPTXPort: activating PHY\n");
++	if (!dcp->typec_mux && !dptx_bypass_phy) {
++		ret = phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
++		if (ret)
++			dev_err(dcp->dev, "DPTXPort: PHY activation failed: %d\n",
++				ret);
++	}
++	dev_info(dcp->dev, "DPTXPort: PHY activation returned: %d\n", ret);
+ 
+ 	memcpy(reply, data, min(reply_size, data_size));
+ 	if (reply_size >= 4)
+ 		memset(reply, 0, 4);
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int
+@@ -498,7 +523,8 @@ dptxport_call_deactivate(struct apple_epic_service *service,
+ 	struct dptx_port *dptx = service->cookie;
+ 
+ 	/* deactivate phy */
+-	phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
++	if (!dptx_bypass_phy)
++		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
+ 
+ 	memcpy(reply, data, min(reply_size, data_size));
+ 	if (reply_size >= 4)
+@@ -570,11 +596,17 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
+ static void dptxport_init(struct apple_epic_service *service, const char *name,
+ 			  const char *class, s64 unit)
+ {
+-
+-	if (strcmp(name, "dcpdptx-port-epic"))
+-		return;
+-	if (strcmp(class, "AppleDCPDPTXRemotePort"))
+-		return;
++	if (service->ep->compact) {
++		if (unit < 0)
++			return;
++		if (unit == 0)
++			service->defer_start = true;
++	} else {
++		if (strcmp(name, "dcpdptx-port-epic"))
++			return;
++		if (strcmp(class, "AppleDCPDPTXRemotePort"))
++			return;
++	}
+ 
+ 	trace_dptxport_init(service->ep->dcp, unit);
+ 
+@@ -604,6 +636,11 @@ static const struct apple_epic_service_ops dptxep_ops[] = {
+ 		.init = dptxport_init,
+ 		.call = dptxport_call,
+ 	},
++	{
++		.name = "dcpdptx-port-epic",
++		.init = dptxport_init,
++		.call = dptxport_call,
++	},
+ 	{}
+ };
+ 
+@@ -636,5 +673,11 @@ int dptxep_init(struct apple_dcp *dcp)
+ 		timeout = ret;
+ 	}
+ 
++	if (dcp->dptxep->compact && dcp->dptxport[0].service) {
++		ret = afk_start_service(dcp->dptxport[0].service);
++		if (ret)
++			return ret;
++	}
++
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/apple/epic/dpavservep.c b/drivers/gpu/drm/apple/epic/dpavservep.c
+index 2de9d2fe4c24..ef972acb90d9 100644
+--- a/drivers/gpu/drm/apple/epic/dpavservep.c
++++ b/drivers/gpu/drm/apple/epic/dpavservep.c
+@@ -21,10 +21,14 @@ static void dcpavserv_init(struct apple_epic_service *service, const char *name,
+ 	trace_dcpavserv_init(dcp, unit);
+ 
+ 	if (unit == 0 && name && !strcmp(name, "dcpav-service-epic")) {
+-		if (dcp->dcpavserv.enabled) {
+-			dev_err(dcp->dev,
+-				"DCPAVSERV: unit %lld already exists\n", unit);
+-			return;
++		if (dcp->dcpavserv.service &&
++		    dcp->dcpavserv.service != service) {
++			dev_info(dcp->dev,
++				 "DCPAVSERV: rebinding unit %lld from interface %u to %u\n",
++				 unit, dcp->dcpavserv.service->channel,
++				 service->channel);
++			dcp->dcpavserv.service->cookie = NULL;
++			dcp->dcpavserv.service->enabled = false;
+ 		}
+ 		dcp->dcpavserv.service = service;
+ 		dcp->dcpavserv.enabled = true;
+@@ -38,7 +42,10 @@ static void dcpavserv_teardown(struct apple_epic_service *service)
+ 	struct apple_dcp *dcp = service->ep->dcp;
+ 	service->enabled = false;
+ 
+-	if (dcp->dcpavserv.enabled) {
++	/* Firmware republishes this service under a new compact interface ID
++	 * after hotplug.  A delayed teardown for the old instance must not
++	 * invalidate the replacement. */
++	if (dcp->dcpavserv.service == service) {
+ 		dcp->dcpavserv.enabled = false;
+ 		dcp->dcpavserv.service = NULL;
+ 		service->cookie = NULL;
+@@ -49,6 +56,8 @@ static void dcpavserv_teardown(struct apple_epic_service *service)
+ static void dcpdpserv_init(struct apple_epic_service *service, const char *name,
+ 			  const char *class, s64 unit)
+ {
++	if (service->ep->compact)
++		service->defer_start = true;
+ }
+ 
+ static void dcpdpserv_teardown(struct apple_epic_service *service)
+@@ -78,7 +87,7 @@ struct dpavserv_copy_edid_cmd {
+ #define EDID_BLOCK_SIZE			128
+ #define EDID_EXT_BLOCK_COUNT_OFFSET	0x7E
+ #define EDID_MAX_SIZE			SZ_32K
+-#define EDID_BUF_SIZE			(EDID_LEADING_DATA_SIZE + EDID_MAX_SIZE)
++#define EDID_COMPACT_MAX_SIZE		SZ_2K
+ 
+ struct dpavserv_copy_edid_resp {
+ 	__le64 max_size;
+@@ -159,29 +168,44 @@ const struct drm_edid *dcpavserv_copy_edid(struct apple_epic_service *service)
+ {
+ 	struct dpavserv_copy_edid_cmd cmd;
+ 	struct dpavserv_copy_edid_resp *resp __free(kfree) = NULL;
++	size_t edid_max_size, edid_buf_size;
+ 	int num_blocks;
+ 	u64 data_size;
+ 	int ret;
+ 
++	/* Compact EPIC endpoints on T8132 have a 0x1e80-byte TX ring.  A
++	 * 32-KiB inline request can never fit and fails locally with
++	 * -EMSGSIZE.  The complete 4-KiB call advances the ring by 0x1100
++	 * bytes, so it can also fail with -ENOMEM on an otherwise empty ring
++	 * when the remaining tail is too short and wrapping would collide
++	 * with the read pointer.  A 2-KiB EDID limit makes the complete call
++	 * 0x900 bytes, less than half the ring, while still accommodating 15
++	 * extension blocks.  Retain the older maximum for non-compact
++	 * endpoints. */
++	edid_max_size = service->ep->compact ? EDID_COMPACT_MAX_SIZE :
++						EDID_MAX_SIZE;
++	edid_buf_size = EDID_LEADING_DATA_SIZE + edid_max_size;
++
+ 	memset(&cmd, 0, sizeof(cmd));
+-	cmd.max_size = cpu_to_le64(EDID_BUF_SIZE);
+-	resp = kzalloc(sizeof(*resp) + EDID_BUF_SIZE, GFP_KERNEL);
++	cmd.max_size = cpu_to_le64(edid_buf_size);
++	resp = kzalloc(sizeof(*resp) + edid_buf_size, GFP_KERNEL);
+ 	if (!resp)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	ret = afk_service_call(service, 1, 7, &cmd, sizeof(cmd), EDID_BUF_SIZE, resp,
+-			       sizeof(resp) + EDID_BUF_SIZE, 0);
++	ret = afk_service_call(service, 1, 7, &cmd, sizeof(cmd), edid_buf_size,
++			       resp, sizeof(*resp) + edid_buf_size, 0);
+ 	if (ret < 0)
+ 		return ERR_PTR(ret);
+ 
+-	if (le64_to_cpu(resp->max_size) != EDID_BUF_SIZE)
++	if (le64_to_cpu(resp->max_size) != edid_buf_size)
+ 		return ERR_PTR(-EIO);
+ 
+ 	// print_hex_dump(KERN_DEBUG, "dpavserv EDID cmd: ", DUMP_PREFIX_NONE,
+ 	// 	       16, 1, resp, 192, true);
+ 
+ 	data_size = le64_to_cpu(resp->used_size);
+-	if (data_size < EDID_LEADING_DATA_SIZE + EDID_BLOCK_SIZE)
++	if (data_size > edid_buf_size ||
++	    data_size < EDID_LEADING_DATA_SIZE + EDID_BLOCK_SIZE)
+ 		return ERR_PTR(-EIO);
+ 
+ 	num_blocks = resp->data[EDID_LEADING_DATA_SIZE + EDID_EXT_BLOCK_COUNT_OFFSET];
+diff --git a/drivers/gpu/drm/apple/ibootep.c b/drivers/gpu/drm/apple/ibootep.c
+index ae4bc8a69f2a..cce52c11a127 100644
+--- a/drivers/gpu/drm/apple/ibootep.c
++++ b/drivers/gpu/drm/apple/ibootep.c
+@@ -2,13 +2,61 @@
+ /* Copyright 2023 */
+ 
+ #include <linux/completion.h>
++#include <linux/dma-mapping.h>
++
++#include <drm/drm_fourcc.h>
+ 
+ #include "afk.h"
+ #include "dcp.h"
+ 
++#define IBOOT_SET_SURFACE 1
++#define IBOOT_ADDR_PLANAR 1
++#define IBOOT_FMT_BGRA 1
++#define IBOOT_FMT_RGBA 3
++#define IBOOT_FMT_W30R 9
++#define IBOOT_EOTF_GAMMA_SDR 1
++
++struct iboot_plane {
++	__le32 unk1;
++	__le64 addr;
++	__le32 tile_size;
++	__le32 stride;
++	__le32 unk2[4];
++	__le32 addr_format;
++	__le32 unk3;
++} __packed;
++
++struct iboot_layer {
++	struct iboot_plane planes[3];
++	__le32 unk;
++	__le32 plane_cnt;
++	__le32 width;
++	__le32 height;
++	__le32 surface_fmt;
++	__le32 colorspace;
++	__le32 eotf;
++	u8 transform;
++	u8 padding[3];
++} __packed;
++
++struct iboot_set_surface_cmd {
++	struct iboot_layer layer;
++	__le32 unk3;
++	__le32 unk4;
++} __packed;
++
++struct iboot_cmd {
++	__le32 op;
++	__le32 len;
++	__le32 unk1;
++	__le32 unk2;
++	struct iboot_set_surface_cmd payload;
++} __packed;
++
+ static void disp_service_init(struct apple_epic_service *service, const char *name,
+ 			const char *class, s64 unit)
+ {
++	service->ep->dcp->iboot_service = service;
+ }
+ 
+ 
+@@ -27,3 +75,61 @@ int ibootep_init(struct apple_dcp *dcp)
+ 
+ 	return 0;
+ }
++
++int ibootep_set_surface(struct apple_dcp *dcp, dma_addr_t iova, u32 stride,
++			u32 width, u32 height, u32 drm_format)
++{
++	struct iboot_cmd cmd = { 0 };
++	dma_addr_t surface_iova = iova & DMA_BIT_MASK(36);
++	u32 retcode = 0;
++	u32 surface_fmt;
++	int ret;
++
++	if (!dcp->iboot_service)
++		return -ENODEV;
++
++	switch (drm_format) {
++	case DRM_FORMAT_XRGB8888:
++	case DRM_FORMAT_ARGB8888:
++		/* The retained 26.6 pipeline is configured for the bootloader's
++		 * 10-bit packed scanout. Keep the first Linux prototype on that
++		 * proven path; the storage remains four bytes per pixel. */
++		surface_fmt = IBOOT_FMT_W30R;
++		break;
++	case DRM_FORMAT_XBGR8888:
++	case DRM_FORMAT_ABGR8888:
++		surface_fmt = IBOOT_FMT_RGBA;
++		break;
++	case DRM_FORMAT_XRGB2101010:
++		surface_fmt = IBOOT_FMT_W30R;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	cmd.op = cpu_to_le32(IBOOT_SET_SURFACE);
++	cmd.len = cpu_to_le32(sizeof(cmd));
++	/* The compact service consumes the DART-relative address. The upper
++	 * apple,dma-range remap bits belong to the AP DMA API, not the layer. */
++	cmd.payload.layer.planes[0].addr = cpu_to_le64(surface_iova);
++	cmd.payload.layer.planes[0].stride = cpu_to_le32(stride);
++	cmd.payload.layer.planes[0].addr_format =
++		cpu_to_le32(IBOOT_ADDR_PLANAR);
++	cmd.payload.layer.plane_cnt = cpu_to_le32(1);
++	cmd.payload.layer.width = cpu_to_le32(width);
++	cmd.payload.layer.height = cpu_to_le32(height);
++	cmd.payload.layer.surface_fmt = cpu_to_le32(surface_fmt);
++	/* The compact interface uses the display colorimetry enum rather than
++	 * IOMFB's colorspace enum.  Value 1 is the SDR BT.601/709 family. */
++	cmd.payload.layer.colorspace = cpu_to_le32(2);
++	cmd.payload.layer.eotf = cpu_to_le32(IBOOT_EOTF_GAMMA_SDR);
++
++	ret = afk_send_command(dcp->iboot_service, EPIC_SUBTYPE_STD_SERVICE,
++			       &cmd, sizeof(cmd), NULL, 0, &retcode);
++	if (ret)
++		return ret;
++	if (retcode)
++		return -EIO;
++
++	return 0;
++}
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 9e22e82bcbd8..542a47460213 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -8,7 +8,6 @@
+ #include <linux/completion.h>
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+-#include <linux/iommu.h>
+ #include <linux/kref.h>
+ #include <linux/module.h>
+ #include <linux/of_device.h>
+@@ -191,6 +190,9 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
+ 	ch->output[depth] = out + sizeof(header) + in_len;
+ 	ch->end[depth] = offset + ALIGN(data_len, DCP_PACKET_ALIGNMENT);
+ 
++	/* RTKit-provided firmware buffers can be mapped WC rather than allocated
++	 * by dma_alloc_coherent(). Publish the packet before ringing DCP. */
++	dma_wmb();
+ 	dcp_send_message(dcp, IOMFB_ENDPOINT,
+ 			 dcpep_msg(context, data_len, offset));
+ }
+@@ -220,6 +222,8 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context)
+ 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
+ 
+ 	dcp_pop_depth(&ch->depth);
++	/* Publish callback output before the acknowledgement makes it visible. */
++	dma_wmb();
+ 	dcp_send_message(dcp, IOMFB_ENDPOINT,
+ 			 dcpep_ack(context));
+ }
+@@ -287,8 +291,9 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
+ 	ch->output[depth] = out;
+ 	ch->end[depth] = offset + ALIGN(length, DCP_PACKET_ALIGNMENT);
+ 
+-	if (dcp->cb_handlers[tag](dcp, tag, out, in))
++	if (dcp->cb_handlers[tag](dcp, tag, out, in)) {
+ 		dcp_ack(dcp, context);
++	}
+ }
+ 
+ static void dcpep_handle_ack(struct apple_dcp *dcp, enum dcp_context_id context,
+@@ -336,6 +341,9 @@ static void dcpep_got_msg(struct apple_dcp *dcp, u64 message)
+ 	}
+ 
+ 	data = dcp->shmem + channel_offset + offset;
++	/* Pair with firmware's mailbox notification before consuming the packet
++	 * from the retained WC mapping. */
++	dma_rmb();
+ 
+ 	if (FIELD_GET(IOMFB_MSG_ACK, message))
+ 		dcpep_handle_ack(dcp, ctx_id, data, length);
+@@ -436,6 +444,9 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
+ 	case DCP_FIRMWARE_V_13_5:
+ 		ret = iomfb_modeset_v13_3(dcp, crtc_state);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		ret = iomfb_modeset_v26_6_0(dcp, crtc_state);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n",
+ 			  dcp->fw_compat);
+@@ -485,6 +496,9 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_flush_v13_3(dcp, crtc, commit);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		iomfb_flush_v26_6_0(dcp, crtc, commit);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -500,6 +514,9 @@ static void iomfb_start(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_start_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		iomfb_start_v26_6_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+@@ -528,10 +545,16 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message)
+ int iomfb_start_rtkit(struct apple_dcp *dcp)
+ {
+ 	dma_addr_t shmem_iova;
+-	apple_rtkit_start_ep(dcp->rtk, IOMFB_ENDPOINT);
+ 
+-	dcp->shmem = dma_alloc_coherent(dcp->dev, DCP_SHMEM_SIZE, &shmem_iova,
+-					GFP_KERNEL);
++	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6)
++		apple_rtkit_start_ep(dcp->rtk, IOMFB_ENDPOINT);
++	dcp->shmem = dma_alloc_coherent(dcp->dev, DCP_SHMEM_SIZE,
++					 &shmem_iova, GFP_KERNEL);
++	if (!dcp->shmem)
++		return -ENOMEM;
++
++	memset(dcp->shmem, 0, DCP_SHMEM_SIZE);
++	dma_wmb();
+ 
+ 	dcp_send_message(dcp, IOMFB_ENDPOINT, dcpep_set_shmem(shmem_iova));
+ 
+@@ -551,6 +574,9 @@ void iomfb_shutdown(struct apple_dcp *dcp)
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_shutdown_v13_3(dcp);
+ 		break;
++	case DCP_FIRMWARE_V_26_6:
++		iomfb_shutdown_v26_6_0(dcp);
++		break;
+ 	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
+ 		break;
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index 7903fad40406..c97a1ab89b78 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -187,6 +187,21 @@ struct dcp_set_digital_out_mode_req {
+ 	u32 timing_mode_id;
+ } __packed;
+ 
++struct dcp_get_mode_info_req_v26_6 {
++	u8 mode[0x64];
++	u8 mode_null;
++	u8 padding0[3];
++	u64 opaque;
++	u32 timing_mode_id;
++	u32 color_mode_id;
++	u8 result_null;
++	u8 padding1[3];
++} __packed;
++
++struct dcp_get_mode_info_resp_v26_6 {
++	u8 opaque[0x74];
++} __packed;
++
+ struct dcp_map_buf_req {
+ 	u64 buffer;
+ 	u8 unk;
+@@ -290,6 +305,14 @@ struct dcp_set_power_state_req {
+ 	u8 padding[2];
+ } __packed;
+ 
++struct dcp_set_power_state_req_v26_6 {
++	u64 state;
++	/* Four independent transition flags on 26.6, not a u32 boolean. */
++	u8 flags[4];
++	u8 result_is_null;
++	u8 padding[3];
++} __packed;
++
+ struct dcp_set_power_state_resp {
+ 	u32 unkint;
+ 	u32 ret;
+@@ -307,7 +330,7 @@ struct dcp_set_dcpav_prop_end_req {
+ 
+ struct dcp_set_parameter_dcp {
+ 	u32 param;
+-	u32 value[8];
++	u64 value[4];
+ 	u32 count;
+ } __packed;
+ 
+@@ -319,6 +342,15 @@ struct dcp_swap_complete_intent_gated {
+ 	u32 height;
+ } __packed;
+ 
++struct dcp_swap_complete_intent_gated_v26_6 {
++	u32 swap_id;
++	u8 unkBool;
++	u32 unkInt;
++	u32 width;
++	u32 height;
++	u8 padding[3];
++} __packed;
++
+ struct dcp_read_edt_data_req {
+ 	char key[0x40];
+ 	u32 count;
+@@ -330,9 +362,30 @@ struct dcp_read_edt_data_resp {
+ 	u8 ret;
+ } __packed;
+ 
++struct dcp_read_edt_data_resp_v26_6 {
++	u32 value[8];
++	u8 ret;
++	u8 padding[3];
++} __packed;
++
+ struct iomfb_property {
+ 	u32 id;
+ 	u32 value;
++	u8 opaque[8];
++} __packed;
++
++struct dcp_hotplug_req_v26_6 {
++	u64 connected;
++	u8 opaque[0x50];
++} __packed;
++
++struct dcp_hotplug_resp_v26_6 {
++	u8 opaque[0x4c];
++} __packed;
++
++struct dcp_bool_arg {
++	u8 value;
++	u8 padding[3];
+ } __packed;
+ 
+ struct iomfb_get_color_remap_mode_req {
+@@ -374,6 +427,14 @@ struct iomfb_abort_swaps_dcp_resp {
+ 	u32 ret;
+ } __packed;
+ 
++struct iomfb_abort_swaps_dcp_req_v26_6 {
++	u64 client;
++} __packed;
++
++struct iomfb_abort_swaps_dcp_resp_v26_6 {
++	u32 ret;
++} __packed;
++
+ struct iomfb_set_matrix_req {
+ 	u32 location;
+ 	u64 matrix[9];
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 3690a64fb660..eb6e20683e70 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -20,17 +20,121 @@
+ #include <drm/drm_fb_dma_helper.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_framebuffer.h>
++#include <drm/drm_modes.h>
+ #include <drm/drm_probe_helper.h>
+ #include <drm/drm_vblank.h>
+ 
+ #include "dcp.h"
+ #include "dcp-internal.h"
++#include "afk.h"
+ #include "iomfb.h"
+ #include "iomfb_internal.h"
+ #include "parser.h"
+ #include "trace.h"
+ #include "version_utils.h"
+ 
++enum dcp_power_transition {
++	DCP_POWER_TRANSITION_NONE,
++	DCP_POWER_TRANSITION_DISPLAY_OFF,
++	DCP_POWER_TRANSITION_RESTARTABLE_SLEEP,
++	DCP_POWER_TRANSITION_SHUTDOWN,
++};
++
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++typedef struct dcp_set_power_state_req_v26_6 dcp_power_state_req_t;
++typedef struct iomfb_abort_swaps_dcp_req_v26_6 dcp_abort_swaps_req_t;
++typedef struct iomfb_abort_swaps_dcp_resp_v26_6 dcp_abort_swaps_resp_t;
++typedef struct dcp_read_edt_data_resp_v26_6 dcp_read_edt_data_resp_t;
++typedef struct dcp_swap_complete_intent_gated_v26_6 dcp_swap_intent_t;
++typedef struct dcp_bool_arg dcp_bool_arg_t;
++
++static dcp_power_state_req_t dcp_power_state_req(u64 state,
++						 enum dcp_power_transition transition)
++{
++	dcp_power_state_req_t req = {
++		.state = state,
++		.padding = { 0xaa, 0xaa, 0xaa },
++	};
++
++	switch (transition) {
++	case DCP_POWER_TRANSITION_RESTARTABLE_SLEEP:
++		req.flags[0] = 1;
++		req.flags[3] = 1;
++		req.result_is_null = 1;
++		break;
++	case DCP_POWER_TRANSITION_SHUTDOWN:
++		req.flags[1] = 1;
++		req.result_is_null = 1;
++		break;
++	case DCP_POWER_TRANSITION_NONE:
++	case DCP_POWER_TRANSITION_DISPLAY_OFF:
++		break;
++	}
++
++	return req;
++}
++
++static dcp_bool_arg_t dcp_bool_arg(bool value)
++{
++	return (dcp_bool_arg_t){
++		.value = value,
++		.padding = { 0xaa, 0xaa, 0xaa },
++	};
++}
++#else
++typedef struct dcp_set_power_state_req dcp_power_state_req_t;
++typedef struct iomfb_abort_swaps_dcp_req dcp_abort_swaps_req_t;
++typedef struct iomfb_abort_swaps_dcp_resp dcp_abort_swaps_resp_t;
++typedef struct dcp_read_edt_data_resp dcp_read_edt_data_resp_t;
++typedef struct dcp_swap_complete_intent_gated dcp_swap_intent_t;
++typedef u32 dcp_bool_arg_t;
++
++static dcp_power_state_req_t dcp_power_state_req(u64 state,
++						 enum dcp_power_transition transition)
++{
++	return (dcp_power_state_req_t){
++		.unklong = state,
++		.unkbool = transition != DCP_POWER_TRANSITION_NONE,
++		.unkint_null = transition != DCP_POWER_TRANSITION_NONE,
++	};
++}
++
++static dcp_bool_arg_t dcp_bool_arg(bool value)
++{
++	return value;
++}
++#endif
++
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++static u64 dcp_iomfb_client(struct apple_dcp *dcp)
++{
++	/* Native passes its IOUserClient pointer as an opaque client identity. */
++	return (u64)(unsigned long)dcp;
++}
++#endif
++
++static struct DCP_FW_NAME(dcp_swap_start_req)
++dcp_swap_start_request(struct apple_dcp *dcp)
++{
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	return (struct DCP_FW_NAME(dcp_swap_start_req)){
++		.client = dcp_iomfb_client(dcp),
++		.padding = { 0xaa, 0xaa, 0xaa },
++	};
++#else
++	return (struct DCP_FW_NAME(dcp_swap_start_req)){ 0 };
++#endif
++}
++
++static dcp_abort_swaps_req_t dcp_abort_swaps_request(struct apple_dcp *dcp)
++{
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	return (dcp_abort_swaps_req_t){ .client = dcp_iomfb_client(dcp) };
++#else
++	return (dcp_abort_swaps_req_t){ .client.flag2 = 1 };
++#endif
++}
++
+ /* Register defines used in bandwidth setup structure */
+ #define REG_DOORBELL_BIT(idx) (2 + (idx))
+ 
+@@ -54,17 +158,19 @@ DCP_THUNK_OUT(iomfb_a358_vi_set_temperature_hint, iomfbep_a358_vi_set_temperatur
+ IOMFB_THUNK_INOUT(set_matrix);
+ IOMFB_THUNK_INOUT(get_color_remap_mode);
+ IOMFB_THUNK_INOUT(last_client_close);
+-IOMFB_THUNK_INOUT(abort_swaps_dcp);
++DCP_THUNK_INOUT(iomfb_abort_swaps_dcp, iomfbep_abort_swaps_dcp,
++		dcp_abort_swaps_req_t, dcp_abort_swaps_resp_t);
+ 
+ DCP_THUNK_INOUT(dcp_swap_submit, dcpep_swap_submit,
+ 		struct DCP_FW_NAME(dcp_swap_submit_req),
+ 		struct DCP_FW_NAME(dcp_swap_submit_resp));
+ 
+-DCP_THUNK_INOUT(dcp_swap_start, dcpep_swap_start, struct dcp_swap_start_req,
+-		struct dcp_swap_start_resp);
++DCP_THUNK_INOUT(dcp_swap_start, dcpep_swap_start,
++		struct DCP_FW_NAME(dcp_swap_start_req),
++		struct DCP_FW_NAME(dcp_swap_start_resp));
+ 
+ DCP_THUNK_INOUT(dcp_set_power_state, dcpep_set_power_state,
+-		struct dcp_set_power_state_req,
++		dcp_power_state_req_t,
+ 		struct dcp_set_power_state_resp);
+ 
+ DCP_THUNK_INOUT(dcp_set_digital_out_mode, dcpep_set_digital_out_mode,
+@@ -76,11 +182,13 @@ DCP_THUNK_OUT(dcp_set_display_refresh_properties,
+ 	      dcpep_set_display_refresh_properties, u32);
+ 
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-DCP_THUNK_INOUT(dcp_late_init_signal, dcpep_late_init_signal, u32, u32);
++DCP_THUNK_INOUT(dcp_late_init_signal, dcpep_late_init_signal,
++		dcp_bool_arg_t, u32);
+ #else
+ DCP_THUNK_OUT(dcp_late_init_signal, dcpep_late_init_signal, u32);
+ #endif
+-DCP_THUNK_IN(dcp_flush_supports_power, dcpep_flush_supports_power, u32);
++DCP_THUNK_IN(dcp_flush_supports_power, dcpep_flush_supports_power,
++	     dcp_bool_arg_t);
+ DCP_THUNK_OUT(dcp_create_default_fb, dcpep_create_default_fb, u32);
+ DCP_THUNK_OUT(dcp_start_signal, dcpep_start_signal, u32);
+ DCP_THUNK_VOID(dcp_setup_video_limits, dcpep_setup_video_limits);
+@@ -261,8 +369,8 @@ static void iomfbep_cb_set_fx_prop(struct apple_dcp *dcp, struct iomfb_set_fx_pr
+  * PIODMA is separate from the main DCP and uses own IOVA space on a dedicated
+  * stream of the display DART, rather than the expected DCP DART.
+  */
+-static struct dcp_map_buf_resp dcpep_cb_map_piodma(struct apple_dcp *dcp,
+-						   struct dcp_map_buf_req *req)
++static struct DCP_FW_NAME(dcp_map_buf_resp)
++dcpep_cb_map_piodma(struct apple_dcp *dcp, struct dcp_map_buf_req *req)
+ {
+ 	struct dcp_mem_descriptor *memdesc;
+ 	struct sg_table *map;
+@@ -289,12 +397,26 @@ static struct dcp_map_buf_resp dcpep_cb_map_piodma(struct apple_dcp *dcp,
+ 		goto reject;
+ 	}
+ 
+-	return (struct dcp_map_buf_resp){ .dva = memdesc->dva };
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	return (struct DCP_FW_NAME(dcp_map_buf_resp)){
++		.buffer = req->buffer,
++		.dva = memdesc->dva,
++	};
++#else
++	return (struct DCP_FW_NAME(dcp_map_buf_resp)){ .dva = memdesc->dva };
++#endif
+ 
+ reject:
+ 	dev_err(dcp->dev, "denying map of invalid buffer %llx for piodma\n",
+ 		req->buffer);
+-	return (struct dcp_map_buf_resp){ .ret = EINVAL };
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	return (struct DCP_FW_NAME(dcp_map_buf_resp)){
++		.buffer = req->buffer,
++		.ret = EINVAL,
++	};
++#else
++	return (struct DCP_FW_NAME(dcp_map_buf_resp)){ .ret = EINVAL };
++#endif
+ }
+ 
+ static void dcpep_cb_unmap_piodma(struct apple_dcp *dcp,
+@@ -471,9 +593,25 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
+ 	} else {
+ 		struct resource *rsrc = dcp->disp_registers[req->index];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-		dma_addr_t dva = dma_map_resource(dcp->dev, rsrc->start, resource_size(rsrc),
+-						  DMA_BIDIRECTIONAL, 0);
++		dma_addr_t dva;
++		size_t size = resource_size(rsrc);
++
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++		/*
++		 * 26.6 returns register-window physical addresses directly. DCP
++		 * issues these firmware-owned MMIO transactions on its dedicated
++		 * DART-bypass stream; installing a mapping in the normal DMA stream
++		 * does not affect them.
++		 */
++		dva = rsrc->start;
++		dev_dbg(dcp->dev,
++			 "D411: physical reg[%u] DVA/PA %#llx size %#zx\n",
++			 req->index, (unsigned long long)dva, size);
++#else
++		dva = dma_map_resource(dcp->dev, rsrc->start, size,
++				       DMA_BIDIRECTIONAL, 0);
+ 		WARN_ON(dva == DMA_MAPPING_ERROR);
++#endif
+ #endif
+ 
+ 		return (struct DCP_FW_NAME(dcp_map_reg_resp)){
+@@ -486,10 +624,10 @@ static struct DCP_FW_NAME(dcp_map_reg_resp) dcpep_cb_map_reg(struct apple_dcp *d
+ 	}
+ }
+ 
+-static struct dcp_read_edt_data_resp
++static dcp_read_edt_data_resp_t
+ dcpep_cb_read_edt_data(struct apple_dcp *dcp, struct dcp_read_edt_data_req *req)
+ {
+-	return (struct dcp_read_edt_data_resp){
++	return (dcp_read_edt_data_resp_t){
+ 		.value[0] = req->value[0],
+ 		.ret = 0,
+ 	};
+@@ -624,7 +762,7 @@ static void boot_5(struct apple_dcp *dcp, void *out, void *cookie)
+ static void boot_4(struct apple_dcp *dcp, void *out, void *cookie)
+ {
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	u32 v_true = 1;
++	dcp_bool_arg_t v_true = dcp_bool_arg(true);
+ 	dcp_late_init_signal(dcp, false, &v_true, boot_5, NULL);
+ #else
+ 	dcp_late_init_signal(dcp, false, boot_5, NULL);
+@@ -633,7 +771,7 @@ static void boot_4(struct apple_dcp *dcp, void *out, void *cookie)
+ 
+ static void boot_3(struct apple_dcp *dcp, void *out, void *cookie)
+ {
+-	u32 v_true = true;
++	dcp_bool_arg_t v_true = dcp_bool_arg(true);
+ 
+ 	dcp_flush_supports_power(dcp, false, &v_true, boot_4, NULL);
+ }
+@@ -674,13 +812,13 @@ static struct dcp_rt_bandwidth dcpep_cb_rt_bandwidth(struct apple_dcp *dcp)
+ 			.doorbell_bit = 0,
+ 	};
+ 
+-	if (dcp->disp_bw_scratch_index) {
++	if (!dcp_disable_rt_bandwidth && dcp->disp_bw_scratch_index) {
+ 		u32 offset = dcp->disp_bw_scratch_offset;
+ 		u32 index = dcp->disp_bw_scratch_index;
+ 		rt_bw.reg_scratch = dcp->disp_registers[index]->start + offset;
+ 	}
+ 
+-	if (dcp->disp_bw_doorbell_index) {
++	if (!dcp_disable_rt_bandwidth && dcp->disp_bw_doorbell_index) {
+ 		u32 index = dcp->disp_bw_doorbell_index;
+ 		rt_bw.reg_doorbell = dcp->disp_registers[index]->start;
+ 		rt_bw.doorbell_bit = REG_DOORBELL_BIT(dcp->index);
+@@ -695,12 +833,26 @@ static struct dcp_rt_bandwidth dcpep_cb_rt_bandwidth(struct apple_dcp *dcp)
+ 	return rt_bw;
+ }
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++static struct dcp_set_frame_sync_props_resp_v26_6_0
++dcpep_cb_set_frame_sync_props(
++	struct apple_dcp *dcp,
++	struct dcp_set_frame_sync_props_req_v26_6_0 *req)
++{
++	struct dcp_set_frame_sync_props_resp_v26_6_0 resp;
++
++	memcpy(resp.props, req->props, sizeof(resp.props));
++	memset(&resp.props[73], 0, 3);
++	return resp;
++}
++#else
+ static struct dcp_set_frame_sync_props_resp
+ dcpep_cb_set_frame_sync_props(struct apple_dcp *dcp,
+ 			      struct dcp_set_frame_sync_props_req *req)
+ {
+ 	return (struct dcp_set_frame_sync_props_resp){};
+ }
++#endif
+ 
+ /* Callback to get the current time as milliseconds since the UNIX epoch */
+ static u64 dcpep_cb_get_time(struct apple_dcp *dcp)
+@@ -754,7 +906,7 @@ static void dcp_swap_cleared(struct apple_dcp *dcp, void *data, void *cookie)
+ static void dcp_swap_clear_started(struct apple_dcp *dcp, void *data,
+ 				   void *cookie)
+ {
+-	struct dcp_swap_start_resp *resp = data;
++	struct DCP_FW_NAME(dcp_swap_start_resp) *resp = data;
+ 	DCP_FW_UNION(dcp->swap).swap.swap_id = resp->swap_id;
+ 
+ 	if (cookie) {
+@@ -775,35 +927,107 @@ static void dcp_on_final(struct apple_dcp *dcp, void *out, void *cookie)
+ 	}
+ }
+ 
++static void dcp_on_set_parameter(struct apple_dcp *dcp, void *out,
++				 void *cookie);
++
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++static const struct dcp_method_entry dcp_prepare_wake_method = {
++	.name = "dcpep_prepare_wake",
++	.tag = { 'A', '4', '1', '4' },
++};
++
++static const struct dcp_method_entry dcp_finish_wake_method = {
++	.name = "dcpep_finish_wake",
++	.tag = { 'A', '4', '7', '4' },
++};
++
++static const struct dcp_method_entry dcp_get_mode_info_method = {
++	.name = "dcpep_get_mode_info",
++	.tag = { 'A', '3', '6', '4' },
++};
++#endif
++
+ static void dcp_on_set_power_state(struct apple_dcp *dcp, void *out, void *cookie)
+ {
+-	struct dcp_set_power_state_req req = {
+-		.unklong = 1,
+-	};
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	u32 handle = dcp->main_display ? 0 : 2;
++
++	dcp_set_display_device(dcp, false, &handle,
++			       dcp->main_display ? dcp_on_final : dcp_on_set_parameter,
++			       cookie);
++#else
++	dcp_power_state_req_t req =
++		dcp_power_state_req(1, DCP_POWER_TRANSITION_NONE);
+ 
+ 	dcp_set_power_state(dcp, false, &req, dcp_on_final, cookie);
++#endif
+ }
+ 
+ static void dcp_on_set_parameter(struct apple_dcp *dcp, void *out, void *cookie)
+ {
+-	struct dcp_set_parameter_dcp param = {
+-		.param = IOMFBPARAM_ADAPTIVE_SYNC,
+-		.value = { 0 },
++	struct dcp_set_parameter_dcp param;
++	u32 count =
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-		.count = 3,
++		3;
+ #else
+-		.count = 1,
++		1;
+ #endif
+-	};
+ 
+-	dcp_set_parameter_dcp(dcp, false, &param, dcp_on_set_power_state, cookie);
++	memset(&param, 0xaa, sizeof(param));
++	param.param = IOMFBPARAM_ADAPTIVE_SYNC;
++	memset(param.value, 0, count * sizeof(param.value[0]));
++	param.count = count;
++
++	dcp_set_parameter_dcp(dcp, false, &param,
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++			      dcp_on_final,
++#else
++			      dcp_on_set_power_state,
++#endif
++			      cookie);
+ }
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++static void dcp_poweron_after_main_display(struct apple_dcp *dcp, void *out,
++					   void *cookie)
++{
++	dcp_power_state_req_t power_req =
++		dcp_power_state_req(1, DCP_POWER_TRANSITION_NONE);
++
++	dcp_set_power_state(dcp, false, &power_req, dcp_on_set_power_state,
++			    cookie);
++}
++
++static void dcp_poweron_after_finish_wake(struct apple_dcp *dcp, void *out,
++					  void *cookie)
++{
++	dcp_is_main_display(dcp, false, dcp_poweron_after_main_display, cookie);
++}
++
++static void dcp_poweron_after_first_client(struct apple_dcp *dcp, void *out,
++					   void *cookie)
++{
++	dcp_push(dcp, false, &dcp_finish_wake_method, 0, sizeof(u32), NULL,
++		 dcp_poweron_after_finish_wake, cookie);
++}
++
++static void dcp_poweron_after_prepare_wake(struct apple_dcp *dcp, void *out,
++					   void *cookie)
++{
++	dcp_first_client_open(dcp, false, dcp_poweron_after_first_client,
++			      cookie);
++}
++#endif
++
+ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
+ {
+ 	struct dcp_wait_cookie *cookie;
+ 	int ret;
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	const u8 prepare_wake[8] = { 0, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa };
++#else
+ 	u32 handle;
++#endif
+ 	dev_info(dcp->dev, "dcp_poweron() starting\n");
+ 
+ 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
+@@ -815,6 +1039,15 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
+ 	/* increase refcount to ensure the receiver has a reference */
+ 	kref_get(&cookie->refcount);
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	/* This is the wake ordering observed on 26.6 after A500 put the
++	 * external-display pipeline to sleep.  Omitting A414/A474, or selecting
++	 * the display before A473, leaves fControllerPowerState at zero and DCP
++	 * silently swallows every scanout swap. */
++	dcp_push(dcp, false, &dcp_prepare_wake_method, sizeof(prepare_wake),
++		 sizeof(u64), (void *)prepare_wake,
++		 dcp_poweron_after_prepare_wake, cookie);
++#else
+ 	if (dcp->main_display) {
+ 		handle = 0;
+ 		dcp_set_display_device(dcp, false, &handle, dcp_on_set_power_state,
+@@ -824,6 +1057,7 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
+ 		dcp_set_display_device(dcp, false, &handle,
+ 				       dcp_on_set_parameter, cookie);
+ 	}
++#endif
+ 	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(10000));
+ 
+ 	if (ret == 0) {
+@@ -857,11 +1091,30 @@ static void complete_set_powerstate(struct apple_dcp *dcp, void *out,
+ 	}
+ }
+ 
+-static void last_client_closed_poff(struct apple_dcp *dcp, void *out, void *cookie)
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++static void dcp_poweroff_after_main_display(struct apple_dcp *dcp, void *out,
++					     void *cookie)
+ {
+-	struct dcp_set_power_state_req power_req = {
+-		.unklong = 0,
+-	};
++	dcp_power_state_req_t power_req =
++		dcp_power_state_req(0, DCP_POWER_TRANSITION_DISPLAY_OFF);
++
++	dcp_set_power_state(dcp, false, &power_req, complete_set_powerstate,
++			    cookie);
++}
++
++static void dcp_poweroff_after_prepare_state(struct apple_dcp *dcp, void *out,
++					      void *cookie)
++{
++	dcp_is_main_display(dcp, false, dcp_poweroff_after_main_display, cookie);
++}
++#endif
++
++#if DCP_FW_VER < DCP_FW_VERSION(26, 6, 0)
++static void last_client_closed_poff(struct apple_dcp *dcp, void *out,
++				    void *cookie)
++{
++	dcp_power_state_req_t power_req =
++		dcp_power_state_req(0, DCP_POWER_TRANSITION_DISPLAY_OFF);
+ 	dcp_set_power_state(dcp, false, &power_req, complete_set_powerstate,
+ 			    cookie);
+ }
+@@ -872,18 +1125,18 @@ static void aborted_swaps_dcp_poff(struct apple_dcp *dcp, void *out, void *cooki
+ 	iomfb_last_client_close(dcp, false, &last_client_req,
+ 				last_client_closed_poff, cookie);
+ }
++#endif
+ 
+ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ {
+ 	int ret, swap_id;
+-	struct iomfb_abort_swaps_dcp_req abort_req = {
+-		.client = {
+-			.flag2 = 1,
+-		},
+-	};
++#if DCP_FW_VER < DCP_FW_VERSION(26, 6, 0)
++	dcp_abort_swaps_req_t abort_req = dcp_abort_swaps_request(dcp);
++#endif
+ 	struct dcp_swap_cookie *cookie;
+ 	struct dcp_wait_cookie *poff_cookie;
+-	struct dcp_swap_start_req swap_req = { 0 };
++	struct DCP_FW_NAME(dcp_swap_start_req) swap_req =
++		dcp_swap_start_request(dcp);
+ 	struct DCP_FW_NAME(dcp_swap_submit_req) *swap = &DCP_FW_UNION(dcp->swap);
+ 
+ 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
+@@ -909,7 +1162,11 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	 * brightness.
+ 	 */
+ 	if (dcp_has_panel(dcp)) {
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++		swap->swap.bl_update = 1;
++#else
+ 		swap->swap.bl_unk = 1;
++#endif
+ 		swap->swap.bl_value = 0;
+ 		swap->swap.bl_power = 0;
+ 	}
+@@ -918,7 +1175,7 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	for (int l = 0; l < SWAP_SURFACES; l++)
+ 		swap->surf_null[l] = true;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	for (int l = 0; l < 5; l++)
++	for (int l = 0; l < ARRAY_SIZE(swap->surf2_null); l++)
+ 		swap->surf2_null[l] = true;
+ 	swap->unkU32Ptr_null = true;
+ 	swap->unkU32out_null = true;
+@@ -944,8 +1201,24 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	/* increase refcount to ensure the receiver has a reference */
+ 	kref_get(&poff_cookie->refcount);
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	/* Native 26.6 ordinary hot-unplug goes directly from its clear
++	 * transaction through A414/A412/A473.  A469 abort-swaps and A458
++	 * last-client-close only appear in full shutdown/sleep traces, and may
++	 * tear down state which the link power-off callbacks still require. */
++	{
++		const u8 prepare_state[8] = {
++			0, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa,
++		};
++
++		dcp_push(dcp, false, &dcp_prepare_wake_method,
++			 sizeof(prepare_state), sizeof(u64), (void *)prepare_state,
++			 dcp_poweroff_after_prepare_state, poff_cookie);
++	}
++#else
+ 	iomfb_abort_swaps_dcp(dcp, false, &abort_req,
+ 				aborted_swaps_dcp_poff, poff_cookie);
++#endif
+ 	ret = wait_for_completion_timeout(&poff_cookie->done,
+ 					  msecs_to_jiffies(1000));
+ 
+@@ -963,9 +1236,8 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 
+ static void last_client_closed_sleep(struct apple_dcp *dcp, void *out, void *cookie)
+ {
+-	struct dcp_set_power_state_req power_req = {
+-		.unklong = 0,
+-	};
++	dcp_power_state_req_t power_req =
++		dcp_power_state_req(0, DCP_POWER_TRANSITION_RESTARTABLE_SLEEP);
+ 	dcp_set_power_state(dcp, false, &power_req, complete_set_powerstate, cookie);
+ }
+ 
+@@ -978,11 +1250,7 @@ static void aborted_swaps_dcp_sleep(struct apple_dcp *dcp, void *out, void *cook
+ void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp)
+ {
+ 	int ret;
+-	struct iomfb_abort_swaps_dcp_req req = {
+-		.client = {
+-			.flag2 = 1,
+-		},
+-	};
++	dcp_abort_swaps_req_t req = dcp_abort_swaps_request(dcp);
+ 
+ 	struct dcp_wait_cookie *cookie;
+ 
+@@ -1006,7 +1274,7 @@ void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp)
+ 	dev_info(dcp->dev, "dcp_sleep() done\n");
+ }
+ 
+-static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
++static void dcpep_cb_hotplug_state(struct apple_dcp *dcp, u64 connected)
+ {
+ 	struct apple_connector *connector = dcp->connector;
+ 
+@@ -1023,31 +1291,55 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
+ 	if (dcp->during_modeset) {
+ 		dev_info(dcp->dev,
+ 			 "cb_hotplug() ignored during modeset connected:%llu\n",
+-			 *connected);
++			 connected);
+ 		return;
+ 	}
+ 
+ 	dev_info(dcp->dev, "cb_hotplug() connected:%llu, valid_mode:%d\n",
+-		 *connected, dcp->valid_mode);
++		 connected, dcp->valid_mode);
+ 
+ 	/* Hotplug invalidates mode. DRM doesn't always handle this. */
+-	if (!(*connected)) {
++	if (!connected) {
+ 		dcp->valid_mode = false;
+ 		/* after unplug swap will not complete until the next
+ 		 * set_digital_out_mode */
+ 		schedule_work(&dcp->vblank_wq);
+ 	}
+ 
+-	if (connector && connector->connected != !!(*connected)) {
+-		connector->connected = !!(*connected);
++	if (connector && connector->connected != !!connected) {
++		connector->connected = !!connected;
+ 		dcp->valid_mode = false;
+ 		schedule_work(&connector->hotplug_wq);
+ 	}
+ }
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++static struct dcp_hotplug_resp_v26_6
++dcpep_cb_hotplug(struct apple_dcp *dcp, struct dcp_hotplug_req_v26_6 *req)
++{
++	struct dcp_hotplug_resp_v26_6 resp = { 0 };
++
++	dcpep_cb_hotplug_state(dcp, req->connected);
++
++	/* Every captured 26.6 connected response has an unaligned 0xffffffff
++	 * field at offsets 71..74.  Byte 75 is padding and varies in native
++	 * traces, so leave it initialized to zero.  The disconnected response
++	 * contains additional state that is not decoded yet. */
++	if (req->connected)
++		memset(&resp.opaque[0x47], 0xff, sizeof(u32));
++
++	return resp;
++}
++#else
++static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
++{
++	dcpep_cb_hotplug_state(dcp, *connected);
++}
++#endif
++
+ static void
+ dcpep_cb_swap_complete_intent_gated(struct apple_dcp *dcp,
+-				    struct dcp_swap_complete_intent_gated *info)
++				    dcp_swap_intent_t *info)
+ {
+ 	trace_iomfb_swap_complete_intent_gated(dcp, info->swap_id,
+ 		info->width, info->height);
+@@ -1085,7 +1377,8 @@ TRAMPOLINE_INOUT(trampoline_get_uint_prop, dcpep_cb_get_uint_prop,
+ TRAMPOLINE_IN(trampoline_set_fx_prop, iomfbep_cb_set_fx_prop,
+ 	      struct iomfb_set_fx_prop_req)
+ TRAMPOLINE_INOUT(trampoline_map_piodma, dcpep_cb_map_piodma,
+-		 struct dcp_map_buf_req, struct dcp_map_buf_resp);
++		 struct dcp_map_buf_req,
++		 struct DCP_FW_NAME(dcp_map_buf_resp));
+ TRAMPOLINE_IN(trampoline_unmap_piodma, dcpep_cb_unmap_piodma,
+ 	      struct dcp_unmap_buf_resp);
+ TRAMPOLINE_INOUT(trampoline_sr_set_property_int, iomfbep_cb_sr_set_property_int,
+@@ -1101,7 +1394,7 @@ TRAMPOLINE_INOUT(trampoline_map_reg, dcpep_cb_map_reg,
+ 		 struct DCP_FW_NAME(dcp_map_reg_req),
+ 		 struct DCP_FW_NAME(dcp_map_reg_resp));
+ TRAMPOLINE_INOUT(trampoline_read_edt_data, dcpep_cb_read_edt_data,
+-		 struct dcp_read_edt_data_req, struct dcp_read_edt_data_resp);
++		 struct dcp_read_edt_data_req, dcp_read_edt_data_resp_t);
+ TRAMPOLINE_INOUT(trampoline_prop_start, dcpep_cb_prop_start, u32, u8);
+ TRAMPOLINE_INOUT(trampoline_prop_chunk, dcpep_cb_prop_chunk,
+ 		 struct dcp_set_dcpav_prop_chunk_req, u8);
+@@ -1111,15 +1404,28 @@ TRAMPOLINE_INOUT(trampoline_allocate_bandwidth, dcpep_cb_allocate_bandwidth,
+ 	       struct dcp_allocate_bandwidth_req, struct dcp_allocate_bandwidth_resp);
+ TRAMPOLINE_OUT(trampoline_rt_bandwidth, dcpep_cb_rt_bandwidth,
+ 	       struct dcp_rt_bandwidth);
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++TRAMPOLINE_INOUT(trampoline_set_frame_sync_props,
++		 dcpep_cb_set_frame_sync_props,
++		 struct dcp_set_frame_sync_props_req_v26_6_0,
++		 struct dcp_set_frame_sync_props_resp_v26_6_0);
++#else
+ TRAMPOLINE_INOUT(trampoline_set_frame_sync_props, dcpep_cb_set_frame_sync_props,
+-	       struct dcp_set_frame_sync_props_req,
+-	       struct dcp_set_frame_sync_props_resp);
++		 struct dcp_set_frame_sync_props_req,
++		 struct dcp_set_frame_sync_props_resp);
++#endif
+ TRAMPOLINE_OUT(trampoline_get_frequency, dcpep_cb_get_frequency, u64);
+ TRAMPOLINE_OUT(trampoline_get_time, dcpep_cb_get_time, u64);
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++TRAMPOLINE_INOUT(trampoline_hotplug, dcpep_cb_hotplug,
++		 struct dcp_hotplug_req_v26_6,
++		 struct dcp_hotplug_resp_v26_6);
++#else
+ TRAMPOLINE_IN(trampoline_hotplug, dcpep_cb_hotplug, u64);
++#endif
+ TRAMPOLINE_IN(trampoline_swap_complete_intent_gated,
+ 	      dcpep_cb_swap_complete_intent_gated,
+-	      struct dcp_swap_complete_intent_gated);
++	      dcp_swap_intent_t);
+ TRAMPOLINE_IN(trampoline_abort_swap_ap_gated, dcpep_cb_abort_swap_ap_gated, u32);
+ TRAMPOLINE_IN(trampoline_enable_backlight_message_ap_gated,
+ 	      iomfbep_cb_enable_backlight_message_ap_gated, u8);
+@@ -1160,7 +1466,7 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
+ 
+ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
+ {
+-	struct dcp_swap_start_resp *resp = data;
++	struct DCP_FW_NAME(dcp_swap_start_resp) *resp = data;
+ 
+ 	DCP_FW_UNION(dcp->swap).swap.swap_id = resp->swap_id;
+ 
+@@ -1171,7 +1477,8 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
+ /* Helpers to modeset and swap, used to flush */
+ static void do_swap(struct apple_dcp *dcp, void *data, void *cookie)
+ {
+-	struct dcp_swap_start_req start_req = { 0 };
++	struct DCP_FW_NAME(dcp_swap_start_req) start_req =
++		dcp_swap_start_request(dcp);
+ 
+ 	if (dcp->connector && dcp->connector->connected)
+ 		dcp_swap_start(dcp, false, &start_req, dcp_swap_started, NULL);
+@@ -1190,12 +1497,71 @@ static void complete_set_digital_out_mode(struct apple_dcp *dcp, void *data,
+ 	}
+ }
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++struct dcp_modeset_cookie {
++	/* Must be first: release_wait_cookie() frees this allocation. */
++	struct dcp_wait_cookie wait;
++	struct dcp_set_digital_out_mode_req actual;
++	struct dcp_set_digital_out_mode_req bootstrap;
++};
++
++static void dcp_get_mode_info(struct apple_dcp *dcp,
++			      const struct dcp_set_digital_out_mode_req *mode,
++			      dcp_callback_t cb, void *cookie)
++{
++	struct dcp_get_mode_info_req_v26_6 req;
++
++	/* Match the initialized bytes in native 26.6 requests.  A364 fills the
++	 * mode record before A413 consumes the selected timing/color pair. */
++	memset(&req, 0xaa, sizeof(req));
++	memset(req.mode, 0, sizeof(req.mode));
++	req.mode_null = 0;
++	req.timing_mode_id = mode->timing_mode_id;
++	req.color_mode_id = mode->color_mode_id;
++	req.result_null = 0;
++	memset(req.padding1, 0, sizeof(req.padding1));
++
++	dcp_push(dcp, false, &dcp_get_mode_info_method, sizeof(req),
++		 sizeof(struct dcp_get_mode_info_resp_v26_6), &req, cb, cookie);
++}
++
++static void dcp_modeset_after_actual_info(struct apple_dcp *dcp, void *data,
++					   void *cookie)
++{
++	struct dcp_modeset_cookie *modeset = cookie;
++
++	dcp_set_digital_out_mode(dcp, false, &modeset->actual,
++				 complete_set_digital_out_mode, cookie);
++}
++
++static void dcp_modeset_after_bootstrap(struct apple_dcp *dcp, void *data,
++					 void *cookie)
++{
++	struct dcp_modeset_cookie *modeset = cookie;
++
++	dcp_get_mode_info(dcp, &modeset->actual,
++			  dcp_modeset_after_actual_info, cookie);
++}
++
++static void dcp_modeset_after_bootstrap_info(struct apple_dcp *dcp, void *data,
++					      void *cookie)
++{
++	struct dcp_modeset_cookie *modeset = cookie;
++
++	dcp_set_digital_out_mode(dcp, false, &modeset->bootstrap,
++				 dcp_modeset_after_bootstrap, cookie);
++}
++#endif
++
+ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 			       struct drm_crtc_state *crtc_state)
+ {
+ 	struct dcp_display_mode *mode;
+ 	struct dcp_wait_cookie *cookie;
+ 	struct dcp_color_mode *cmode = NULL;
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	struct dcp_modeset_cookie *modeset_cookie;
++#endif
+ 	int ret;
+ 
+ 	mode = lookup_mode(dcp, &crtc_state->mode);
+@@ -1232,7 +1598,15 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 	/* Keep track of suspected vrr modes */
+ 	dcp->use_timestamps = mode->vrr;
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	modeset_cookie = kzalloc(sizeof(*modeset_cookie), GFP_KERNEL);
++	if (!modeset_cookie)
++		return -ENOMEM;
++	cookie = &modeset_cookie->wait;
++	modeset_cookie->actual = dcp->mode;
++#else
+ 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
++#endif
+ 	if (!cookie) {
+ 		return -ENOMEM;
+ 	}
+@@ -1244,8 +1618,29 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 
+ 	dcp->during_modeset = true;
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	if (!dcp->valid_mode && mode->bootstrap.score >= 0) {
++		modeset_cookie->bootstrap =
++			(struct dcp_set_digital_out_mode_req) {
++				.color_mode_id = mode->bootstrap.id,
++				.timing_mode_id = mode->timing_mode_id,
++			};
++		dev_info(dcp->dev,
++			 "bootstrapping generic pipe (color:%u timing:%u)\n",
++			 modeset_cookie->bootstrap.color_mode_id,
++			 modeset_cookie->bootstrap.timing_mode_id);
++		dcp_get_mode_info(dcp, &modeset_cookie->bootstrap,
++				  dcp_modeset_after_bootstrap_info,
++				  modeset_cookie);
++	} else {
++		dcp_get_mode_info(dcp, &modeset_cookie->actual,
++				  dcp_modeset_after_actual_info,
++				  modeset_cookie);
++	}
++#else
+ 	dcp_set_digital_out_mode(dcp, false, &dcp->mode,
+ 				 complete_set_digital_out_mode, cookie);
++#endif
+ 
+ 	/*
+ 	 * The DCP firmware has an internal timeout of ~8 seconds for
+@@ -1293,11 +1688,15 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 	for (l = 0; l < SWAP_SURFACES; l++)
+ 		req->surf_null[l] = true;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	for (l = 0; l < 5; l++)
++	for (l = 0; l < ARRAY_SIZE(req->surf2_null); l++)
+ 		req->surf2_null[l] = true;
+ 	req->unkU32Ptr_null = true;
+ 	req->unkU32out_null = true;
+ #endif
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	req->swap.presents_surface = 1;
++	req->swap.has_completion = 1;
++#endif
+ 
+ 	/*
+ 	 * Clear all surfaces on startup. The boot framebuffer in surface 0
+@@ -1341,12 +1740,11 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 			drm_framebuffer_get(old_state->fb);
+ 		}
+ 
+-		if (!new_state->fb || !new_state->visible) {
++		if (!new_state->fb || !new_state->visible)
+ 			continue;
+-		}
++
+ 		req->surf_null[l] = false;
+ 		has_surface = 1;
+-
+ 		req->swap.src_rect[l] = apple_state->src_rect;
+ 		req->swap.dst_rect[l] = apple_state->dst_rect;
+ 
+@@ -1356,11 +1754,6 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 		req->surf_iova[l] = apple_state->iova;
+ 		req->surf[l].base = apple_state->surf;
+ 
+-		/* Use sRGB colorspace only for internal panels. External
+-		 * displays are expected to have EDID and user space can use
+-		 * the contained colorimetry information to provide native
+-		 * colors.
+-		 */
+ 		if (dcp->connector_type == DRM_MODE_CONNECTOR_eDP &&
+ 		    req->surf[l].base.colorspace == DCP_COLORSPACE_BG_SRGB)
+ 			req->surf[l].base.colorspace = DCP_COLORSPACE_NATIVE;
+@@ -1394,7 +1787,11 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 
+ 	/* update brightness if changed */
+ 	if (dcp_has_panel(dcp) && dcp->brightness.update) {
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++		req->swap.bl_update = 1;
++#else
+ 		req->swap.bl_unk = 1;
++#endif
+ 		req->swap.bl_value = dcp->brightness.dac;
+ 		req->swap.bl_power = 0x40;
+ 		dcp->brightness.update = false;
+@@ -1465,9 +1862,8 @@ static void dcp_started(struct apple_dcp *dcp, void *data, void *cookie)
+ 
+ void DCP_FW_NAME(iomfb_shutdown)(struct apple_dcp *dcp)
+ {
+-	struct dcp_set_power_state_req req = {
+-		/* defaults are ok */
+-	};
++	dcp_power_state_req_t req =
++		dcp_power_state_req(0, DCP_POWER_TRANSITION_SHUTDOWN);
+ 
+ 	dcp_set_power_state(dcp, false, &req, NULL, NULL);
+ }
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index 567914b60c81..fe0b191d40db 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -31,6 +31,10 @@ struct DCP_FW_NAME(dcp_swap) {
+ 	u64 flags1;
+ 	u64 flags2;
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 unk_v14_7[0x48];
++#endif
++
+ 	u32 swap_id;
+ 
+ 	u32 surf_ids[SWAP_SURFACES];
+@@ -42,22 +46,46 @@ struct DCP_FW_NAME(dcp_swap) {
+ 	u32 swap_completed;
+ 
+ 	u32 bg_color;
+-	u8 unk_110[0x1b8];
++	u8 unk_110[0x30];
++	u32 active_region_en[SWAP_SURFACES];
++	struct dcp_rect active_regions[SWAP_SURFACES];
++	u8 unk_190[0x138];
+ 	u32 unk_2c8;
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7, 0)
+ 	u8 unk_2cc[0x14];
+ 	u32 unk_2e0;
++#else
++	u8 unk_2cc[0x40];
++	u32 bl_update;
++#endif
+ #if DCP_FW_VER < DCP_FW_VERSION(13, 2, 0)
+ 	u16 unk_2e2;
+ #else
+ 	u8 unk_2e2[3];
+ #endif
++#if DCP_FW_VER < DCP_FW_VERSION(14, 7, 0)
+ 	u64 bl_unk;
++#else
++	u32 bl_unk;
++#endif
+ 	u32 bl_value; // min value is 0x10000000
+ 	u8  bl_power; // constant 0x40 for on
+ 	u8 unk_2f3[0x2d];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+-	u8 unk_320[0x13f];
+-	u64 unk_1;
++	u8 unk_320[0x147];
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
++	u8 unk_14_7_2[0x30];
++#endif
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	/* Added after the 14.7 swap record.  Native 26.6 sets both bytes for
++	 * ordinary visible swaps; the remaining bytes have always been zero in
++	 * traces. */
++	u8 unk_26_6[0x16];
++	u8 presents_surface;
++	u8 unk_26_6_17[0x51];
++	u8 has_completion;
++	u8 unk_26_6_69[0x17];
++#endif
+ #endif
+ } __packed;
+ 
+@@ -79,8 +107,13 @@ struct DCP_FW_NAME(dcp_swap_submit_req) {
+ 	u64 surf_iova[SWAP_SURFACES];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u64 unk_u64_a[SWAP_SURFACES];
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	struct DCP_FW_NAME(dcp_surface) surf2[6];
++	u64 surf2_iova[6];
++#else
+ 	struct DCP_FW_NAME(dcp_surface) surf2[5];
+ 	u64 surf2_iova[5];
++#endif
+ #endif
+ 	u8 unkbool;
+ 	u64 unkdouble;
+@@ -95,14 +128,27 @@ struct DCP_FW_NAME(dcp_swap_submit_req) {
+ 	u8 swap_null;
+ 	u8 surf_null[SWAP_SURFACES];
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	u8 surf2_null[6];
++#else
+ 	u8 surf2_null[5];
++#endif
+ #endif
+ 	u8 unkoutbool_null;
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u8 unkU32Ptr_null;
+ 	u8 unkU32out_null;
+ #endif
++#if DCP_FW_VER < DCP_FW_VERSION(26, 6, 0)
+ 	u8 padding[1];
++#endif
++#if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0) && \
++	DCP_FW_VER < DCP_FW_VERSION(26, 6, 0)
++	u8 padding_14_7[0x1e9];
++	u8 unk_14_7_zero[0x46];
++	u32 unk_14_7_u32;
++	u8 unk_bool;
++#endif
+ } __packed;
+ 
+ struct DCP_FW_NAME(dcp_swap_submit_resp) {
+@@ -116,6 +162,9 @@ struct DCP_FW_NAME(dcp_swap_submit_resp) {
+ 
+ struct DCP_FW_NAME(dc_swap_complete_resp) {
+ 	u32 swap_id;
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	u8 opaque[0x72c];
++#else
+ 	u8 unkbool;
+ 	u64 swap_data;
+ #if DCP_FW_VER < DCP_FW_VERSION(13, 2, 0)
+@@ -125,8 +174,49 @@ struct DCP_FW_NAME(dc_swap_complete_resp) {
+ #endif
+ 	u32 unkint;
+ 	u8 swap_info_null;
++#endif
+ } __packed;
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++struct DCP_FW_NAME(dcp_swap_start_req) {
++	u32 swap_id;
++	u64 client;
++	u8 swap_id_null;
++	u8 padding[3];
++} __packed;
++
++struct DCP_FW_NAME(dcp_swap_start_resp) {
++	u32 swap_id;
++	u32 ret;
++} __packed;
++
++struct DCP_FW_NAME(dcp_map_buf_resp) {
++	u32 buffer;
++	u64 dva;
++	u32 ret;
++} __packed;
++#else
++struct DCP_FW_NAME(dcp_swap_start_req) {
++	u32 swap_id;
++	struct dcp_iouserclient client;
++	u8 swap_id_null;
++	u8 client_null;
++	u8 padding[2];
++} __packed;
++
++struct DCP_FW_NAME(dcp_swap_start_resp) {
++	u32 swap_id;
++	struct dcp_iouserclient client;
++	u32 ret;
++} __packed;
++
++struct DCP_FW_NAME(dcp_map_buf_resp) {
++	u64 vaddr;
++	u64 dva;
++	u32 ret;
++} __packed;
++#endif
++
+ struct DCP_FW_NAME(dcp_map_reg_req) {
+ 	char obj[4];
+ 	u32 index;
+diff --git a/drivers/gpu/drm/apple/iomfb_v12_3.c b/drivers/gpu/drm/apple/iomfb_v12_3.c
+index 0fe08c42d646..f7592dffd9c0 100644
+--- a/drivers/gpu/drm/apple/iomfb_v12_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v12_3.c
+@@ -3,6 +3,7 @@
+ 
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "iomfb_v26_6.h"
+ #include "version_utils.h"
+ 
+ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+diff --git a/drivers/gpu/drm/apple/iomfb_v13_3.c b/drivers/gpu/drm/apple/iomfb_v13_3.c
+index 115490fd9cc6..59c025feb2c7 100644
+--- a/drivers/gpu/drm/apple/iomfb_v13_3.c
++++ b/drivers/gpu/drm/apple/iomfb_v13_3.c
+@@ -3,6 +3,7 @@
+ 
+ #include "iomfb_v12_3.h"
+ #include "iomfb_v13_3.h"
++#include "iomfb_v26_6.h"
+ #include "version_utils.h"
+ 
+ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
+diff --git a/drivers/gpu/drm/apple/iomfb_v26_6.c b/drivers/gpu/drm/apple/iomfb_v26_6.c
+new file mode 100644
+index 000000000000..488e4a88a97d
+--- /dev/null
++++ b/drivers/gpu/drm/apple/iomfb_v26_6.c
+@@ -0,0 +1,167 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright The Asahi Linux Contributors */
++
++#include <linux/build_bug.h>
++
++#include "iomfb_v12_3.h"
++#include "iomfb_v13_3.h"
++#include "iomfb_v26_6.h"
++#include "version_utils.h"
++
++static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
++	IOMFB_METHOD("A000", dcpep_late_init_signal),
++	IOMFB_METHOD("A029", dcpep_setup_video_limits),
++	IOMFB_METHOD("A131", iomfbep_a131_pmu_service_matched),
++	IOMFB_METHOD("A132", iomfbep_a132_backlight_service_matched),
++	IOMFB_METHOD("A385", dcpep_set_create_dfb),
++	IOMFB_METHOD("A386", iomfbep_a358_vi_set_temperature_hint),
++	IOMFB_METHOD("A401", dcpep_start_signal),
++	IOMFB_METHOD("A406", dcpep_swap_start),
++	IOMFB_METHOD("A407", dcpep_swap_submit),
++	IOMFB_METHOD("A411", dcpep_set_display_device),
++	IOMFB_METHOD("A412", dcpep_is_main_display),
++	IOMFB_METHOD("A413", dcpep_set_digital_out_mode),
++	IOMFB_METHOD("A423", iomfbep_set_matrix),
++	IOMFB_METHOD("A427", iomfbep_get_color_remap_mode),
++	IOMFB_METHOD("A442", dcpep_set_parameter_dcp),
++	IOMFB_METHOD("A446", dcpep_create_default_fb),
++	IOMFB_METHOD("A450", dcpep_enable_disable_video_power_savings),
++	IOMFB_METHOD("A457", dcpep_first_client_open),
++	IOMFB_METHOD("A458", iomfbep_last_client_close),
++	IOMFB_METHOD("A465", dcpep_set_display_refresh_properties),
++	IOMFB_METHOD("A468", dcpep_flush_supports_power),
++	IOMFB_METHOD("A469", iomfbep_abort_swaps_dcp),
++	IOMFB_METHOD("A473", dcpep_set_power_state),
++};
++
++#define DCP_FW v26_6_0
++#define DCP_FW_VER DCP_FW_VERSION(26, 6, 0)
++
++#include "iomfb_template.c"
++
++struct dcp_dict_passthrough_req_v26_6 {
++	u8 key[0x40];
++	u8 value[0x1000];
++	u8 value_null;
++	u8 padding[3];
++} __packed;
++
++struct dcp_dict_passthrough_resp_v26_6 {
++	u8 value[0x1000];
++	u8 ret;
++	u8 padding[3];
++} __packed;
++
++/*
++ * D114 periodically publishes dictionary-valued DCP statistics.  The value
++ * is an in/out pointer: native macOS returns the complete serialized buffer
++ * byte-for-byte and reports false.  Returning an all-zero output is not a
++ * harmless false result because DCP deserializes the in/out value first.
++ */
++static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
++					       void *out, void *in)
++{
++	const struct dcp_dict_passthrough_req_v26_6 *req = in;
++	struct dcp_dict_passthrough_resp_v26_6 *resp = out;
++
++	trace_iomfb_callback(dcp, tag, "dcpep_cb_passthrough_dict");
++
++	if (!req->value_null)
++		memcpy(resp->value, req->value, sizeof(resp->value));
++
++	resp->ret = false;
++	memset(resp->padding, 0, sizeof(resp->padding));
++
++	return true;
++}
++
++static_assert(sizeof(struct dcp_swap_v26_6_0) == 0x588);
++static_assert(sizeof(struct dcp_swap_start_req_v26_6_0) == 0x10);
++static_assert(sizeof(struct dcp_swap_start_resp_v26_6_0) == 0x8);
++static_assert(sizeof(struct dcp_swap_submit_req_v26_6_0) == 0x1bd8);
++static_assert(sizeof(struct dcp_swap_submit_resp_v26_6_0) == 0xc);
++static_assert(sizeof(struct dc_swap_complete_resp_v26_6_0) == 0x730);
++static_assert(sizeof(struct dcp_map_buf_resp_v26_6_0) == 0x10);
++static_assert(sizeof(struct dcp_set_power_state_req_v26_6) == 0x10);
++static_assert(sizeof(struct dcp_set_parameter_dcp) == 0x28);
++static_assert(sizeof(struct dcp_get_mode_info_req_v26_6) == 0x7c);
++static_assert(sizeof(struct dcp_get_mode_info_resp_v26_6) == 0x74);
++static_assert(sizeof(struct iomfb_abort_swaps_dcp_req_v26_6) == 0x8);
++static_assert(sizeof(struct iomfb_abort_swaps_dcp_resp_v26_6) == 0x4);
++static_assert(sizeof(struct dcp_swap_complete_intent_gated_v26_6) == 0x14);
++static_assert(sizeof(struct dcp_hotplug_req_v26_6) == 0x58);
++static_assert(sizeof(struct dcp_hotplug_resp_v26_6) == 0x4c);
++static_assert(sizeof(struct iomfb_property) == 0x10);
++static_assert(sizeof(struct dcp_read_edt_data_resp_v26_6) == 0x24);
++static_assert(sizeof(struct dcp_bool_arg) == 0x4);
++static_assert(sizeof(struct dcp_set_frame_sync_props_req_v26_6_0) == 0x54);
++static_assert(sizeof(struct dcp_set_frame_sync_props_resp_v26_6_0) == 0x50);
++static_assert(sizeof(struct dcp_dict_passthrough_req_v26_6) == 0x1044);
++static_assert(sizeof(struct dcp_dict_passthrough_resp_v26_6) == 0x1004);
++
++static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
++	[0] = trampoline_true,
++	[1] = trampoline_true,
++	[2] = trampoline_nop,
++	[3] = trampoline_rt_bandwidth,
++	[6] = trampoline_set_frame_sync_props,
++	[100] = iomfbep_cb_match_pmu_service,
++	[101] = trampoline_zero,
++	[102] = trampoline_nop,
++	[104] = trampoline_nop,
++	[107] = trampoline_nop,
++	[108] = trampoline_true,
++	[109] = trampoline_true,
++	[110] = trampoline_true,
++	[111] = trampoline_true,
++	[112] = trampoline_create_backlight_service,
++	[113] = trampoline_true,
++	[114] = trampoline_passthrough_dict_v26_6,
++	/* set_tiling_state: 26.6 returns the value followed by success. */
++	[115] = trampoline_get_tiling_state,
++	[121] = dcpep_cb_boot_1,
++	[123] = trampoline_false,
++	[125] = trampoline_read_edt_data,
++	[127] = trampoline_prop_start,
++	[128] = trampoline_prop_chunk,
++	[129] = trampoline_prop_end,
++	[134] = trampoline_zero,
++	[201] = trampoline_map_piodma,
++	[206] = iomfbep_cb_match_pmu_service_2,
++	[207] = iomfbep_cb_match_backlight_service,
++	[208] = trampoline_nop,
++	[209] = trampoline_get_time,
++	[300] = trampoline_pr_publish,
++	[400] = trampoline_nop,
++	[401] = trampoline_get_uint_prop,
++	[408] = trampoline_get_frequency,
++	[411] = trampoline_map_reg,
++	[413] = trampoline_true,
++	[414] = trampoline_sr_set_property_int,
++	[415] = trampoline_true,
++	[451] = trampoline_allocate_buffer,
++	[552] = trampoline_true,
++	[561] = trampoline_true,
++	[563] = trampoline_true,
++	[565] = trampoline_true,
++	[567] = trampoline_true,
++	/* Native 26.6 returns a zero status for both start and stop events. */
++	[572] = trampoline_zero,
++	[575] = trampoline_hotplug,
++	[576] = trampoline_nop,
++	[581] = trampoline_nop,
++	[590] = trampoline_swap_complete,
++	[592] = trampoline_swap_complete_intent_gated,
++	[595] = trampoline_nop,
++	[598] = trampoline_nop,
++	[599] = trampoline_nop,
++};
++
++void DCP_FW_NAME(iomfb_start)(struct apple_dcp *dcp)
++{
++	dcp->cb_handlers = cb_handlers;
++	dcp_start_signal(dcp, false, dcp_started, NULL);
++}
++
++#undef DCP_FW_VER
++#undef DCP_FW
+diff --git a/drivers/gpu/drm/apple/iomfb_v26_6.h b/drivers/gpu/drm/apple/iomfb_v26_6.h
+new file mode 100644
+index 000000000000..8f373ab4102c
+--- /dev/null
++++ b/drivers/gpu/drm/apple/iomfb_v26_6.h
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/* Copyright The Asahi Linux Contributors */
++
++#ifndef __APPLE_IOMFB_V26_6_H__
++#define __APPLE_IOMFB_V26_6_H__
++
++#include "version_utils.h"
++
++#define DCP_FW v26_6_0
++#define DCP_FW_VER DCP_FW_VERSION(26, 6, 0)
++
++#include "iomfb_template.h"
++
++#undef DCP_FW_VER
++#undef DCP_FW
++
++/* D006 set_frame_sync_props grew from 32/28 bytes to 84/80 bytes in 26.6.
++ * Native copies the first 80 request bytes into the response and clears the
++ * three flag bytes at offsets 73..75. */
++struct dcp_set_frame_sync_props_req_v26_6_0 {
++	u8 props[0x50];
++	u8 opaque[0x4];
++} __packed;
++
++struct dcp_set_frame_sync_props_resp_v26_6_0 {
++	u8 props[0x50];
++} __packed;
++
++#endif /* __APPLE_IOMFB_V26_6_H__ */
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index 56960fa1fda2..d0b20f2d2035 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -366,11 +366,20 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
+ 	out->sdr_rgb.score = -1;
+ 	out->sdr.score = -1;
+ 	out->best.score = -1;
++	out->bootstrap.score = -1;
+ 
+ 	dcp_parse_foreach_in_array(handle, outer_it) {
+ 		struct iterator it;
+ 		bool is_virtual = true;
+-		struct color_mode cmode;
++		struct color_mode cmode = {
++			.score = -1,
++			.id = -1,
++			.depth = -1,
++			.pixel_encoding = -1,
++			.dynamic_range = -1,
++			.colorimetry = -1,
++			.eotf = -1,
++		};
+ 
+ 		dcp_parse_foreach_in_dict(handle, it) {
+ 			char *key = parse_string(it.handle);
+@@ -403,8 +412,9 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
+ 				return ret;
+ 		}
+ 
+-		/* Skip virtual or partial entries */
+-		if (is_virtual || cmode.score < 0 || cmode.id < 0)
++		/* Skip partial entries.  26.6 uses a virtual color element to
++		 * bootstrap the generic pipe before selecting a real color mode. */
++		if (cmode.score < 0 || cmode.id < 0)
+ 			continue;
+ 
+ 		trace_iomfb_color_mode(handle->dcp, cmode.id, cmode.score,
+@@ -412,6 +422,11 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
+ 				       cmode.eotf, cmode.dynamic_range,
+ 				       cmode.pixel_encoding);
+ 
++		if (is_virtual) {
++			fill_color_mode(&out->bootstrap, &cmode);
++			continue;
++		}
++
+ 		if (cmode.eotf == DCP_EOTF_SDR_GAMMA) {
+ 			if (cmode.pixel_encoding == DCP_COLOR_FORMAT_RGB &&
+ 				cmode.depth <= 10)
+diff --git a/drivers/gpu/drm/apple/parser.h b/drivers/gpu/drm/apple/parser.h
+index 52c4de46d2f7..c5fc83c61fb7 100644
+--- a/drivers/gpu/drm/apple/parser.h
++++ b/drivers/gpu/drm/apple/parser.h
+@@ -93,6 +93,8 @@ struct dcp_display_mode {
+ 	struct dcp_color_mode sdr_444;
+ 	struct dcp_color_mode sdr;
+ 	struct dcp_color_mode best;
++	/* Virtual color element used to bootstrap the generic display pipe. */
++	struct dcp_color_mode bootstrap;
+ 	bool vrr;
+ };
+ 
+diff --git a/drivers/gpu/drm/apple/plane.c b/drivers/gpu/drm/apple/plane.c
+index aa8c8cca22d6..3d966f222231 100644
+--- a/drivers/gpu/drm/apple/plane.c
++++ b/drivers/gpu/drm/apple/plane.c
+@@ -333,6 +333,9 @@ apple_plane_duplicate_state(struct drm_plane *plane)
+         __drm_atomic_helper_plane_duplicate_state(plane, &apple_plane_state->base);
+ 
+ 	apple_plane_state->surf = old_apple_plane_state->surf;
++	apple_plane_state->src_rect = old_apple_plane_state->src_rect;
++	apple_plane_state->dst_rect = old_apple_plane_state->dst_rect;
++	apple_plane_state->iova = old_apple_plane_state->iova;
+ 
+ 	return &apple_plane_state->base;
+ }

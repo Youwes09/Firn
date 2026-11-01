@@ -1,0 +1,101 @@
+From 961624b61f02e2b2168ccf1e1b609c2722242830 Mon Sep 17 00:00:00 2001
+From: Josh Rodd <josh@rodd.us>
+Date: Mon, 21 Sep 2026 07:42:37 -0400
+Subject: [PATCH] arm64: dts: apple: t8132: Add the MTP
+
+Add the multi-touch processor of the M4 (t8132) notebooks: its ASC,
+mailbox and DART, and the DockChannel FIFO with the HID transport for
+the keyboard and trackpad.
+
+Signed-off-by: Josh Rodd <josh@rodd.us>
+Assisted-by: oh-my-pi:gpt-6-astra
+[Youwes09: split from Gravity Linux 3f56fba5e1c3f; node order, style]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 73 ++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 5dc916d50553..7a3d2ad01f5e 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -587,6 +587,79 @@ pinctrl_aop: pinctrl@390824000 {
+ 			             <AIC_IRQ 429 IRQ_TYPE_LEVEL_HIGH>;
+ 		};
+ 
++		mtp: mtp@394600000 {
++			compatible = "apple,t8132-mtp", "apple,t8132-rtk-helper-asc4",
++				     "apple,mtp", "apple,rtk-helper-asc4";
++			reg = <0x3 0x94600000 0x0 0x4000>;
++			reg-names = "asc";
++			#helper-cells = <0>;
++			iommus = <&mtp_dart 0>;
++			mboxes = <&mtp_mbox>;
++
++			status = "disabled";
++		};
++
++		mtp_mbox: mbox@394608000 {
++			compatible = "apple,t8132-asc-mailbox", "apple,asc-mailbox-v4";
++			reg = <0x3 0x94608000 0x0 0x4000>;
++			#mbox-cells = <0>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1113 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 1114 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 1115 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 1116 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "send-empty", "send-not-empty",
++					  "recv-empty", "recv-not-empty";
++
++			status = "disabled";
++		};
++
++		mtp_dart: iommu@394800000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x3 0x94800000 0x0 0xc000>;
++			#iommu-cells = <1>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1091 IRQ_TYPE_LEVEL_HIGH>;
++			apple,sid-remap = <1 0>, <2 0>, <3 0>;
++
++			status = "disabled";
++		};
++
++		mtp_dockchannel: fifo@394b14000 {
++			compatible = "apple,t8132-dockchannel", "apple,dockchannel";
++			reg = <0x3 0x94b14000 0x0 0x1000>;
++			reg-names = "irq";
++			ranges = <0 0x3 0x94b28000 0x10000>;
++			#address-cells = <1>;
++			#interrupt-cells = <2>;
++			#size-cells = <1>;
++			interrupt-controller;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 1093 IRQ_TYPE_LEVEL_HIGH>;
++			nonposted-mmio;
++
++			status = "disabled";
++
++			mtp_hid: input@0 {
++				compatible = "apple,t8132-dockchannel-hid",
++					     "apple,dockchannel-hid";
++				reg = <0x0000 0x1000>,
++				      <0x4000 0x1000>,
++				      <0x8000 0x1000>,
++				      <0xc000 0x1000>;
++				reg-names = "rmt-config", "rmt-data", "config", "data";
++				interrupt-parent = <&mtp_dockchannel>;
++				interrupts = <2 IRQ_TYPE_LEVEL_HIGH>,
++					     <3 IRQ_TYPE_LEVEL_HIGH>;
++				interrupt-names = "tx", "rx";
++				iommus = <&mtp_dart 0>;
++				apple,fifo-size = <0x800>;
++				apple,helper-cpu = <&mtp>;
++
++				status = "disabled";
++			};
++		};
++
+ 		pinctrl_ap: pinctrl@39a000000 {
+ 			compatible = "apple,t8132-pinctrl", "apple,t8103-pinctrl";
+ 			reg = <0x3 0x9a000000 0x0 0x100000>;

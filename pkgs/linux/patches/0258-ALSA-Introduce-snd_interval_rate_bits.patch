@@ -1,0 +1,74 @@
+From a445c0f53f637166c37f002b78fd68111a57d50a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
+Date: Thu, 23 Feb 2023 12:34:28 +0100
+Subject: [PATCH] ALSA: Introduce 'snd_interval_rate_bits'
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Martin Povišer <povik+lin@cutebit.org>
+---
+ include/sound/pcm.h  |  1 +
+ sound/core/pcm_lib.c | 37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/include/sound/pcm.h b/include/sound/pcm.h
+index 1cf511f8d880..9f698f83ec81 100644
+--- a/include/sound/pcm.h
++++ b/include/sound/pcm.h
+@@ -1077,6 +1077,7 @@ int snd_interval_ranges(struct snd_interval *i, unsigned int count,
+ int snd_interval_ratnum(struct snd_interval *i,
+ 			unsigned int rats_count, const struct snd_ratnum *rats,
+ 			unsigned int *nump, unsigned int *denp);
++int snd_interval_rate_bits(struct snd_interval *i, unsigned int rate_bits);
+ 
+ void _snd_pcm_hw_params_any(struct snd_pcm_hw_params *params);
+ void _snd_pcm_hw_param_setempty(struct snd_pcm_hw_params *params, snd_pcm_hw_param_t var);
+diff --git a/sound/core/pcm_lib.c b/sound/core/pcm_lib.c
+index bb16738bb591..00f1dd4fa993 100644
+--- a/sound/core/pcm_lib.c
++++ b/sound/core/pcm_lib.c
+@@ -1149,6 +1149,43 @@ static int snd_interval_step(struct snd_interval *i, unsigned int step)
+ 	return changed;
+ }
+ 
++/**
++ * snd_interval_rate_bits - refine the rate interval from a rate bitmask
++ * @i: the rate interval to refine
++ * @mask: the rate bitmask
++ *
++ * Refines the interval value, assumed to be the sample rate, according to
++ * a bitmask of available rates (an ORed combination of SNDRV_PCM_RATE_*).
++ *
++ * Return: Positive if the value is changed, zero if it's not changed, or a
++ * negative error code.
++ */
++int snd_interval_rate_bits(struct snd_interval *i, unsigned int mask)
++{
++	unsigned int k;
++	struct snd_interval mask_range;
++
++	if (!mask)
++		return -EINVAL;
++
++	snd_interval_any(&mask_range);
++	mask_range.min = UINT_MAX;
++	mask_range.max = 0;
++	for (k = 0; k < snd_pcm_known_rates.count; k++) {
++		unsigned int rate = snd_pcm_known_rates.list[k];
++		if (!(mask & (1 << k)))
++			continue;
++
++		if (rate > mask_range.max)
++			mask_range.max = rate;
++
++		if (rate < mask_range.min)
++			mask_range.min = rate;
++	}
++	return snd_interval_refine(i, &mask_range);
++}
++EXPORT_SYMBOL(snd_interval_rate_bits);
++
+ /* Info constraints helpers */
+ 
+ /**

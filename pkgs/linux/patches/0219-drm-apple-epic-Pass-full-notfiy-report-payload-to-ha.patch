@@ -1,0 +1,66 @@
+From 34931891f30459600d3d0e5192380d785ab63085 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 10 Dec 2023 13:27:12 +0100
+Subject: [PATCH] drm: apple: epic: Pass full notfiy/report payload to handler
+
+The payload is not necessarily epic_std_service_ap_call. The powerlog
+service on the system endpoint passes serialized dictionaries as
+payload.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/afk.c | 18 +++---------------
+ drivers/gpu/drm/apple/afk.h |  4 +++-
+ 2 files changed, 6 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index d9d8cd4cd486..a0241a3cb9b4 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -447,21 +447,9 @@ static void afk_recv_handle_std_service(struct apple_dcp_afkep *ep, u32 channel,
+ 	}
+ 
+ 	if (type == EPIC_TYPE_NOTIFY && eshdr->category == EPIC_CAT_REPORT) {
+-		struct epic_std_service_ap_call *call = payload;
+-		size_t call_size;
+-
+-		if (payload_size < sizeof(*call))
+-			return;
+-
+-		call_size = le32_to_cpu(call->len);
+-		if (payload_size < sizeof(*call) + call_size)
+-			return;
+-
+-		if (!service->ops->report)
+-			return;
+-
+-		service->ops->report(service, le32_to_cpu(call->type),
+-				     payload + sizeof(*call), call_size);
++		if (service->ops->report)
++			service->ops->report(service, le16_to_cpu(eshdr->type),
++					     payload, payload_size);
+ 		return;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index 1fdb4100352b..737288b1346b 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -49,6 +49,8 @@ struct apple_epic_service {
+ 	void *cookie;
+ };
+ 
++enum epic_subtype;
++
+ struct apple_epic_service_ops {
+ 	const char name[32];
+ 
+@@ -57,7 +59,7 @@ struct apple_epic_service_ops {
+ 	int (*call)(struct apple_epic_service *service, u32 idx,
+ 		    const void *data, size_t data_size, void *reply,
+ 		    size_t reply_size);
+-	int (*report)(struct apple_epic_service *service, u32 idx,
++	int (*report)(struct apple_epic_service *service, enum epic_subtype type,
+ 		      const void *data, size_t data_size);
+ 	void (*teardown)(struct apple_epic_service *service);
+ };

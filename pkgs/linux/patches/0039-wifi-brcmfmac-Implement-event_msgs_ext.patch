@@ -1,0 +1,313 @@
+From 4c91395df1553906b0b53c253fae89805bd94a20 Mon Sep 17 00:00:00 2001
+From: Hector Martin <marcan@marcan.st>
+Date: Wed, 4 Oct 2023 23:54:19 +0900
+Subject: [PATCH] wifi: brcmfmac: Implement event_msgs_ext
+
+This extended command supports bit set/clear operations, but we just use
+it like the old full mask set command.
+
+Signed-off-by: Hector Martin <marcan@marcan.st>
+(cherry picked from commit 9d65dd140018c57bb233aac33ff7e60686fbb02b)
+
+Original-Commit: 805a0fd6dd8a83deec13f2b9a1a73076374ca9d2
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+---
+ .../broadcom/brcm80211/brcmfmac/common.c      |  23 +---
+ .../broadcom/brcm80211/brcmfmac/core.c        |   5 +
+ .../broadcom/brcm80211/brcmfmac/feature.c     |   1 +
+ .../broadcom/brcm80211/brcmfmac/feature.h     |   4 +-
+ .../broadcom/brcm80211/brcmfmac/fweh.c        | 102 +++++++++++++++---
+ .../broadcom/brcm80211/brcmfmac/fweh.h        |   1 +
+ .../broadcom/brcm80211/brcmfmac/fwil_types.h  |  27 +++++
+ 7 files changed, 128 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+index b6027d83e6ab..e3a9ca5526c4 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+@@ -13,6 +13,7 @@
+ #include "core.h"
+ #include "bus.h"
+ #include "debug.h"
++#include "fweh.h"
+ #include "fwil.h"
+ #include "fwil_types.h"
+ #include "tracepoint.h"
+@@ -265,7 +266,6 @@ static int brcmf_c_process_cal_blob(struct brcmf_if *ifp)
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+ {
+ 	struct brcmf_pub *drvr = ifp->drvr;
+-	struct brcmf_fweh_info *fweh = drvr->fweh;
+ 	u8 buf[BRCMF_DCMD_SMLEN];
+ 	struct brcmf_bus *bus;
+ 	struct brcmf_rev_info_le revinfo;
+@@ -411,27 +411,6 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+ 
+ 	brcmf_c_set_joinpref_default(ifp);
+ 
+-	/* Setup event_msgs, enable E_IF */
+-	err = brcmf_fil_iovar_data_get(ifp, "event_msgs", fweh->event_mask,
+-				       fweh->event_mask_len);
+-	if (err) {
+-		bphy_err(drvr, "Get event_msgs error (%d)\n", err);
+-		goto done;
+-	}
+-	/*
+-	 * BRCMF_E_IF can safely be used to set the appropriate bit
+-	 * in the event_mask as the firmware event code is guaranteed
+-	 * to match the value of BRCMF_E_IF because it is old cruft
+-	 * that all vendors have.
+-	 */
+-	setbit(fweh->event_mask, BRCMF_E_IF);
+-	err = brcmf_fil_iovar_data_set(ifp, "event_msgs", fweh->event_mask,
+-				       fweh->event_mask_len);
+-	if (err) {
+-		bphy_err(drvr, "Set event_msgs error (%d)\n", err);
+-		goto done;
+-	}
+-
+ 	/* Setup default scan channel time */
+ 	err = brcmf_fil_cmd_int_set(ifp, BRCMF_C_SET_SCAN_CHANNEL_TIME,
+ 				    BRCMF_DEFAULT_SCAN_CHANNEL_TIME);
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
+index 92ec269f43b2..c430c9221b7d 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/core.c
+@@ -1260,6 +1260,11 @@ static int brcmf_bus_started(struct brcmf_pub *drvr, struct cfg80211_ops *ops)
+ 
+ 	brcmf_feat_attach(drvr);
+ 
++	/* Setup event_msgs, enable E_IF */
++	ret = brcmf_fweh_init_events(ifp);
++	if (ret)
++		goto fail;
++
+ 	ret = brcmf_proto_init_done(drvr);
+ 	if (ret < 0)
+ 		goto fail;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+index 11b55d644fc0..ff41b94b91a7 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.c
+@@ -334,6 +334,7 @@ void brcmf_feat_attach(struct brcmf_pub *drvr)
+ 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_TDLS, "tdls_enable");
+ 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_MFP, "mfp");
+ 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_DUMP_OBSS, "dump_obss");
++	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_EVENT_MSGS_EXT, "event_msgs_ext");
+ 
+ 	pfn_mac.version = BRCMF_PFN_MACADDR_CFG_VER;
+ 	err = brcmf_fil_iovar_data_get(ifp, "pfn_macaddr", &pfn_mac,
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
+index ae33029b93d1..5c926f07c652 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/feature.h
+@@ -32,6 +32,7 @@
+  * DUMP_OBSS: Firmware has capable to dump obss info to support ACS
+  * SCAN_V2: Version 2 scan params
+  * SAE_EXT: SAE authentication handled by user-space supplicant
++ * EVENT_MSGS_EXT: Event messages extension
+  */
+ #define BRCMF_FEAT_LIST \
+ 	BRCMF_FEAT_DEF(MBSS) \
+@@ -62,7 +63,8 @@
+ 	BRCMF_FEAT_DEF(PMKID_V3) \
+ 	BRCMF_FEAT_DEF(SAE_EXT) \
+ 	BRCMF_FEAT_DEF(FBT) \
+-	BRCMF_FEAT_DEF(OKC)
++	BRCMF_FEAT_DEF(OKC) \
++	BRCMF_FEAT_DEF(EVENT_MSGS_EXT)
+ 
+ /*
+  * Quirks:
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.c
+index 1cff4ba76943..eec4b10e1f67 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.c
+@@ -11,8 +11,10 @@
+ #include "core.h"
+ #include "debug.h"
+ #include "tracepoint.h"
++#include "feature.h"
+ #include "fweh.h"
+ #include "fwil.h"
++#include "fwil_types.h"
+ #include "proto.h"
+ #include "bus.h"
+ #include "fwvid.h"
+@@ -430,6 +432,67 @@ void brcmf_fweh_unregister(struct brcmf_pub *drvr,
+ 	drvr->fweh->evt_handler[evt_handler_idx] = NULL;
+ }
+ 
++/**
++ * brcmf_fweh_init_events() - initialize event handling.
++ *
++ * @ifp: primary interface object.
++ */
++int brcmf_fweh_init_events(struct brcmf_if *ifp)
++{
++	struct brcmf_pub *drvr = ifp->drvr;
++	struct brcmf_eventmsgs_ext_le *eventmsgs;
++	size_t size = sizeof(*eventmsgs) + drvr->fweh->event_mask_len;
++	int err;
++
++	eventmsgs = kzalloc(size, GFP_KERNEL);
++	if(!eventmsgs)
++		return -ENOMEM;
++
++	eventmsgs->version = EVENTMSGS_VER;
++	eventmsgs->command = EVENTMSGS_NONE;
++	eventmsgs->len = drvr->fweh->event_mask_len;
++	eventmsgs->maxgetsize = drvr->fweh->event_mask_len;
++
++	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_EVENT_MSGS_EXT))
++		err = brcmf_fil_iovar_data_get(ifp, "event_msgs_ext",
++					       eventmsgs, size);
++	else
++		err = brcmf_fil_iovar_data_get(ifp, "event_msgs",
++					       drvr->fweh->event_mask,
++					       drvr->fweh->event_mask_len);
++
++	if (err) {
++		bphy_err(drvr, "Get event_msgs error (%d)\n", err);
++		kfree(eventmsgs);
++		return err;
++	}
++
++	brcmf_dbg(EVENT, "Event mask len: driver=%d fw=%d\n",
++		  drvr->fweh->event_mask_len, eventmsgs->len);
++
++	/* want to handle IF event as well */
++	brcmf_dbg(EVENT, "enable event IF\n");
++	setbit(eventmsgs->mask, BRCMF_E_IF);
++
++	eventmsgs->version = EVENTMSGS_VER;
++	eventmsgs->command = EVENTMSGS_SET_MASK;
++	eventmsgs->len = drvr->fweh->event_mask_len;
++
++	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_EVENT_MSGS_EXT))
++		err = brcmf_fil_iovar_data_set(ifp, "event_msgs_ext",
++					       eventmsgs, size);
++	else
++		err = brcmf_fil_iovar_data_set(ifp, "event_msgs",
++					       drvr->fweh->event_mask,
++					       drvr->fweh->event_mask_len);
++
++	if (err)
++		bphy_err(drvr, "Set event_msgs error (%d)\n", err);
++
++	kfree(eventmsgs);
++	return err;
++}
++
+ /**
+  * brcmf_fweh_activate_events() - enables firmware events registered.
+  *
+@@ -437,32 +500,47 @@ void brcmf_fweh_unregister(struct brcmf_pub *drvr,
+  */
+ int brcmf_fweh_activate_events(struct brcmf_if *ifp)
+ {
+-	struct brcmf_fweh_info *fweh = ifp->drvr->fweh;
+-	enum brcmf_fweh_event_code code;
++	struct brcmf_pub *drvr = ifp->drvr;
++	struct brcmf_eventmsgs_ext_le *eventmsgs;
++	size_t size = sizeof(*eventmsgs) + drvr->fweh->event_mask_len;
+ 	int i, err;
+ 
+-	memset(fweh->event_mask, 0, fweh->event_mask_len);
+-	for (i = 0; i < fweh->num_event_codes; i++) {
+-		if (fweh->evt_handler[i]) {
+-			brcmf_fweh_map_fwevt_code(fweh, i, &code);
++	eventmsgs = kzalloc(size, GFP_KERNEL);
++	if(!eventmsgs)
++		return -ENOMEM;
++
++	for (i = 0; i < drvr->fweh->num_event_codes; i++) {
++		if (drvr->fweh->evt_handler[i]) {
+ 			brcmf_dbg(EVENT, "enable event %s\n",
+-				  brcmf_fweh_event_name(code));
+-			setbit(fweh->event_mask, i);
++				  brcmf_fweh_event_name(i));
++			setbit(eventmsgs->mask, i);
+ 		}
+ 	}
+ 
+ 	/* want to handle IF event as well */
+ 	brcmf_dbg(EVENT, "enable event IF\n");
+-	setbit(fweh->event_mask, BRCMF_E_IF);
++	setbit(eventmsgs->mask, BRCMF_E_IF);
++
++	eventmsgs->version = EVENTMSGS_VER;
++	eventmsgs->command = EVENTMSGS_SET_MASK;
++	eventmsgs->len = drvr->fweh->event_mask_len;
+ 
+ 	/* allow per-vendor method to activate firmware events */
+ 	if (!brcmf_fwvid_activate_events(ifp))
+ 		return 0;
+ 
+-	err = brcmf_fil_iovar_data_set(ifp, "event_msgs", fweh->event_mask,
+-				       fweh->event_mask_len);
++	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_EVENT_MSGS_EXT))
++		err = brcmf_fil_iovar_data_set(ifp, "event_msgs_ext",
++					       eventmsgs, size);
++	else
++		err = brcmf_fil_iovar_data_set(ifp, "event_msgs",
++					       drvr->fweh->event_mask,
++					       drvr->fweh->event_mask_len);
++
+ 	if (err)
+-		bphy_err(fweh->drvr, "Set event_msgs error (%d)\n", err);
++		bphy_err(drvr, "Set event_msgs error (%d)\n", err);
++
++	kfree(eventmsgs);
+ 	return err;
+ }
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.h
+index e327dd58d29c..53c4b58e6323 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fweh.h
+@@ -356,6 +356,7 @@ int brcmf_fweh_register(struct brcmf_pub *drvr, enum brcmf_fweh_event_code code,
+ 				       void *data));
+ void brcmf_fweh_unregister(struct brcmf_pub *drvr,
+ 			   enum brcmf_fweh_event_code code);
++int brcmf_fweh_init_events(struct brcmf_if *ifp);
+ int brcmf_fweh_activate_events(struct brcmf_if *ifp);
+ void brcmf_fweh_process_event(struct brcmf_pub *drvr,
+ 			      struct brcmf_event *event_packet,
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+index 7ff6cf948e62..74f4c7a72596 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+@@ -1249,4 +1249,31 @@ struct brcmf_mkeep_alive_pkt_le {
+ 	u8   data[];
+ } __packed;
+ 
++enum event_msgs_ext_command {
++	EVENTMSGS_NONE		=	0,
++	EVENTMSGS_SET_BIT	=	1,
++	EVENTMSGS_RESET_BIT	=	2,
++	EVENTMSGS_SET_MASK	=	3
++};
++
++#define EVENTMSGS_VER 1
++
++/**
++ * struct brcmf_eventmsgs_ext_le - new event message mask commands
++ *
++ * @version: EVENTMSGS_VER
++ * @command: one of enum event_msgs_ext_command
++ * @len: for set, the mask size from the application to the firmware.
++ *       for get, the actual firmware mask size.
++ * @maxgetsize: for get, the max size that the application can read from
++ *              the firmware.
++ */
++struct brcmf_eventmsgs_ext_le {
++	u8	version;
++	u8	command;
++	u8	len;
++	u8	maxgetsize;
++	u8	mask[];
++};
++
+ #endif /* FWIL_TYPES_H_ */

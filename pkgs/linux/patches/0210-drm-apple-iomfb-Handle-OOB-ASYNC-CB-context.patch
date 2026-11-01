@@ -1,0 +1,66 @@
+From 543c2e696faece248008b08c65eb26b59f08e9d3 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 26 Nov 2023 18:30:59 +0100
+Subject: [PATCH] drm: apple: iomfb: Handle OOB ASYNC/CB context
+
+Only observed with dcp/dptx in linux after initialisation and reset in
+m1n1. On the initial startup dcp sends two D576 (hotPlug_notify_gated)
+presumendly due to state confusion due to  the multiple dptx
+connections.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp-internal.h | 2 +-
+ drivers/gpu/drm/apple/iomfb.c        | 4 ++++
+ drivers/gpu/drm/apple/iomfb.h        | 3 +++
+ 3 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index ef6cddef40a4..72b4ca86ed31 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -154,7 +154,7 @@ struct apple_dcp {
+ 	struct dcp_mem_descriptor memdesc[DCP_MAX_MAPPINGS];
+ 
+ 	struct dcp_channel ch_cmd, ch_oobcmd;
+-	struct dcp_channel ch_cb, ch_oobcb, ch_async;
++	struct dcp_channel ch_cb, ch_oobcb, ch_async, ch_oobasync;
+ 
+ 	/* iomfb EP callback handlers */
+ 	const iomfb_cb_handler *cb_handlers;
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index f5ae64ea5862..bb4737fa0f25 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -49,6 +49,8 @@ static int dcp_channel_offset(enum dcp_context_id id)
+ 	switch (id) {
+ 	case DCP_CONTEXT_ASYNC:
+ 		return 0x40000;
++	case DCP_CONTEXT_OOBASYNC:
++		return 0x48000;
+ 	case DCP_CONTEXT_CB:
+ 		return 0x60000;
+ 	case DCP_CONTEXT_OOBCB:
+@@ -118,6 +120,8 @@ static struct dcp_channel *dcp_get_channel(struct apple_dcp *dcp,
+ 		return &dcp->ch_oobcmd;
+ 	case DCP_CONTEXT_ASYNC:
+ 		return &dcp->ch_async;
++	case DCP_CONTEXT_OOBASYNC:
++		return &dcp->ch_oobasync;
+ 	default:
+ 		return NULL;
+ 	}
+diff --git a/drivers/gpu/drm/apple/iomfb.h b/drivers/gpu/drm/apple/iomfb.h
+index ae3645a78aa9..b3285fb3dc7e 100644
+--- a/drivers/gpu/drm/apple/iomfb.h
++++ b/drivers/gpu/drm/apple/iomfb.h
+@@ -28,6 +28,9 @@ enum dcp_context_id {
+ 	/* Out-of-band command */
+ 	DCP_CONTEXT_OOBCMD = 6,
+ 
++	/* Out-of-band Asynchronous */
++	DCP_CONTEXT_OOBASYNC = 7,
++
+ 	DCP_NUM_CONTEXTS
+ };
+ 

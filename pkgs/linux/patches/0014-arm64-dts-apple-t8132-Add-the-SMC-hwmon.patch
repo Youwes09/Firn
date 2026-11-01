@@ -1,0 +1,36 @@
+From b222daf11d13efd99999c63d5f647ba25e057c87 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Fri, 30 Oct 2026 14:00:56 -0500
+Subject: [PATCH] arm64: dts: apple: t8132: Add the SMC hwmon
+
+Add the SMC hwmon node with the sensors common to all Apple silicon
+Macs.
+
+Based on work by Niklas Sheth, as carried in Gravity Linux
+877c574dfa4f3.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 3ed92d61b9f4..33ae343442a2 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -328,6 +328,10 @@ smc_gpio: gpio {
+ 				#gpio-cells = <2>;
+ 			};
+ 
++			smc_hwmon: hwmon {
++				compatible = "apple,smc-hwmon";
++			};
++
+ 			smc_reboot: reboot {
+ 				compatible = "apple,smc-reboot";
+ 				nvmem-cells = <&shutdown_flag>, <&boot_stage>,
+@@ -717,3 +721,4 @@ timer {
+ };
+ 
+ #include "t8132-pmgr.dtsi"
++#include "hwmon-common.dtsi"
