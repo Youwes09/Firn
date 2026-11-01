@@ -1,4 +1,4 @@
-From 581efb25e66caef5da266042aa86f3e0b90c9823 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <fnkl.kernel@gmail.com>
 Date: Thu, 26 Feb 2026 17:59:08 +0100
 Subject: [PATCH] pmdomain: apple: Add PMP reporting interface

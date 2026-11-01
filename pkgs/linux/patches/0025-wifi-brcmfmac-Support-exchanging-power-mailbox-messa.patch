@@ -1,4 +1,4 @@
-From 507cf78ba2f389340b575037500894182e878be7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 22:12:15 +0900
 Subject: [PATCH] wifi: brcmfmac: Support exchanging power mailbox messages via

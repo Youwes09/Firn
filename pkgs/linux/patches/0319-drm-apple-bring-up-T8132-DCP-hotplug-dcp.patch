@@ -1,4 +1,4 @@
-From 7de8140a670ec3ae1b07c2a65dc1e83345a375e5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 18 Aug 2026 05:57:36 -0400
 Subject: [PATCH] drm/apple: bring up T8132 DCP hotplug [dcp]

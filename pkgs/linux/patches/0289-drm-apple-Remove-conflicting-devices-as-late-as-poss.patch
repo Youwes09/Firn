@@ -1,4 +1,4 @@
-From 14a0162a7cbf7c493d31420ca595f1104418ed17 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 25 Aug 2025 22:14:01 +0200
 Subject: [PATCH] drm: apple: Remove conflicting devices as late as possible

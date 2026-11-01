@@ -1,4 +1,4 @@
-From 961624b61f02e2b2168ccf1e1b609c2722242830 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Josh Rodd <josh@rodd.us>
 Date: Mon, 21 Sep 2026 07:42:37 -0400
 Subject: [PATCH] arm64: dts: apple: t8132: Add the MTP

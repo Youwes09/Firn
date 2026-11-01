@@ -1,4 +1,4 @@
-From c28f31dd809cf0fd0bafba2839a77d8537a07ff6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 23 Nov 2023 23:04:47 +0100
 Subject: [PATCH] drm: apple: iomfb: Use drm_kms_helper_connector_hotplug_event

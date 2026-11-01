@@ -1,4 +1,4 @@
-From 4f805c6249b68e930bf62c55ec5548b7738a7ebc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 30 Jul 2024 22:00:45 +0200
 Subject: [PATCH] drm: apple: Support up to 3 DCP instances.

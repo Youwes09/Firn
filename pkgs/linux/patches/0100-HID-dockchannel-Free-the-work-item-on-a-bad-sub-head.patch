@@ -1,4 +1,4 @@
-From 898454317e15dabb6f3d61056ad922810024a6f1 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 18:44:50 -0500
 Subject: [PATCH] HID: dockchannel: Free the work item on a bad sub-header

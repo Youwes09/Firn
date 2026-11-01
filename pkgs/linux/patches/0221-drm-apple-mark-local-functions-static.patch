@@ -1,4 +1,4 @@
-From 34cd96810d88a42defd766a18aef11374d7a9e28 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Arnd Bergmann <arnd@arndb.de>
 Date: Wed, 17 Jan 2024 11:44:10 +0100
 Subject: [PATCH] drm: apple: mark local functions static

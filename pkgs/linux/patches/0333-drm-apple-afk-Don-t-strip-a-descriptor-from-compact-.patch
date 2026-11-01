@@ -1,4 +1,4 @@
-From 98ae3d47523fd3c97846487348ae11ce3e67cc38 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Sat, 31 Oct 2026 13:25:41 -0500
 Subject: [PATCH] drm/apple: afk: Don't strip a descriptor from compact reports

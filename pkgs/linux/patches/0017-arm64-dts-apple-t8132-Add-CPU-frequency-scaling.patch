@@ -1,4 +1,4 @@
-From 0cb81ad9636c2e22428b14577c587e7206897723 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 14:05:00 -0500
 Subject: [PATCH] arm64: dts: apple: t8132: Add CPU frequency scaling

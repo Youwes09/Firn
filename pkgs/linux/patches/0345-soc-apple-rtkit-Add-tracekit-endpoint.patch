@@ -1,4 +1,4 @@
-From c47ce62854be09fefee121fe01f9e69ab3292870 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <fnkl.kernel@gmail.com>
 Date: Sat, 9 Nov 2024 17:55:47 +0100
 Subject: [PATCH] soc: apple: rtkit: Add tracekit endpoint.

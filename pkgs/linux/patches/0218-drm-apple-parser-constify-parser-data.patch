@@ -1,4 +1,4 @@
-From d02c8ee6c8afd473f88789c5a523b1ea87eb5ee5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 10 Dec 2023 13:01:22 +0100
 Subject: [PATCH] drm: apple: parser: constify parser data

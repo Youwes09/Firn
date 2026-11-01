@@ -1,4 +1,4 @@
-From 662677d227f8eb0d201c22a8a4694700aa83e296 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sun, 29 Oct 2023 16:22:24 -0400
 Subject: [PATCH] [brcmfmac] Set chanspec during join.

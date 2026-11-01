@@ -1,4 +1,4 @@
-From 6614208ff24ecf5d116a817ae1c03122fbc522b2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 15 May 2026 19:43:24 +0200
 Subject: [PATCH] drm: apple: parser: Handle min/max varable refresh rate

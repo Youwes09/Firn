@@ -1,4 +1,4 @@
-From b3f5910bd716c4b9bfe0615333b97dbe91361fc5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Thu, 23 Feb 2023 17:57:56 +0100
 Subject: [PATCH] HACK: ALSA: Export 'snd_pcm_known_rates'

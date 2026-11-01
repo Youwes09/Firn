@@ -1,4 +1,4 @@
-From c78d9f85599b4011209e881f779030bd7897bfdb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Sat, 31 Oct 2026 00:21:27 -0500
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Disable the ATC2 and ATC3

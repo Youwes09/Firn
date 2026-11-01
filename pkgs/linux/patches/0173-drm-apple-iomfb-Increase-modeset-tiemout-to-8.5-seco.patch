@@ -1,4 +1,4 @@
-From bd3d4a446c44d406362ce31ed3812d8d4581b9b6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 23:05:41 +0100
 Subject: [PATCH] drm: apple: iomfb: Increase modeset tiemout to 8.5 seconds

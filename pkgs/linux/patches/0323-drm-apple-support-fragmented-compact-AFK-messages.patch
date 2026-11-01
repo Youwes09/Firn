@@ -1,4 +1,4 @@
-From 36865962a635c06d24bd396e83a493a4e09fe05c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Thu, 17 Sep 2026 20:51:53 -0400
 Subject: [PATCH] drm/apple: support fragmented compact AFK messages

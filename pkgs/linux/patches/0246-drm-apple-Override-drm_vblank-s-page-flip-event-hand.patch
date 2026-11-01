@@ -1,4 +1,4 @@
-From 5d81599cd7777c1a6bfa2fdecf010aa70cf3f842 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 12 May 2024 09:39:59 +0200
 Subject: [PATCH] drm: apple: Override drm_vblank's page flip event handling

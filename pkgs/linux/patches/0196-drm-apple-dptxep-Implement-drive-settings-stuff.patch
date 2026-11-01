@@ -1,4 +1,4 @@
-From 55b372d72e4d37d87fd25a835db1f2ddd0dbb825 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 17 Nov 2023 00:03:51 +0900
 Subject: [PATCH] drm: apple: dptxep: Implement drive settings stuff

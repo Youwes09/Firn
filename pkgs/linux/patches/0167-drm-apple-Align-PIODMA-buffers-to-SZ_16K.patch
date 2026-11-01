@@ -1,4 +1,4 @@
-From b662bf94ad8edf385940d16f45b7e5b4b13b404b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 20 Jul 2023 00:36:51 +0200
 Subject: [PATCH] drm: apple: Align PIODMA buffers to SZ_16K

@@ -1,4 +1,4 @@
-From 3548d7f23fbe4d0c4ed95d551e235aac07dcaa1a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 8 Dec 2024 15:54:35 +0100
 Subject: [PATCH] drm: apple: Use dest rct in offscreen test

@@ -1,4 +1,4 @@
-From 5b402e0cc78e41a4f5bec7dea0fe99c2aff7bf3b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 18 Jan 2025 09:10:09 +0100
 Subject: [PATCH] drm: apple: iomfb: Clear non-visible planes

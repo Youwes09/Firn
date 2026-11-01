@@ -1,4 +1,4 @@
-From 0034ef3ed0170aa5348f4899b247519d6c0a4d3d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 20:44:35 -0500
 Subject: [PATCH] dt-bindings: power: Add Apple PMP power-state reports

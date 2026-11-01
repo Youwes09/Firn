@@ -1,4 +1,4 @@
-From 85cf1c46ed2147e93f6cda86097f50307fb4dada Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 8 Jul 2022 02:12:24 +0900
 Subject: [PATCH] HID: apple: Bind to HOST devices for MTP

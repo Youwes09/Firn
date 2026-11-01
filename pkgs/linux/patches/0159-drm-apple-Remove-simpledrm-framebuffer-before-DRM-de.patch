@@ -1,4 +1,4 @@
-From 2b21811865ef6855a09ad4cdf2aad6bcb38ef9d5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 15 Apr 2023 16:43:39 +0200
 Subject: [PATCH] drm/apple: Remove simpledrm framebuffer before DRM device

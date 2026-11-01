@@ -1,4 +1,4 @@
-From a25ec32c8dcd76e58428dd9256dd74f956c2c43b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 13:58:29 -0500
 Subject: [PATCH] dt-bindings: spmi: apple,spmi: Add t8132 compatible

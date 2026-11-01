@@ -1,4 +1,4 @@
-From fe364bebe96c4492f0eeb9d9b54ddf9d98527cb8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Thu, 16 Nov 2023 19:38:49 +0900
 Subject: [PATCH] drm: apple: afk: Clear commands before sending them

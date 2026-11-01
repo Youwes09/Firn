@@ -1,4 +1,4 @@
-From 5e735326f1d87bc8b1bd1ccadb3b12e49d81c42d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Caspar Schutijser <caspar@schutijser.com>
 Date: Thu, 18 Apr 2024 22:26:58 +0100
 Subject: [PATCH] drm: apple: backlight: release lock in error path

@@ -1,4 +1,4 @@
-From f2139eb1ace015da1434795e16fd010ac8b229aa Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 8 Jul 2022 02:12:57 +0900
 Subject: [PATCH] HID: magicmouse: Add MTP multi-touch device support

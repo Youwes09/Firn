@@ -1,4 +1,4 @@
-From 6c02083c21b28a8d28ca4b158e9de6fdad8d0235 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Mon, 30 Oct 2023 21:17:22 -0400
 Subject: [PATCH] [brcmfmac] Let feature attachment fail, and fail if we can't

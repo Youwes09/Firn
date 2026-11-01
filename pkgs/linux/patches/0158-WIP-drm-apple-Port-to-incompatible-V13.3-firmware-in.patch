@@ -1,4 +1,4 @@
-From 686b9127046ee437a8cd38535f49d0ed3a3af179 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 14 Apr 2023 08:07:52 +0200
 Subject: [PATCH] WIP: drm/apple: Port to incompatible V13.3 firmware interface

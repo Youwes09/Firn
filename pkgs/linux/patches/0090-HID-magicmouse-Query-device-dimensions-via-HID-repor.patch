@@ -1,4 +1,4 @@
-From f063534693cbdef8c725123419c1c14ebafdfbcd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Sun, 3 Dec 2023 21:08:17 +0900
 Subject: [PATCH] HID: magicmouse: Query device dimensions via HID report

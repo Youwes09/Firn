@@ -1,4 +1,4 @@
-From 278a4b6e97760a713bf11bf30200ebf0a7b53902 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 16:01:01 +0200
 Subject: [PATCH] drm: apple: Only match backlight service on DCP with panel

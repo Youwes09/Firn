@@ -1,4 +1,4 @@
-From 7229c9353db24c3344867456c034f5652fd94106 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Sat, 31 Oct 2026 13:26:20 -0500
 Subject: [PATCH] drm/apple: parser: Initialize ret in parse_system_log_mnits()

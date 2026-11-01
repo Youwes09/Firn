@@ -1,4 +1,4 @@
-From 2f76ec19dcee4a1e1bfdc900ddb3c9193e327ca6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yureka Lilian <yureka@cyberchaos.dev>
 Date: Sat, 25 Jul 2026 16:48:30 +0200
 Subject: [PATCH] arm64: dts: apple: t8132: Add the SMC

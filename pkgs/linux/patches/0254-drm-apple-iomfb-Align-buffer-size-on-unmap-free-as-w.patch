@@ -1,4 +1,4 @@
-From 0fc04636793abee5cd527fede1ad25481d9936e3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 14 Jul 2024 00:01:08 +0200
 Subject: [PATCH] drm: apple: iomfb: Align buffer size on unmap/free as well

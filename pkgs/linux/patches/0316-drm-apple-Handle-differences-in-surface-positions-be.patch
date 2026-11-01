@@ -1,4 +1,4 @@
-From d36a0389582c557fa2af0c8622c24be9b48e0a92 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Fri, 19 Jun 2026 20:20:35 +1000
 Subject: [PATCH] drm: apple: Handle differences in surface positions between

@@ -1,4 +1,4 @@
-From 1684f9c58c95d5bb46609db19095d03ec950a67a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <k@chaosmail.tech>
 Date: Sat, 25 Jul 2026 00:21:26 +0200
 Subject: [PATCH] phy: apple: atc: Add initial M3 series support

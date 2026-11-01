@@ -1,4 +1,4 @@
-From d347d832b323b7f66ec1a461401fee59f962b62a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Oct 2025 22:53:52 +0200
 Subject: [PATCH] input: macsmc-input: Prefer `true` as boolean literal

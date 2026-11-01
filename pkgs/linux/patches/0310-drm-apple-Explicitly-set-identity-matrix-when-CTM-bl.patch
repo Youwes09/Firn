@@ -1,4 +1,4 @@
-From cca0650fd16441e4d55cca83967b23c000d6b6aa Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Mon, 2 Mar 2026 21:15:49 +1000
 Subject: [PATCH] drm: apple: Explicitly set identity matrix when CTM blob is

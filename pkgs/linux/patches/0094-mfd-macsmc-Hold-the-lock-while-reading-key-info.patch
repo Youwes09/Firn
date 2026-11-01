@@ -1,4 +1,4 @@
-From 0610b97619d8acffd798529e59a485927e44fd3e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 09:05:12 -0500
 Subject: [PATCH] mfd: macsmc: Hold the lock while reading key info

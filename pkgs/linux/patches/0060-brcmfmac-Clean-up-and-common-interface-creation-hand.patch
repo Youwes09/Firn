@@ -1,4 +1,4 @@
-From 5790fa333c8d2a6467ae7cf97583defac9e79876 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sat, 11 Nov 2023 21:28:39 -0500
 Subject: [PATCH] [brcmfmac] Clean up and common interface creation handling

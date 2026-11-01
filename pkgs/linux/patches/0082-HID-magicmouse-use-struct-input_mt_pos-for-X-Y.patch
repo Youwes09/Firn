@@ -1,4 +1,4 @@
-From 22b15a85e71486051ffa99eb4fc6702f732ec036 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 16 Dec 2021 00:12:35 +0100
 Subject: [PATCH] HID: magicmouse: use struct input_mt_pos for X/Y

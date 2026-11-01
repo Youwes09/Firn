@@ -1,4 +1,4 @@
-From 71c492a2924752fb7e54d4271e0afaccc3e75cba Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: KB2UKA <kb2uka80@gmail.com>
 Date: Mon, 26 Oct 2026 08:42:00 -0500
 Subject: [PATCH] irqchip/apple-aic: Leave the EL2 FIQ sources alone on t8132

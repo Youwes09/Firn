@@ -1,4 +1,4 @@
-From db5fd31a1fcf72caaaca41f8d9b0313a495db487 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 8 Jul 2022 02:06:15 +0900
 Subject: [PATCH] HID: core: Handle HOST bus type when announcing devices

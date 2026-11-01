@@ -1,4 +1,4 @@
-From 8c09e2c815b9c0e4055c126aa16e0062ab0ef221 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Thu, 5 Oct 2023 00:34:44 +0900
 Subject: [PATCH] wifi: brcmfmac: Extend brcmf_wsec_pmk_le

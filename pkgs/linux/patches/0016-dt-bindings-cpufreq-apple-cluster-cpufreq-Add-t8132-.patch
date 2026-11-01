@@ -1,4 +1,4 @@
-From 9f68e2ed55695728c8e08812bc71ce49b8c9a008 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 14:04:24 -0500
 Subject: [PATCH] dt-bindings: cpufreq: apple,cluster-cpufreq: Add t8132

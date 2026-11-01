@@ -1,4 +1,4 @@
-From 9c366175e7a9202922bf3a3addb800bf52ed9ffd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 22:02:10 +0900
 Subject: [PATCH] wifi: brcmfmac: Handle PCIe MSI properly

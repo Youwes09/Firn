@@ -1,4 +1,4 @@
-From a186dee25de4ab7095e3421f3d17ec58018bcccc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Mon, 2 Oct 2023 22:26:16 +0900
 Subject: [PATCH] wifi: brcmfmac: Add BCM4388 support

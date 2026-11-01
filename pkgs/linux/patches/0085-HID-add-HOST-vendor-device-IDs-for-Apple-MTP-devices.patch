@@ -1,4 +1,4 @@
-From 1b533e59386ce050f39b6169627156b458e5bc87 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 8 Jul 2022 00:29:43 +0900
 Subject: [PATCH] HID: add HOST vendor/device IDs for Apple MTP devices

@@ -1,4 +1,4 @@
-From 9e204f8b329883deaf9637bdb0f54367f3066f18 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Sat, 31 Oct 2026 13:29:13 -0500
 Subject: [PATCH] drm/apple: Send the requested brightness on 26.6 firmware

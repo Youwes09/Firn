@@ -1,4 +1,4 @@
-From 277b74be0798355d6f25bc2a11ea43d163bfe7b2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 21:59:24 +0900
 Subject: [PATCH] wifi: brcmfmac: Add missing shared area defines to pcie.c

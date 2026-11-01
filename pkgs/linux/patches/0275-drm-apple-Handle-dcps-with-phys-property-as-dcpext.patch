@@ -1,4 +1,4 @@
-From 94de1ad71d9dc4b4aea03280e769174acc8cff4b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 3 Aug 2024 15:41:00 +0200
 Subject: [PATCH] drm: apple: Handle dcps with "phys" property as dcpext

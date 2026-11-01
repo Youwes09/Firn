@@ -1,4 +1,4 @@
-From ec8062d7eaacc7b2bf288cdda4d7b94e52d22b4d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 4 May 2024 13:33:57 +0200
 Subject: [PATCH] drm: apple: av: Warn only once about failed calls

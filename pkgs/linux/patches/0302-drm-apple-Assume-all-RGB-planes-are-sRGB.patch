@@ -1,4 +1,4 @@
-From c49724e661b43b7a1dc685aac28b5a5ce5e0a750 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Thu, 1 Jan 2026 16:18:52 +1000
 Subject: [PATCH] drm: apple: Assume all RGB planes are sRGB

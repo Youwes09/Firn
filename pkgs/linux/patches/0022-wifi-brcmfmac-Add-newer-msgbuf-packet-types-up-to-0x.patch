@@ -1,4 +1,4 @@
-From ebfe38d902d75dc5cc15c4f905b6098868d9d2b5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 21:55:52 +0900
 Subject: [PATCH] wifi: brcmfmac: Add newer msgbuf packet types up to 0x2e

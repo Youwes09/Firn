@@ -1,4 +1,4 @@
-From ff5416a6f4b6460fb413dea9a27abcb339dc44eb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 8 Jul 2022 02:11:21 +0900
 Subject: [PATCH] HID: Add Apple DockChannel HID transport driver

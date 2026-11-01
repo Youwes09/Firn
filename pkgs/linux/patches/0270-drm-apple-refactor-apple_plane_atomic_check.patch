@@ -1,4 +1,4 @@
-From 84aeecadea97732b9a48ff3a7efd7ee3fbed29db Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 8 Dec 2024 15:51:37 +0100
 Subject: [PATCH] drm: apple: refactor apple_plane_atomic_check

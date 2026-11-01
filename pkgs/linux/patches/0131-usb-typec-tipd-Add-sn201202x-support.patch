@@ -1,4 +1,4 @@
-From 2df9cb8adfaee1b7d01f1d56b9240fa5d2734698 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <k@chaosmail.tech>
 Date: Thu, 6 Aug 2026 11:37:22 +0200
 Subject: [PATCH] usb: typec: tipd: Add sn201202x support

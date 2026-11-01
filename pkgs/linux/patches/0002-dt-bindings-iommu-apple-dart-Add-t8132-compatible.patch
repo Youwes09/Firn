@@ -1,4 +1,4 @@
-From b027244171df0ecfd3ff6ce0ff05d6c83e2835b5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 12:13:12 -0500
 Subject: [PATCH] dt-bindings: iommu: apple,dart: Add t8132 compatible

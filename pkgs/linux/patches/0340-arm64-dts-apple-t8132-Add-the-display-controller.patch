@@ -1,4 +1,4 @@
-From 388c2a5362b0a5e569c247bd89b1c0129fec54e8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 18 Aug 2026 05:57:36 -0400
 Subject: [PATCH] arm64: dts: apple: t8132: Add the display controller

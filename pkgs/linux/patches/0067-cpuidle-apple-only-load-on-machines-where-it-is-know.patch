@@ -1,4 +1,4 @@
-From a2c7f77044fc0bacbb8556dea82b7f75f2185140 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yureka <yureka@cyberchaos.dev>
 Date: Sat, 24 Jan 2026 10:02:15 +0100
 Subject: [PATCH] cpuidle-apple: only load on machines where it is known to be

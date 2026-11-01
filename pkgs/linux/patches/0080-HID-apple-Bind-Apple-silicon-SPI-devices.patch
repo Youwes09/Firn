@@ -1,4 +1,4 @@
-From d858631910fe711d251f505a38e8b569c9e29d47 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 16 Dec 2021 21:15:31 +0100
 Subject: [PATCH] HID: apple: Bind Apple silicon SPI devices

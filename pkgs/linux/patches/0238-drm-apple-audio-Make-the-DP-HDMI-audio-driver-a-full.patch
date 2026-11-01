@@ -1,4 +1,4 @@
-From c70b6b8a63b1f38e336b8307eaf8bf0fb5e57c8d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 21 Apr 2024 15:47:20 +0200
 Subject: [PATCH] drm: apple: audio: Make the DP/HDMI audio driver a full

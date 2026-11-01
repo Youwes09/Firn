@@ -1,4 +1,4 @@
-From 9a46eda8c61421b0d609dd61352254e932fb8022 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 21 Dec 2025 20:14:16 +0100
 Subject: [PATCH] drm: apple: Use typec mux to switch atc-phy into DP

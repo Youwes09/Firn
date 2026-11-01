@@ -1,4 +1,4 @@
-From 98b6060b61c994137dc5beb0c33a8ae382cd4b00 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 23 Nov 2023 22:58:16 +0100
 Subject: [PATCH] drm: apple: Move modeset into drm_crtc's atomic_enable

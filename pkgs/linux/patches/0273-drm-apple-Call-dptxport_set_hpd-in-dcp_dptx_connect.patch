@@ -1,4 +1,4 @@
-From 1babb88162695def409d816a1cb20ebc35169a7f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 4 Aug 2024 18:46:04 +0200
 Subject: [PATCH] drm: apple: Call dptxport_set_hpd in dcp_dptx_connect

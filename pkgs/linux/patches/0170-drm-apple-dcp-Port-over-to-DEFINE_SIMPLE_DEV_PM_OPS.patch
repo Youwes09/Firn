@@ -1,4 +1,4 @@
-From 4c9ab46c656bc4a097cc8a78ee0833f893d5eec1 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 7 Nov 2023 00:14:55 +0100
 Subject: [PATCH] drm: apple: dcp: Port over to DEFINE_SIMPLE_DEV_PM_OPS

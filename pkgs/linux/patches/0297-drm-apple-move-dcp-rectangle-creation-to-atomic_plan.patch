@@ -1,4 +1,4 @@
-From 11c6a61758417bbff0d9bdd040bd95a5f5068913 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Fri, 26 Dec 2025 21:54:13 +1000
 Subject: [PATCH] drm: apple: move dcp rectangle creation to

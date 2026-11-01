@@ -1,4 +1,4 @@
-From 8fcf4be3d7fae3906c224da4b6c05cf9d4569def Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 24 Jan 2026 14:14:52 +0100
 Subject: [PATCH] drm/apple: Only assume RGB planes on internal displays are

@@ -1,4 +1,4 @@
-From 89468ffd68e626cb27aab5378ad249d75f0b2f99 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 12:12:58 -0500
 Subject: [PATCH] dt-bindings: mailbox: apple,mailbox: Add t8132 compatible

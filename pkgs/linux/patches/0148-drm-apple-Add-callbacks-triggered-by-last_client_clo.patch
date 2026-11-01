@@ -1,4 +1,4 @@
-From b75f704a26b4fb89e25d05141d3c2c5f0f899563 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 8 Jan 2023 21:30:22 +0100
 Subject: [PATCH] drm/apple: Add callbacks triggered by last_client_close_dcp()

@@ -1,4 +1,4 @@
-From 86ea9ad6ac4e022c9cc0b6254a84ba12af1a0981 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 20 Aug 2024 22:39:06 +0200
 Subject: [PATCH] drm: apple: iomfb: Provide the EDID as connector property

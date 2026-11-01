@@ -1,4 +1,4 @@
-From 5be62e169c0b1459c94e716be4c47dd81b630a1f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Mon, 10 Apr 2023 22:44:44 +0900
 Subject: [PATCH] HID: Bump maximum report size to 16384

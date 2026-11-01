@@ -1,4 +1,4 @@
-From 901f2fdfd98688d6390288751ae738e50a7429dc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 1 Mar 2026 17:11:59 +0100
 Subject: [PATCH] drm/apple: Add DCP display driver

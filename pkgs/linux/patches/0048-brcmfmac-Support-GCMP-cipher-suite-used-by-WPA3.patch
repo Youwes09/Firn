@@ -1,4 +1,4 @@
-From 9c84db6a20ad4535beb435778b97a9ad4ce703ec Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Tue, 10 Oct 2023 09:42:36 -0400
 Subject: [PATCH] [brcmfmac] Support GCMP cipher suite, used by WPA3.

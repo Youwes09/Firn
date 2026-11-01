@@ -1,4 +1,4 @@
-From 696a98f0e9eeac0d7b037e72caaba2066d61ff63 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 3 Oct 2023 17:28:02 +0900
 Subject: [PATCH] wifi: brcmfmac: Add support for firmware signatures

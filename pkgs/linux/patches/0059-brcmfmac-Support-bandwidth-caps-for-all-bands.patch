@@ -1,4 +1,4 @@
-From ba6d9875c7e535a942a041cd69fac21eb73ff106 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Thu, 19 Oct 2023 23:55:07 -0400
 Subject: [PATCH] [brcmfmac] Support bandwidth caps for all bands

@@ -1,4 +1,4 @@
-From 1fe9710e76b8bb8af19520cc902d612e3c728bd7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sven Peter <sven@svenpeter.dev>
 Date: Sun, 12 Feb 2023 15:51:58 +0100
 Subject: [PATCH] drm: apple: DCP AFK/EPIC support

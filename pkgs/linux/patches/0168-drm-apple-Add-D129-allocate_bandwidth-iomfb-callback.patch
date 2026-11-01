@@ -1,4 +1,4 @@
-From 7b216bc051efff702a67245db0c61e756272ea99 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 23 Aug 2023 20:50:35 +0200
 Subject: [PATCH] drm: apple: Add D129 allocate_bandwidth iomfb callback

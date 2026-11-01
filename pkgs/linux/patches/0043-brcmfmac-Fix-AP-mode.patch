@@ -1,4 +1,4 @@
-From 814ab9b4c4e86007be20a3365aba4dfdb68d094c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Patrick Blass <patrickblass.dev@gmail.com>
 Date: Sun, 3 Sep 2023 15:34:06 +0200
 Subject: [PATCH] brcmfmac: Fix AP mode

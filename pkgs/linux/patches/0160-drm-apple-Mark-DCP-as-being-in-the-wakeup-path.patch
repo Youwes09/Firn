@@ -1,4 +1,4 @@
-From bff21525e63d8d344a4a26e3fd9a2e890f153753 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 25 Apr 2023 01:49:14 +0900
 Subject: [PATCH] drm/apple: Mark DCP as being in the wakeup path

@@ -1,4 +1,4 @@
-From 6bc45e3c4a6fffd297f144246f3346768b6adb07 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 14:45:42 -0500
 Subject: [PATCH] wifi: brcmfmac: Add BCM4388 revision 6 firmware

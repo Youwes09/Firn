@@ -1,4 +1,4 @@
-From f2f755fbbe22468f24c2226b8e9dfa766e23b143 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yureka <yuka@yuka.dev>
 Date: Mon, 1 Jun 2026 09:07:45 +0200
 Subject: [PATCH] cpuidle-apple: load on M3 / Pro / Max / Ultra

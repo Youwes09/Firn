@@ -1,4 +1,4 @@
-From 98aa0efeaa3a9dbe2ccc901873e47d35454c370d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Mon, 26 Oct 2026 18:30:00 -0400
 Subject: [PATCH] pmdomain: apple: pmp-report: Keep always-on reports on

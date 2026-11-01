@@ -1,4 +1,4 @@
-From 95b617cb704daac76f7695cb1cd216939bcab703 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Sat, 31 Oct 2026 13:29:49 -0500
 Subject: [PATCH] drm/apple: Expose the planes' blend mode

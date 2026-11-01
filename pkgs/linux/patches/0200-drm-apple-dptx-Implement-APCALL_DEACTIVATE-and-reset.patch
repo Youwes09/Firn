@@ -1,4 +1,4 @@
-From fd05feadbc48f92bd1203e1f5683c07b5d4ed33f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 20 Nov 2023 22:48:02 +0100
 Subject: [PATCH] drm: apple: dptx: Implement APCALL_DEACTIVATE and reset the

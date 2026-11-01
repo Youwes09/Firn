@@ -1,4 +1,4 @@
-From 514ce80177df08bfa30323dac8c1e2a7f2bf71df Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 20 Apr 2024 21:06:19 +0200
 Subject: [PATCH] drm: apple: audio: move the audio driver into the DCP module

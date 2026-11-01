@@ -1,4 +1,4 @@
-From 59216c4054a990c716c42596d3c922138dcc8152 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Mon, 9 Oct 2023 19:19:45 -0400
 Subject: [PATCH] [brcmfmac] Compute number of available antennas and set it in

@@ -1,4 +1,4 @@
-From cb5112f5b2788cef3177096a684c696bd1a9973c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sun, 22 Oct 2023 12:40:57 -0400
 Subject: [PATCH] [brcmfmac] Structurize scan parameter handling

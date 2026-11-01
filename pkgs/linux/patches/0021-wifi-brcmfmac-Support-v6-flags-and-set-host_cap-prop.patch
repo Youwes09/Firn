@@ -1,4 +1,4 @@
-From 46dd73d1bd12eab4905f4547dad10e60884e9183 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 22:10:08 +0900
 Subject: [PATCH] wifi: brcmfmac: Support v6+ flags and set host_cap properly

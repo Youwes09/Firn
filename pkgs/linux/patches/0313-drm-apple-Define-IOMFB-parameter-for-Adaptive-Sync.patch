@@ -1,4 +1,4 @@
-From c2672c66b81a9370fbad098bd306debb7c5ae3e5 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Mon, 6 Apr 2026 10:25:39 +1000
 Subject: [PATCH] drm: apple: Define IOMFB parameter for Adaptive Sync

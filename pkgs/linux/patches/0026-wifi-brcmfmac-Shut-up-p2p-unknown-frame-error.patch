@@ -1,4 +1,4 @@
-From d8a2a8561a845dbbe7277153430f01fc8d19f517 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Sat, 25 Mar 2023 15:23:04 +0900
 Subject: [PATCH] wifi: brcmfmac: Shut up p2p unknown frame error

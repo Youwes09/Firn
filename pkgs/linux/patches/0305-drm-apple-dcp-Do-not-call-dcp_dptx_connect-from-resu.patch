@@ -1,4 +1,4 @@
-From 055bb102b913593f312b2d9b00dbb539997d0290 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 6 Jan 2026 22:32:41 +0100
 Subject: [PATCH] drm/apple: dcp: Do not call dcp_dptx_connect() from resume()

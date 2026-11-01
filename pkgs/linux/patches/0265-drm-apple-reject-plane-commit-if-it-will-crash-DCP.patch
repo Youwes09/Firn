@@ -1,4 +1,4 @@
-From bbe814fe14a499c1623b7dc75f41b08e7b53c9a6 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Tue, 14 May 2024 20:42:20 +1000
 Subject: [PATCH] drm: apple: reject plane commit if it will crash DCP

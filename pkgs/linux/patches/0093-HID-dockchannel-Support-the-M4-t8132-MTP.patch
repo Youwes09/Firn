@@ -1,4 +1,4 @@
-From 386ae4ee3219c6b68108928006d1b273214e4dfb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Josh Rodd <josh@rodd.us>
 Date: Mon, 21 Sep 2026 07:42:37 -0400
 Subject: [PATCH] HID: dockchannel: Support the M4 (t8132) MTP

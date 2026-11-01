@@ -1,4 +1,4 @@
-From 02ccf62a663c1023bddeedbf3d079128ca49bd6f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Sat, 3 Oct 2026 21:11:14 -0400
 Subject: [PATCH] usb: typec: Build tipd/ for the SPMI-only SN201202x driver

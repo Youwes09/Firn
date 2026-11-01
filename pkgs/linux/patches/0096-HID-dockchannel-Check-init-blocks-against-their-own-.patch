@@ -1,4 +1,4 @@
-From 5b789c78ccfde4b79f131aa7619ba5b7048e90c2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 09:05:18 -0500
 Subject: [PATCH] HID: dockchannel: Check init blocks against their own length

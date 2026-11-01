@@ -1,4 +1,4 @@
-From f7be0a5a4cfc9e19d532fb01f607b09071b5b6ed Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Sun, 19 Jul 2026 20:24:58 +1000
 Subject: [PATCH] drm: apple: properly define plane and compression parameters

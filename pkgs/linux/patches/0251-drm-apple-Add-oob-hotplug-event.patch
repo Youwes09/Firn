@@ -1,4 +1,4 @@
-From edf5460ee1a992284c84fd9b08df01d8370a5153 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sven Peter <sven@svenpeter.dev>
 Date: Sat, 5 Nov 2022 13:15:34 +0100
 Subject: [PATCH] drm: apple: Add oob hotplug event

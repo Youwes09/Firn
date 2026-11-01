@@ -10,4 +10,4 @@ base=${3:-d89e1d186ec92}
 out=$(dirname "$(realpath "$0")")/patches
 
 rm -rf "$out"
-git -C "$src" format-patch -q -N --no-signature -o "$out" "$base..$branch"
+git -C "$src" format-patch -q -N --zero-commit --no-signature -o "$out" "$base..$branch"

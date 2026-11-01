@@ -1,4 +1,4 @@
-From c9312dd1d616f3b3138b2364f7c3f4eb6199d1f3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 24 Dec 2025 13:12:11 +0100
 Subject: [PATCH] drm: apple: Move plane bits out of apple_drv/iomfb_flush

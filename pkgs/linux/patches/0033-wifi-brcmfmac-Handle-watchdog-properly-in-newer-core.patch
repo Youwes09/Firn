@@ -1,4 +1,4 @@
-From a88a1a7b57c1d48788932e3953ea4ef008a4dce2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Wed, 4 Oct 2023 05:00:34 +0900
 Subject: [PATCH] wifi: brcmfmac: Handle watchdog properly in newer cores

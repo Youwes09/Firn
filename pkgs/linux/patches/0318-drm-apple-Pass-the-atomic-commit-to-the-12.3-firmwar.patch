@@ -1,4 +1,4 @@
-From 14e585c09f35152e12e1a3f6a6cc912f4dc8fe28 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 23 Aug 2026 22:56:48 +0200
 Subject: [PATCH] drm/apple: Pass the atomic commit to the 12.3 firmware's

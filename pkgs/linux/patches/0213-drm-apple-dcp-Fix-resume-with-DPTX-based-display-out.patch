@@ -1,4 +1,4 @@
-From 743b6f458b4cbb62290e7fb4ab5c5cbd78cb051e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 28 Nov 2023 14:27:18 +0100
 Subject: [PATCH] drm: apple: dcp: Fix resume with DPTX based display outputs

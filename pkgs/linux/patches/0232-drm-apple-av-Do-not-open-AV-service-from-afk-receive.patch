@@ -1,4 +1,4 @@
-From 93c84c209f4438789d7b268b081122bd576c1e31 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 13 Nov 2023 23:00:13 +0100
 Subject: [PATCH] drm: apple: av: Do not open AV service from afk receive

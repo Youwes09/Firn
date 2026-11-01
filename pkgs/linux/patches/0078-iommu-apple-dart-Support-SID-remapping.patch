@@ -1,4 +1,4 @@
-From 6e7d17c25ddd94303b47adb26e29574e50b6b5b2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Josh Rodd <josh@rodd.us>
 Date: Mon, 21 Sep 2026 07:42:37 -0400
 Subject: [PATCH] iommu: apple-dart: Support SID remapping

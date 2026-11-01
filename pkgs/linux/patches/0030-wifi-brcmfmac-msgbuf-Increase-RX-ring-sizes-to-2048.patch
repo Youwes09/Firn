@@ -1,4 +1,4 @@
-From dc858722bf0e6260568b8a34401e257567a90683 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 3 Oct 2023 18:33:36 +0900
 Subject: [PATCH] wifi: brcmfmac: msgbuf: Increase RX ring sizes to 2048

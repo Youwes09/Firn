@@ -1,4 +1,4 @@
-From 2c5f10a7c0e9d4b43989f3c299d019265e6e0276 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@rosenzweig.io>
 Date: Mon, 10 Feb 2025 14:39:53 -0500
 Subject: [PATCH] iommu/dart: Track if the DART is locked

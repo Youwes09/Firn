@@ -1,4 +1,4 @@
-From 54abc0365ddcc777a9d779f030429fe186f75792 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Mon, 26 Oct 2026 19:30:00 -0400
 Subject: [PATCH] soc: apple: pmp: Add T8132

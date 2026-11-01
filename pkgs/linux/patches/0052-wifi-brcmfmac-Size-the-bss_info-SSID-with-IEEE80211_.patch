@@ -1,4 +1,4 @@
-From eb858e3d36ed0e1e502559c07fac63ba81b36b76 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sun, 12 Nov 2023 15:49:54 -0500
 Subject: [PATCH] wifi: brcmfmac: Size the bss_info SSID with

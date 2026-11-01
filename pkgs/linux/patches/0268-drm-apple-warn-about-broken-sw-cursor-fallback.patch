@@ -1,4 +1,4 @@
-From 608425214246778f19d84e80f8af24ec44cfed70 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Wed, 15 May 2024 20:42:07 +1000
 Subject: [PATCH] drm: apple: warn about broken sw cursor fallback

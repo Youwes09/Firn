@@ -1,4 +1,4 @@
-From 02594c26a442e55e0242919541d2bf6194d3fd77 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 22 Oct 2022 12:00:21 +0200
 Subject: [PATCH] iommu: Add IOMMU_RESV_TRANSLATED for non 1:1 mapped reserved

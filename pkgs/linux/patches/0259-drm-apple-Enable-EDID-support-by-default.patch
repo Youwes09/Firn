@@ -1,4 +1,4 @@
-From e25228c4d12e70b55aa0b927a08e6e32b0474ae3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 9 Nov 2024 10:17:06 +0100
 Subject: [PATCH] drm: apple: Enable EDID support by default

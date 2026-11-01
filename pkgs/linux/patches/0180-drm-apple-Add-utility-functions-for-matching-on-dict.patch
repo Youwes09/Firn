@@ -1,4 +1,4 @@
-From 50131f5946a04af60aefea30c8c1f4b2d142da44 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Wed, 15 Feb 2023 16:20:22 +0100
 Subject: [PATCH] drm: apple: Add utility functions for matching on dict keys

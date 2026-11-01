@@ -1,4 +1,4 @@
-From d4a53be624e1e8fdcb68efc285463babebd6082c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 12:13:13 -0500
 Subject: [PATCH] dt-bindings: iommu: apple,sart: Add t8132 compatible

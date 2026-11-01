@@ -1,4 +1,4 @@
-From 3bc37f14c9a06bcb7f7ea912362f1390fce5ecd4 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Mon, 9 Oct 2023 14:04:16 -0400
 Subject: [PATCH] [brcmfmac] Dynamically configure VHT settings to match

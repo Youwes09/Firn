@@ -1,4 +1,4 @@
-From ce97f501509a5e896a092ebc3306a67d9c6abadf Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Tue, 14 May 2024 21:03:25 +1000
 Subject: [PATCH] drm: apple: add support for overlay planes

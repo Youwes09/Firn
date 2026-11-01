@@ -1,4 +1,4 @@
-From cf2b7102f8b3257104555dc34877d523158906fd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 9 Mar 2023 12:44:51 +0100
 Subject: [PATCH] drm/apple: ignore surf[3] in clear swap calls

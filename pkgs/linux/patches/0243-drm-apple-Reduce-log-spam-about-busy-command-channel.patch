@@ -1,4 +1,4 @@
-From 1b4be1a9a39f12e7a19b71b5842d20c09e21277b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 4 May 2024 13:23:03 +0200
 Subject: [PATCH] drm: apple: Reduce log spam about busy command channel

@@ -1,4 +1,4 @@
-From 8e153fea62a949d725fb90413314f18f96909bcb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@rosenzweig.io>
 Date: Mon, 17 Feb 2025 11:45:49 -0500
 Subject: [PATCH] drm/apple: fix audioless build

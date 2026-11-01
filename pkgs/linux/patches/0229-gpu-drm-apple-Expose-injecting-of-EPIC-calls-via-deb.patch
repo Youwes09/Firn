@@ -1,4 +1,4 @@
-From 91321e21ebab74872ebaf7ae8872edafd4f55a14 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Mon, 13 Feb 2023 14:55:13 +0100
 Subject: [PATCH] gpu: drm: apple: Expose injecting of EPIC calls via debugfs

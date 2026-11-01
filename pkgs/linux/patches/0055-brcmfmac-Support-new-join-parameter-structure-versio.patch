@@ -1,4 +1,4 @@
-From 1d380810bd6f2b963db22e02bea7c0b0d8def1c9 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Thu, 5 Oct 2023 01:23:32 +0900
 Subject: [PATCH] [brcmfmac] Support new join parameter structure versions

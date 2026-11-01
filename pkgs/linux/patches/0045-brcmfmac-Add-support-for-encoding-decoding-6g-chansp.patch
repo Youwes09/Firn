@@ -1,4 +1,4 @@
-From 90df873326066b26c034a1762d9f14e36a23d921 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sat, 14 Oct 2023 11:38:13 -0400
 Subject: [PATCH] [brcmfmac] Add support for encoding/decoding 6g chanspecs

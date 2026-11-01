@@ -1,4 +1,4 @@
-From 09a89e2351993f23869ed0f36c568411ecde1155 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 16 Jul 2023 17:51:10 +0200
 Subject: [PATCH] drm: apple: backlight: avoid updating the brightness with a

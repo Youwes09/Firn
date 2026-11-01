@@ -1,4 +1,4 @@
-From 70a6a5c3702b2553cf3ce8f001a196ba6d1a84cb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 18:42:35 -0500
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Enable the keyboard and

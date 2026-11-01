@@ -1,4 +1,4 @@
-From e3edd1950dd03605f4bdb225d57af973554b287b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Mon, 26 Oct 2026 12:34:24 -0500
 Subject: [PATCH] dt-bindings: nvmem: apple,spmi-nvmem: Add Abbey PMU

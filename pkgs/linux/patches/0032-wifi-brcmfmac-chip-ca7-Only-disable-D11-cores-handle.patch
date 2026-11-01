@@ -1,4 +1,4 @@
-From 7695f30c8b2860a09080f82178682f42d1b2b30f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Wed, 4 Oct 2023 04:57:34 +0900
 Subject: [PATCH] wifi: brcmfmac: chip: ca7: Only disable D11 cores; handle an

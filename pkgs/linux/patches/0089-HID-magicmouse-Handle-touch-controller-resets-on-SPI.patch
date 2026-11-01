@@ -1,4 +1,4 @@
-From 17e33fd41c7081eb0d0af1c976ae4d43980a70ee Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Sun, 30 Apr 2023 23:48:45 +0900
 Subject: [PATCH] HID: magicmouse: Handle touch controller resets on SPI

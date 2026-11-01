@@ -1,4 +1,4 @@
-From 9da06b0f8e747af29e2116d7cefa533e15bc51d3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 21:13:29 +0100
 Subject: [PATCH] drm: apple: Remove explicit asc-dram-mask handling

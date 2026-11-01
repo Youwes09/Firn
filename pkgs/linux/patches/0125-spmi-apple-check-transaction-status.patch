@@ -1,4 +1,4 @@
-From c971dc02ca406eda26bf51f198fddaa04c47884a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alba Mendez <me@alba.sh>
 Date: Tue, 18 Aug 2026 20:32:42 +0200
 Subject: [PATCH] spmi: apple: check transaction status

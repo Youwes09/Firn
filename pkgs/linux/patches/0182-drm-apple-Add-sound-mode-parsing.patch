@@ -1,4 +1,4 @@
-From 96d2436b1f9465e42e688cc26d0d448e8b5dfc80 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Wed, 15 Feb 2023 16:22:17 +0100
 Subject: [PATCH] drm: apple: Add sound mode parsing

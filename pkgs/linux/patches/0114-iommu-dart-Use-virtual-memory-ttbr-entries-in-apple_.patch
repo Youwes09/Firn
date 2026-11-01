@@ -1,4 +1,4 @@
-From 109f6e55fcb54ec45b4156583553d604936858a2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Mar 2025 23:05:27 +0200
 Subject: [PATCH] iommu/dart: Use virtual memory ttbr entries in apple_dart_cfg

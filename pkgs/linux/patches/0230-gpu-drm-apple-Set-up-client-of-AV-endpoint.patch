@@ -1,4 +1,4 @@
-From 2bd8518a69facb985c55f9c6d9e89463bf9f53b3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Mon, 13 Feb 2023 14:56:24 +0100
 Subject: [PATCH] gpu: drm: apple: Set up client of AV endpoint

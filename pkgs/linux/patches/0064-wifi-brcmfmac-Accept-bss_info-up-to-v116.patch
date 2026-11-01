@@ -1,4 +1,4 @@
-From fa9661cdbe5b5d498765931b9b194933b7571858 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 18 Aug 2026 05:57:36 -0400
 Subject: [PATCH] wifi: brcmfmac: Accept bss_info up to v116

@@ -1,4 +1,4 @@
-From 18579dc732771e0167908fe19829a3a48913ef59 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alba Mendez <me@alba.sh>
 Date: Tue, 18 Aug 2026 20:32:41 +0200
 Subject: [PATCH] spmi: apple: Validate FIFO state

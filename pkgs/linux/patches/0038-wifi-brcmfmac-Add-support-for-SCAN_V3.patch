@@ -1,4 +1,4 @@
-From c10642290da2b5f4e1e11a9f37e76e7aa82ed631 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Wed, 4 Oct 2023 05:50:00 +0900
 Subject: [PATCH] wifi: brcmfmac: Add support for SCAN_V3

@@ -1,4 +1,4 @@
-From 966a54dfc760f63da21b1430b08e3ffd508748d4 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Wed, 18 Oct 2023 23:30:49 -0400
 Subject: [PATCH] [brcmfmac] Fix regulatory domain handling to reset bands

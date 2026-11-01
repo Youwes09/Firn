@@ -1,4 +1,4 @@
-From 7802111886c7f5b3b36b217344d8c311d9722dbb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 17 Feb 2023 23:17:10 +0100
 Subject: [PATCH] drm/apple: Add support for the macOS 13.2 DCP firmware

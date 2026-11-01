@@ -1,4 +1,4 @@
-From 223b85cd13f86342a1178ee4181bdc2025ef116b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Sat, 19 Sep 2026 00:33:37 -0700
 Subject: [PATCH] drm/apple: select T8132 DCP protocol from exact OS firmware

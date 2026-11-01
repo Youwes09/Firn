@@ -1,4 +1,4 @@
-From c169aa65796697c5a74d418594cdcc0b506f1170 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 14 Apr 2024 16:22:25 +0200
 Subject: [PATCH] drm: apple: dptx: Remove DPTX disconnect/connect on init

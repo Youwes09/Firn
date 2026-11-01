@@ -1,4 +1,4 @@
-From a16ac243aa2751f9881a6145d84ec6784deaf8ae Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 1 Apr 2025 20:20:45 +0200
 Subject: [PATCH] iommu: Handle translated device firmware mappings

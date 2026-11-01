@@ -1,4 +1,4 @@
-From 3e74d67a2958ee25ee5284215b4ea8cba38b5af3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 22:13:23 -0500
 Subject: [PATCH] drm/apple: Adapt to atomic_create_state and the direct map

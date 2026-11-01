@@ -1,4 +1,4 @@
-From 477e2bfbc5a394ad5135ac47e81b5623783779a0 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 11 Apr 2023 22:54:28 +0900
 Subject: [PATCH] dcp: 42-bit DMA masks

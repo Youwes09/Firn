@@ -1,4 +1,4 @@
-From 4cdc520c940a4273ded66bc020ba6ba4e94bf64e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yureka Lilian <yureka@cyberchaos.dev>
 Date: Sat, 25 Jul 2026 15:42:41 +0200
 Subject: [PATCH] arm64: dts: apple: t8132: Add PCIe and the Wi-Fi/Bluetooth

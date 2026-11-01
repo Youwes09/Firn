@@ -1,4 +1,4 @@
-From 24ff0136746898d94ca88959fae0454f2aa8b745 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Mar 2025 23:53:20 +0200
 Subject: [PATCH] iommu/dart: Add iommu_ops for locked DARTs

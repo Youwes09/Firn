@@ -1,4 +1,4 @@
-From ea2894344bde0268b6d27092a0b3393a528893ad Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Sat, 31 Oct 2026 14:26:37 -0500
 Subject: [PATCH] wifi: brcmfmac: Keep the firmware's join preferences when it

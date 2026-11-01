@@ -1,4 +1,4 @@
-From 4cb0fcbbf7a7dbde4403676a4c4bd0f3d616c4f2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 21:58:21 +0900
 Subject: [PATCH] wifi: brcmfmac: Implement the H2D/D2H mailbox data commonring

@@ -1,4 +1,4 @@
-From 12de05569b288a59a64c08d83a1ab8b775b01ddd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Tue, 24 Oct 2023 09:49:40 -0400
 Subject: [PATCH] [brcmfmac] Finish firmware mem map, fix heap start

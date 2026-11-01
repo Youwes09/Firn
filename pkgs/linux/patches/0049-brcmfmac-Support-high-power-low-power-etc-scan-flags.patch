@@ -1,4 +1,4 @@
-From b2415387d7c084aad8b5950b2e1935ec2d1e1813 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Wed, 18 Oct 2023 19:03:58 -0400
 Subject: [PATCH] [brcmfmac] Support high power/low power/etc scan flags

@@ -1,4 +1,4 @@
-From b2a3f048cca18e371046a98955bb2afbf6feb1cc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Sat, 31 Oct 2026 13:26:10 -0500
 Subject: [PATCH] drm/apple: parser: Clear each mode before parsing it

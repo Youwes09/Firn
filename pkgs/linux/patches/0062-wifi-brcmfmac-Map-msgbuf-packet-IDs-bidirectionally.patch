@@ -1,4 +1,4 @@
-From d37e0a0d9e668dfca02c2ff566e0731a3efa966c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Thu, 8 Oct 2026 22:25:43 -0400
 Subject: [PATCH] wifi: brcmfmac: Map msgbuf packet IDs bidirectionally

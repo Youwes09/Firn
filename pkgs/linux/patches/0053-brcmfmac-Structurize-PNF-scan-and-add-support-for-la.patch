@@ -1,4 +1,4 @@
-From 974548a0eac1b2e19a4bed3c8cc308705fe1d968 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sun, 12 Nov 2023 15:46:08 -0500
 Subject: [PATCH] [brcmfmac] Structurize PNF scan and add support for latest

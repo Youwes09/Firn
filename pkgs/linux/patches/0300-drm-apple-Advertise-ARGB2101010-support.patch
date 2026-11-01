@@ -1,4 +1,4 @@
-From 431b4416924e7b1367cdff1002ff73bc3179ddf7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Sat, 27 Dec 2025 16:22:14 +1000
 Subject: [PATCH] drm: apple: Advertise ARGB2101010 support

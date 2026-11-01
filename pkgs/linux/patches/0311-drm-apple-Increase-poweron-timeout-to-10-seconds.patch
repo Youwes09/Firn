@@ -1,4 +1,4 @@
-From ec2410ce122e4ec792b33af6df68f00ff0d8a618 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 14 Mar 2026 08:13:03 +0100
 Subject: [PATCH] drm/apple: Increase poweron timeout to 10 seconds

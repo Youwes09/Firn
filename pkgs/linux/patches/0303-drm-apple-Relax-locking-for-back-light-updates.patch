@@ -1,4 +1,4 @@
-From 7c307fc3492b49b13a9376875ae6e416ca7fca51 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 6 Jan 2026 20:04:47 +0100
 Subject: [PATCH] drm/apple: Relax locking for back light updates

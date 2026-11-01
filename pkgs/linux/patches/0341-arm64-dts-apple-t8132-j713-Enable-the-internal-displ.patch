@@ -1,4 +1,4 @@
-From db0bf0862b2ffc63a72993d9220ecc8cc560a15b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 18 Aug 2026 05:57:36 -0400
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Enable the internal display

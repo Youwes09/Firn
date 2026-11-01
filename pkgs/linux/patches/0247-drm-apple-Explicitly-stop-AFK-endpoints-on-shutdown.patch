@@ -1,4 +1,4 @@
-From 9c530890b5d564701f453f69cbe8a9634e9819cd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Asahi Lina <lina@asahilina.net>
 Date: Sat, 15 Jun 2024 14:29:48 +0900
 Subject: [PATCH] drm/apple: Explicitly stop AFK endpoints on shutdown

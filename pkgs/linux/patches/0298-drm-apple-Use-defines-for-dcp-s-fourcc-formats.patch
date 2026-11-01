@@ -1,4 +1,4 @@
-From 57a8d46b119e8c3a107254c6f9b75ed33baf3106 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 1 Jan 2026 13:53:50 +0100
 Subject: [PATCH] drm: apple: Use defines for dcp's fourcc formats

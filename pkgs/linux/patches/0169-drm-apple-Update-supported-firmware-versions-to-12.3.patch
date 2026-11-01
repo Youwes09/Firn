@@ -1,4 +1,4 @@
-From 74f7faefe5129ac5e1f286c55f495bcced764fad Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 4 Sep 2023 23:07:45 +0200
 Subject: [PATCH] drm: apple: Update supported firmware versions to 12.3 and

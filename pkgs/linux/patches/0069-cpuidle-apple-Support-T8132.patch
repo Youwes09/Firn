@@ -1,4 +1,4 @@
-From 8d97db2e2b5b3b3ec71627df529ab546d37d16a4 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 29 Oct 2026 21:44:20 -0500
 Subject: [PATCH] cpuidle: apple: Support T8132

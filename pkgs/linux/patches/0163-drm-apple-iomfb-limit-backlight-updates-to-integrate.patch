@@ -1,4 +1,4 @@
-From 6ac4a9767488e434c97e5d446a3f2a35f63bc446 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 16:34:14 +0200
 Subject: [PATCH] drm: apple: iomfb: limit backlight updates to integrated

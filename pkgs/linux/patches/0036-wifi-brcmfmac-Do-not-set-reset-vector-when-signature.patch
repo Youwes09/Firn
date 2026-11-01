@@ -1,4 +1,4 @@
-From da67698ef08aad7516d05c26d7ac228ac11d201b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Wed, 4 Oct 2023 05:21:22 +0900
 Subject: [PATCH] wifi: brcmfmac: Do not set reset vector when signatures are

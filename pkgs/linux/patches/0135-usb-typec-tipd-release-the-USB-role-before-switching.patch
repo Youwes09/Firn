@@ -1,4 +1,4 @@
-From 60b6ebbccf2e491718a71df46eb08bdda2f8fa57 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 27 Oct 2026 11:55:56 -0400
 Subject: [PATCH] usb: typec: tipd: release the USB role before switching the

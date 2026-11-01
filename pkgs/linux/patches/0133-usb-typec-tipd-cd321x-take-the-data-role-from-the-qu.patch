@@ -1,4 +1,4 @@
-From 0435307c12e2cfb95c9e419f54d6edc6ff06c729 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Mon, 26 Oct 2026 02:03:39 -0400
 Subject: [PATCH] usb: typec: tipd: cd321x: take the data role from the queued

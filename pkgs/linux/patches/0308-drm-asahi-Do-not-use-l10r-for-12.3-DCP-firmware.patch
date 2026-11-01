@@ -1,4 +1,4 @@
-From f0f0d6daecd1a5ec13f48d053263a7859d7d58a2 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 28 Jan 2026 21:35:20 +0100
 Subject: [PATCH] drm/asahi: Do not use l10r for 12.3 DCP firmware

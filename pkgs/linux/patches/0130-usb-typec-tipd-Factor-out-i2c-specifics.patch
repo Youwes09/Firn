@@ -1,4 +1,4 @@
-From fa1b1bb0c21f813401bf440f3f1d20d3d9564e31 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alyssa Milburn <amilburn@zall.org>
 Date: Thu, 6 Aug 2026 11:37:21 +0200
 Subject: [PATCH] usb: typec: tipd: Factor out i2c specifics

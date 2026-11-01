@@ -1,4 +1,4 @@
-From 5e2198e9f012096b472578752e89e2d9e12be47a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sven Peter <sven@svenpeter.dev>
 Date: Sat, 5 Nov 2022 13:15:33 +0100
 Subject: [PATCH] mux: apple DP xbar: Add Apple silicon DisplayPort crossbar

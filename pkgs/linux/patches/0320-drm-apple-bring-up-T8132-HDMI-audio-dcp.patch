@@ -1,4 +1,4 @@
-From 3958fba9c507e3bd1aef8c1e17f6fd9dcf3c12b0 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 18 Aug 2026 23:07:33 -0400
 Subject: [PATCH] drm/apple: bring up T8132 HDMI audio [dcp]

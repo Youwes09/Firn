@@ -1,4 +1,4 @@
-From 19963588748a72d8c3aec5824e27140ead84a868 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 20 Nov 2023 22:56:43 +0100
 Subject: [PATCH] drm: apple: Disconnect dptx When the CRTC is powered down

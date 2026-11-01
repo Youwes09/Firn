@@ -1,4 +1,4 @@
-From f02a7dd4020684d9f20a4634ccb24305475330a4 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Sat, 19 Sep 2026 02:41:32 -0400
 Subject: [PATCH] drm/apple: dcp: match 26.6.0 firmware compatibility string

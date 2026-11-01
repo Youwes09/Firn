@@ -1,4 +1,4 @@
-From 378a6d3a2ae17935799870d631fc4801bbaf8afb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Wed, 4 Oct 2023 05:27:54 +0900
 Subject: [PATCH] wifi: brcmfmac: Mask all IRQs before starting firmware

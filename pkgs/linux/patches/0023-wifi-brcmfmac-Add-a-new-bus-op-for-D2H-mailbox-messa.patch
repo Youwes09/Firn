@@ -1,4 +1,4 @@
-From 2f9d912fa53e2a90bbb118cfdfa27404c39f746b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 18 Oct 2022 21:56:53 +0900
 Subject: [PATCH] wifi: brcmfmac: Add a new bus op for D2H mailbox message

@@ -1,4 +1,4 @@
-From 34785c88d72d593a96c22c47b7fc3e2df03bfa0e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 7 Oct 2025 21:16:49 +1000
 Subject: [PATCH] input: macsmc-input: New driver to handle the Apple Mac SMC

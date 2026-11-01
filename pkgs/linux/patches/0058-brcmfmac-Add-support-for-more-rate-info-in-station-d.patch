@@ -1,4 +1,4 @@
-From 050ac459707ac7ab8949056b96e6bfcf729e2353 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Tue, 31 Oct 2023 00:06:22 -0400
 Subject: [PATCH] [brcmfmac] Add support for more rate info in station dumps

@@ -1,4 +1,4 @@
-From 545c80597c31930bf3265d4f3bbb288d45c1481a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 14:01:05 -0500
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the SMC hwmon sensors

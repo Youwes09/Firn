@@ -1,4 +1,4 @@
-From 4c91395df1553906b0b53c253fae89805bd94a20 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Wed, 4 Oct 2023 23:54:19 +0900
 Subject: [PATCH] wifi: brcmfmac: Implement event_msgs_ext

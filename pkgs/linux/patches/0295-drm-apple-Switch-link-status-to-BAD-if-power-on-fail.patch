@@ -1,4 +1,4 @@
-From f1aa76ca237d0c70f6b5a30768dd0c515c99a158 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 27 Dec 2025 15:00:14 +0100
 Subject: [PATCH] drm: apple: Switch link status to BAD if power on fails

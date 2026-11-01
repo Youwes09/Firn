@@ -1,4 +1,4 @@
-From 1e2cd3a74ef00040e70e090cacd3541c164fb891 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Thu, 17 Sep 2026 20:52:09 -0400
 Subject: [PATCH] drm/apple: fetch and validate complete DCP audio capabilities

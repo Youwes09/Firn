@@ -1,4 +1,4 @@
-From 1103734c9e4d43b5a677555c4ee3dda6117a227b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Sat, 31 Oct 2026 14:11:36 -0500
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Start the keyboard backlight

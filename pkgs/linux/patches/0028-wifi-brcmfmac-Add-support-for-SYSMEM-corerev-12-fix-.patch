@@ -1,4 +1,4 @@
-From 7cbd191e484ab7a6e1d2d50930e77b0b8856d58a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Mon, 2 Oct 2023 22:55:08 +0900
 Subject: [PATCH] wifi: brcmfmac: Add support for SYSMEM corerev >= 12 & fix <

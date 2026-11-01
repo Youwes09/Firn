@@ -1,4 +1,4 @@
-From 4969a903bdcbaa5242cffe5857d01fc0e122eeb7 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Sun, 3 Jul 2022 23:33:37 +0900
 Subject: [PATCH] soc: apple: Add RTKit helper driver

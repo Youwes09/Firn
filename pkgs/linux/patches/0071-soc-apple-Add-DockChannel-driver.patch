@@ -1,4 +1,4 @@
-From 547922e6c54352988b0c70d6dc1917531796ed6e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 8 Jul 2022 02:09:24 +0900
 Subject: [PATCH] soc: apple: Add DockChannel driver

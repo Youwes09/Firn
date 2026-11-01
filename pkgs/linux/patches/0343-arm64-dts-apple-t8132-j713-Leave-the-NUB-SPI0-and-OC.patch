@@ -1,4 +1,4 @@
-From 860d3cbfe5e37d57a22250f26e03f834349d0c7f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Sat, 31 Oct 2026 14:11:25 -0500
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Leave the NUB SPI0 and OCLA

@@ -1,4 +1,4 @@
-From 85f0aaacd77a0a014b1227483584b65a1883a663 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 18 Aug 2023 00:05:15 +0200
 Subject: [PATCH] drm: apple: dptx: port interface to macOS 13.5 firmware

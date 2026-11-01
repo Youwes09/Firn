@@ -1,4 +1,4 @@
-From f500f0dea1a197727da1249642ef33079efe423e Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Wed, 7 Oct 2026 19:24:56 -0400
 Subject: [PATCH] drm/apple: don't start the DPTX endpoint for internal panels

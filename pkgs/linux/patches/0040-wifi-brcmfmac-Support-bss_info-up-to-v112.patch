@@ -1,4 +1,4 @@
-From 85dbf0bad28de2f5e8e2072180cf9bb5bacaa630 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Thu, 5 Oct 2023 00:34:04 +0900
 Subject: [PATCH] wifi: brcmfmac: Support bss_info up to v112

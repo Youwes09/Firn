@@ -1,4 +1,4 @@
-From 9659ad3b38fe061f7628288386385e9624385d08 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Mon, 17 Apr 2023 20:41:13 +0900
 Subject: [PATCH] cpuidle: apple: Add Apple SoC cpuidle driver

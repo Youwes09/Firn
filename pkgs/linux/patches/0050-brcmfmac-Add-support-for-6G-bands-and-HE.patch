@@ -1,4 +1,4 @@
-From 62701ca8c7261270f3734ed5700f1f96b743aa8d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Daniel Berlin <dberlin@dberlin.org>
 Date: Sun, 15 Oct 2023 08:59:44 -0400
 Subject: [PATCH] [brcmfmac] Add support for 6G bands and HE

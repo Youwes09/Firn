@@ -1,4 +1,4 @@
-From fdb50d5da351cd65802cdbcdb5421113df6b2f08 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: KB2UKA <kb2uka80@gmail.com>
 Date: Thu, 29 Oct 2026 00:30:23 -0500
 Subject: [PATCH] arm64: dts: apple: t8132: Add the SMC reboot

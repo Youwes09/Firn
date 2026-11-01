@@ -1,4 +1,4 @@
-From 439c5bf17a53a4a49d94b01837de13e4c51f3026 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Wed, 28 Oct 2026 21:36:50 -0700
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Enable the PMP

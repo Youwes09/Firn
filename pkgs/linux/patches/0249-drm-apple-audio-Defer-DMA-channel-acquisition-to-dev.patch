@@ -1,4 +1,4 @@
-From 770fb9a97693ee9f677cf5501923fe88737d4dce Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Asahi Lina <lina@asahilina.net>
 Date: Sat, 15 Jun 2024 19:52:16 +0900
 Subject: [PATCH] drm/apple: audio: Defer DMA channel acquisition to device

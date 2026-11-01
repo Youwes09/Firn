@@ -1,4 +1,4 @@
-From c13db7ee2b27fbfef310188db591936d66e779be Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 16 Dec 2021 00:10:51 +0100
 Subject: [PATCH] HID: magicmouse: use a define of the max number of touch

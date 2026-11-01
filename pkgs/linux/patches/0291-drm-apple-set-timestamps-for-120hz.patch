@@ -1,4 +1,4 @@
-From 73afd24b4299ac1788122d537a2b17309c40d284 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Oliver Bestmann <oliver.bestmann@googlemail.com>
 Date: Tue, 16 Dec 2025 11:59:22 +0100
 Subject: [PATCH] drm: apple: set timestamps for 120hz

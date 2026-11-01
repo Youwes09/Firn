@@ -1,4 +1,4 @@
-From 09f1384d96484d573b02fa9bc2c0ec87983db12d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Mon, 2 Mar 2026 21:15:07 +1000
 Subject: [PATCH] drm: apple: Force colour management changes on CRTC enable

@@ -1,4 +1,4 @@
-From 41cddee729ca7503d233ceb00a5b88d2b5abea9b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Sat, 31 Oct 2026 13:27:01 -0500
 Subject: [PATCH] drm/apple: backlight: Retry the brightness commit after a

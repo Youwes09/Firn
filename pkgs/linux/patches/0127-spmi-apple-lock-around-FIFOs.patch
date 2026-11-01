@@ -1,4 +1,4 @@
-From 3ea10aa3f792e196861ffd329ee513b1564fc7b8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alba Mendez <me@alba.sh>
 Date: Tue, 18 Aug 2026 20:32:44 +0200
 Subject: [PATCH] spmi: apple: lock around FIFOs

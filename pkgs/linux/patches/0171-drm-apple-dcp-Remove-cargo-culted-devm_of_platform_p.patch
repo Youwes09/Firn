@@ -1,4 +1,4 @@
-From a46d6af89310980f94dc1ca0948761e7be4d3163 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 7 Nov 2023 00:30:54 +0100
 Subject: [PATCH] drm: apple: dcp: Remove cargo-culted

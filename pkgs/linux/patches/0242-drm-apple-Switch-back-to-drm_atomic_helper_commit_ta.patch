@@ -1,4 +1,4 @@
-From c708657346b344032822da69c6de610f98e8d809 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 27 Apr 2024 17:55:25 +0200
 Subject: [PATCH] drm: apple: Switch back to

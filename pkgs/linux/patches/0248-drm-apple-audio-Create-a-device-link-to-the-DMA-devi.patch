@@ -1,4 +1,4 @@
-From 318b69e6a96426ca8df4d703af95837dea953147 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Asahi Lina <lina@asahilina.net>
 Date: Sat, 15 Jun 2024 19:51:12 +0900
 Subject: [PATCH] drm/apple: audio: Create a device link to the DMA device

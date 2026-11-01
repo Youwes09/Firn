@@ -1,4 +1,4 @@
-From 2fef6539aa6c8c26404343644dd900c138338519 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Nov 2023 23:32:07 +0100
 Subject: [PATCH] drm: apple: dptx: Wait for completion of dptx_connect.

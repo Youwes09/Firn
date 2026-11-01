@@ -1,4 +1,4 @@
-From b256686b3be59cc75210a46c97e44a2129146002 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 15:26:44 +0200
 Subject: [PATCH] mux: apple dp crossbar: Read UNK_TUNABLE before and after

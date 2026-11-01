@@ -1,4 +1,4 @@
-From 41c2bbc9272307e42007712457deab1c486c554c Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alyssa Ross <hi@alyssa.is>
 Date: Thu, 11 Jan 2024 11:39:10 +0100
 Subject: [PATCH] drm/apple: Add missing RTKit Kconfig dependency

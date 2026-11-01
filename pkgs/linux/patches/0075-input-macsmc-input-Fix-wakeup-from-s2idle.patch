@@ -1,4 +1,4 @@
-From ce870486b1216cb4c7a3bb9f6766752f5c71cdce Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Oct 2025 22:37:15 +0200
 Subject: [PATCH] input: macsmc-input: Fix wakeup from s2idle

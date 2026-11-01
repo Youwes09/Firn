@@ -1,4 +1,4 @@
-From 82e5288e7be09f50fd64d6ef2f81d28a085e9434 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Mon, 22 Dec 2025 19:30:47 +1000
 Subject: [PATCH] drm: apple: Support YCbCr formats

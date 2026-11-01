@@ -1,4 +1,4 @@
-From f0f796161757d1beb2552f0eabc9cb616ee38877 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 23:44:08 +0100
 Subject: [PATCH] drm: apple: dptx: Adapt dptxport_connect() to observed

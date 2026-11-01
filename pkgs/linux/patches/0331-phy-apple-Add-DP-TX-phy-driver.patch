@@ -1,4 +1,4 @@
-From 94257aa1c594ca78fcf3477a408fb2d4c8214f0a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 5 May 2023 17:40:26 +0200
 Subject: [PATCH] phy: apple: Add DP TX phy driver

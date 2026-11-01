@@ -1,4 +1,4 @@
-From c166c2d65673366d9ea3d5887dd4b176e51071ea Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 22 Apr 2024 19:47:22 +0200
 Subject: [PATCH] drm: apple: audio: Avoid probe errors

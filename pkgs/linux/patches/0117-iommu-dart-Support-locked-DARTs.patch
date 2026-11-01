@@ -1,4 +1,4 @@
-From 5ceda6093175fa784a98bb80fa3c159c2ba9d202 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alyssa Rosenzweig <alyssa@rosenzweig.io>
 Date: Mon, 10 Feb 2025 14:39:54 -0500
 Subject: [PATCH] iommu/dart: Support locked DARTs

@@ -1,4 +1,4 @@
-From ca7b84e5dd69bd7c2a26639d7de0ebf0fea3e24a Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Thu, 17 Sep 2026 20:37:53 -0400
 Subject: [PATCH] drm/apple: recognize the 26.6.2 DCP firmware compatibility

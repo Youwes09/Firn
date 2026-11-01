@@ -1,4 +1,4 @@
-From d1e85c285df1977bd8b3cc2f063e20a2425450a9 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Tue, 18 Aug 2026 05:57:36 -0400
 Subject: [PATCH] soc: apple: rtkit: Support system endpoint 7

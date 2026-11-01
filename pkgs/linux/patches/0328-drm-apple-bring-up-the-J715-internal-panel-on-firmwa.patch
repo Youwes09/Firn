@@ -1,4 +1,4 @@
-From 8de759633fd40df4a1e4c47324d726ec7081bfcc Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Josh Rodd <josh@rodd.us>
 Date: Thu, 24 Sep 2026 15:32:56 -0400
 Subject: [PATCH] drm/apple: bring up the J715 internal panel on firmware

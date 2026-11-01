@@ -1,4 +1,4 @@
-From d1577adb8821f9d2b1ffba59cb3a5b74b7b032ef Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Asahi Lina <lina@asahilina.net>
 Date: Thu, 18 Aug 2022 02:13:54 +0900
 Subject: [PATCH] rust: soc: apple: rtkit: Add Apple RTKit abstraction

@@ -1,4 +1,4 @@
-From 99f19a1835d8d2f883a7e4fc4ac603f3d8e98d5f Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Josh Rodd <josh@rodd.us>
 Date: Mon, 21 Sep 2026 07:42:37 -0400
 Subject: [PATCH] dt-bindings: iommu: apple,dart: Add apple,sid-remap

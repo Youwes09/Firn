@@ -1,4 +1,4 @@
-From 2e3ec00a4d0bb371009e250be4fd7a38e6e97606 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 3 Dec 2023 23:57:25 +0100
 Subject: [PATCH] drm: apple: dptx: Wait for link config on connect

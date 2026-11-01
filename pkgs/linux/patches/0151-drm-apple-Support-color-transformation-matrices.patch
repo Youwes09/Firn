@@ -1,4 +1,4 @@
-From 7ed6324d86d1dea1d46b3d39b0604696e21de0cd Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 12 Mar 2023 21:38:50 +0100
 Subject: [PATCH] drm/apple: Support color transformation matrices

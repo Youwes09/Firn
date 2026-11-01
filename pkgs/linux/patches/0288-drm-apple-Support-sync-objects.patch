@@ -1,4 +1,4 @@
-From a9ef34bdb7f4497163dbe7ad8872845126e54b4b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 26 Jul 2025 15:44:57 +0200
 Subject: [PATCH] drm: apple: Support sync objects

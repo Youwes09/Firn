@@ -1,4 +1,4 @@
-From 4260b62c68ba229e4385bbaf58b11522d34a2ff4 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Thu, 17 Sep 2026 20:52:09 -0400
 Subject: [PATCH] drm/apple: constrain PCM formats to the retained T8132 audio

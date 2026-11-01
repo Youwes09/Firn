@@ -1,4 +1,4 @@
-From d0af399e61c5f1b6b402512712cfb034dda6ca3b Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <fnkl.kernel@gmail.com>
 Date: Thu, 26 Feb 2026 17:53:50 +0100
 Subject: [PATCH] soc: apple: Add support for the PMP co-processor

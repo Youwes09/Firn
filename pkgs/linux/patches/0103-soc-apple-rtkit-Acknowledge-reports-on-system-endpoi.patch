@@ -1,4 +1,4 @@
-From 4624691b8afd8028e0802fa6cceae2c8c710a7b3 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Mon, 26 Oct 2026 18:51:48 -0400
 Subject: [PATCH] soc: apple: rtkit: Acknowledge reports on system endpoint 7

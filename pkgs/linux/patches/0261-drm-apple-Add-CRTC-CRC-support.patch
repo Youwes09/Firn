@@ -1,4 +1,4 @@
-From 2c3c7b04bd57ffe5ea38ff1bf157f47bd12d127d Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 22 Jul 2024 20:26:55 +0200
 Subject: [PATCH] drm: apple: Add CRTC CRC support
