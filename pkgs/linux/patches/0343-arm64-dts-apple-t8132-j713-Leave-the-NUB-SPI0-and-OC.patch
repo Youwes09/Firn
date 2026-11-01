@@ -8,6 +8,7 @@ The ADT flags both critical, which the T8132 power domains carry over as
 always-on, but on the J713 iBoot leaves them off and no driver uses
 them. Let them stay off instead of having Linux power them on at boot.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  arch/arm64/boot/dts/apple/t8132-j713.dts | 9 +++++++++

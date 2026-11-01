@@ -15,6 +15,7 @@ internal panel as disp0 and never offers them, so the wait times out
 dcp->dptxep then stays NULL and dptxport[0].enabled false, as on
 panel boots without a PHY, and every other user checks those first.
 
+Assisted-by: Claude:claude-opus-5-5
 [Youwes09: from niklassheth/linux 7e86205e233d]
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---

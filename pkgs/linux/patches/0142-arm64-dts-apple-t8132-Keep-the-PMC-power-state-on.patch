@@ -10,6 +10,7 @@ consumers have probed.
 
 Keep it on, as for the PMP and PMS SRAM states.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  arch/arm64/boot/dts/apple/t8132-pmgr.dtsi | 2 ++

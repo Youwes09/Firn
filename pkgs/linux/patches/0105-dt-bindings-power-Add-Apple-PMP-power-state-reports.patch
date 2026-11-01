@@ -9,6 +9,7 @@ adds an event-config region.
 
 Based on Cody Ho's binding in Gravity Linux.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  .../bindings/power/apple,pmp-report.yaml      | 129 ++++++++++++++++++

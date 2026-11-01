@@ -14,6 +14,7 @@ Before this, formats with alpha were always blended as coverage, though
 userspace drew them pre-multiplied as DRM documented for drivers
 without the property.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/gpu/drm/apple/plane.c | 11 +++++++++++

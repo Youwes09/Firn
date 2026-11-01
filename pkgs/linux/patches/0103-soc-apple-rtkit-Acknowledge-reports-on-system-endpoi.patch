@@ -11,6 +11,7 @@ the first one.
 
 Answer 0x8 and 0xc by echoing them, as for IOReport.
 
+Assisted-by: Claude:claude-opus-5-5
 [Youwes09: from niklassheth/linux 1b6d546d99c8]
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---

@@ -10,6 +10,7 @@ the PD controller driver. Enter it for the shared TYPEC_TPS6598X_CORE.
 Split out of 877c574dfa4f ("drm/apple: bring up T8132 DCP hotplug").
 
 Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Assisted-by: Claude:claude-opus-5-5
 ---
  drivers/usb/typec/Makefile | 2 +-
  1 file changed, 1 insertion(+), 1 deletion(-)

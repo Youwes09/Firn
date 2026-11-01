@@ -10,6 +10,7 @@ the default RSSI-with-5GHz-boost list is rejected on every interface
 start and the firmware keeps its own. Log that at debug level, not as
 an error.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c | 5 ++++-

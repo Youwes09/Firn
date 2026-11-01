@@ -8,6 +8,7 @@ maintenance and arm64 already treats every device as coherent, warning
 for each one the devicetree leaves non-coherent; that is every device,
 on every probe attempt. Say so in the devicetree instead.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  arch/arm64/boot/dts/apple/t8132.dtsi | 3 +++

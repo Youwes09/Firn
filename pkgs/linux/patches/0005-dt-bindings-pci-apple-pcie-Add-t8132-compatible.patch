@@ -7,6 +7,7 @@ The M4 (t8132) PCIe controller works like t6020's but has three root
 ports, so its PHY ranges follow port2. Add the compatible and give it
 its own reg-names list.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  .../devicetree/bindings/pci/apple,pcie.yaml   | 58 +++++++++++++++----

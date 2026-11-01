@@ -11,6 +11,7 @@ T8132 J713's Wi-Fi port, stays off and its link never trains.
 Create and power on the pwrctrl devices before setting up the ports,
 following the MediaTek gen3 driver.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/pci/controller/pcie-apple.c | 26 ++++++++++++++++++++++++--

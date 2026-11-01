@@ -7,6 +7,7 @@ Move the test that decides whether the PHY leaves safe mode into
 cd321x_data_connected(), so that every place that needs to know the PHY
 state a status implies uses the same predicate. No functional change.
 
+Assisted-by: Claude:claude-opus-5-5
 [Youwes09: from niklassheth/linux acfd7fafe5f9]
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---

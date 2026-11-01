@@ -8,6 +8,7 @@ The J713 has two USB-C ports, on ATC0 and ATC1; its ADT has no ATC2 or
 ATC3 PHY or controller. Their power states refuse to turn on, so every
 child domain defers probing forever trying to power its parent.
 
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  arch/arm64/boot/dts/apple/t8132-j713.dts | 60 ++++++++++++++++++++++++

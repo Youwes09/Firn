@@ -8,6 +8,7 @@ roam delta, so the firmware gets whatever is on the stack. The BCM4388
 rejects the garbage band with BCME_NOTBANDLOCKED.
 
 Fixes: e66047b8072e ("[brcmfmac] Clean up and common interface creation handling")
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c | 2 ++

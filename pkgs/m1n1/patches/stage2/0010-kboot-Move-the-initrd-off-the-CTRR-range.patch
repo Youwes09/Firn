@@ -11,7 +11,7 @@ initrd, which hangs the boot.
 
 Copy the initrd to the heap when it overlaps the range.
 
-Assisted-By: LLM
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/kboot.c | 28 ++++++++++++++++++++++++++++

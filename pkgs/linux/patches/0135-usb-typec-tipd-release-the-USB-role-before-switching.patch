@@ -14,6 +14,7 @@ Drop the role to none before every mux switch. dwc3-apple's role
 switch is synchronous, so the PIPE handler is down before the PHY
 changes mode; the work function sets the new role afterwards.
 
+Assisted-by: Claude:claude-opus-5-5
 [Youwes09: without the Thunderbolt switch calls]
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
