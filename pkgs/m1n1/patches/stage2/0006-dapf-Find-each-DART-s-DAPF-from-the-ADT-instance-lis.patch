@@ -16,7 +16,7 @@ property, which types each reg range by fourcc in one of two layouts:
 the DAPF in the range after them. The entry count tells them apart.
 Fall back to the table for a DART with no instance list.
 
-Assisted-By: LLM
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/dapf.c | 99 +++++++++++++++++++++++++++++++++++++++++++++++++-----

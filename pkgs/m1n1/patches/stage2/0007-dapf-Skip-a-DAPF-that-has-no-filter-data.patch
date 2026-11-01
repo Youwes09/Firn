@@ -8,7 +8,7 @@ data, so there is nothing to write, yet it was reported as an error.
 Look the data up before powering the device and skip the DAPF if there
 is none.
 
-Assisted-By: LLM
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/dapf.c | 84 ++++++++++++++++++++++++++++--------------------------

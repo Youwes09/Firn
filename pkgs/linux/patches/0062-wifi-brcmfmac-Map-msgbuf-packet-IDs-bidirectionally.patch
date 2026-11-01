@@ -17,7 +17,7 @@ kernel joins again, with TX alone it does not.
 
 Map both packet ID pools bidirectionally again, as before f0ba5fd51ff2.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Assisted-by: Claude:claude-opus-5-5
 
 Original-Commit: 9188e149997d90434767ea162a5bf2b35f655ce1
 Signed-off-by: Cody Ho <codyho@stanford.edu>

@@ -18,7 +18,7 @@ Skip the drain when the work was never initialized, as
 brcmf_bus_schedule_reset() already does before arming it.
 
 Fixes: 177a25be1195 ("wifi: brcmfmac: drain bus_reset work on device removal")
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Assisted-by: Claude:claude-opus-5-5
 (cherry picked from commit 7f1e74a253b82405aecefd94c4b6a14a11d6e810)
 
 Original-Commit: 233b8332d59940785f44154fa1b2a4b40431812d

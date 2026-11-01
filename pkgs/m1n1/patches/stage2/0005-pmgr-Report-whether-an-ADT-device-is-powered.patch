@@ -8,7 +8,7 @@ off and leave it as it was found. Like pmgr_set_mode_recursive(), it
 follows each gate's parents: on T8132, dart-ane's gates are virtual,
 under an ANE_SYS that is off at boot.
 
-Assisted-By: LLM
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/pmgr.c | 47 +++++++++++++++++++++++++++++++++++++++++++++++

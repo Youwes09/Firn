@@ -11,7 +11,7 @@ Without the MTP's DAPF, its DART reports a SID exception as soon as the
 MTP starts and RTKit never gets a HELLO, so the keyboard and trackpad
 stay dead.
 
-Assisted-By: LLM
+Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/kboot.c | 4 +---
