@@ -5,10 +5,10 @@
   ...
 }:
 let
-  cfg = config.hardware.firn;
-  networkFile = pkgs.writeText "firn-link.psk" (
+  cfg = config.services.firn-link;
+  # The passphrase is added when iwd starts, so it stays out of the store.
+  networkSettings = pkgs.writeText "firn-link-settings" (
     lib.generators.toINI { } {
-      Security.Passphrase = "firn-air-link";
       Settings.AutoConnect = false;
       IPv4 = {
         Address = "10.88.0.2";
@@ -77,24 +77,45 @@ let
   };
 in
 {
-  options.hardware.firn.link = lib.mkEnableOption ''
-    the firn-link command, which joins the build machine's firn-link Wi-Fi
-    network as 10.88.0.2 for SSH where no shared network allows it. Wi-Fi
-    is then addressed by iwd instead of dhcpcd
-  '';
+  options.services.firn-link = {
+    enable = lib.mkEnableOption ''
+      the firn-link command, which joins a build machine's firn-link Wi-Fi
+      network as 10.88.0.2 for SSH where no shared network allows it. Wi-Fi
+      is then addressed by iwd instead of dhcpcd
+    '';
 
-  config = lib.mkIf (cfg.enable && cfg.link) {
+    passphraseFile = lib.mkOption {
+      type = lib.types.str;
+      example = "/var/lib/firn-link/passphrase";
+      description = ''
+        File holding the firn-link network's passphrase, read when iwd
+        starts. A path string, so the passphrase stays out of the store.
+      '';
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
     environment.systemPackages = [ firn-link ];
 
     # dhcpcd misses switches between networks, which brcmfmac makes without
     # dropping the link, so iwd addresses Wi-Fi and gives firn-link its address.
     networking.wireless.iwd.settings = {
       General.EnableNetworkConfiguration = true;
-      Network.NameResolvingService =
-        if config.services.resolved.enable then "systemd" else "resolvconf";
+      Network.NameResolvingService = if config.services.resolved.enable then "systemd" else "resolvconf";
     };
+    # Without the passphrase, iwd still starts for every other network.
     systemd.services.iwd.preStart = ''
-      install -D -m 600 ${networkFile} /var/lib/iwd/firn-link.psk
+      umask 077
+      mkdir -p /var/lib/iwd
+      if passphrase=$(cat ${lib.escapeShellArg cfg.passphraseFile}); then
+        {
+          printf '[Security]\nPassphrase=%s\n\n' "$passphrase"
+          cat ${networkSettings}
+        } > /var/lib/iwd/firn-link.psk
+      else
+        echo "firn-link: cannot read ${cfg.passphraseFile}; leaving it out" >&2
+        rm -f /var/lib/iwd/firn-link.psk
+      fi
     '';
     networking.dhcpcd = {
       denyInterfaces = [ "wlan0" ];
