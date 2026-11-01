@@ -1,4 +1,4 @@
-From 082f3713a1f79e92c0b344d451c3b8222ef104a6 Mon Sep 17 00:00:00 2001
+From 1a1fff011da64ec5a81043bdbc0a780e810cd5e3 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 13 Nov 2023 21:59:46 +0100
 Subject: [PATCH] drm: apple: av: Support macOS 12.3 and 13.5 firmware APIs

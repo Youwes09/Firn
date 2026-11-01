@@ -1,4 +1,4 @@
-From 885632a877b5ff816b47a81c4476917c6902d661 Mon Sep 17 00:00:00 2001
+From bff21525e63d8d344a4a26e3fd9a2e890f153753 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 25 Apr 2023 01:49:14 +0900
 Subject: [PATCH] drm/apple: Mark DCP as being in the wakeup path
@@ -12,7 +12,7 @@ Signed-off-by: Hector Martin <marcan@marcan.st>
  1 file changed, 21 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 0fc6321aa05b..c5f53b313d80 100644
+index d04329519163..5259afd51c2e 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -584,6 +584,26 @@ static void dcp_platform_shutdown(struct platform_device *pdev)

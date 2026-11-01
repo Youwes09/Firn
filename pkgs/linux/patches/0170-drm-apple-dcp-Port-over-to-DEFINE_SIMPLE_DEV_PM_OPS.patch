@@ -1,4 +1,4 @@
-From d3b1710f7deecf75686c0300da56734e02547fbc Mon Sep 17 00:00:00 2001
+From 4c9ab46c656bc4a097cc8a78ee0833f893d5eec1 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 7 Nov 2023 00:14:55 +0100
 Subject: [PATCH] drm: apple: dcp: Port over to DEFINE_SIMPLE_DEV_PM_OPS
@@ -11,7 +11,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 4 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index b00e64e8d07b..cacfde09fdf9 100644
+index 389f50e544be..5154b1e9598b 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -635,7 +635,7 @@ static void dcp_platform_shutdown(struct platform_device *pdev)

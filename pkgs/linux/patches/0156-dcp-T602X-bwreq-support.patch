@@ -1,4 +1,4 @@
-From a12b6e4624cbe87d9ba2884327b20b5601638b03 Mon Sep 17 00:00:00 2001
+From 13cef4c003ff478270f4d781929952e36deeb2e4 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 11 Apr 2023 22:55:25 +0900
 Subject: [PATCH] dcp: T602X bwreq support

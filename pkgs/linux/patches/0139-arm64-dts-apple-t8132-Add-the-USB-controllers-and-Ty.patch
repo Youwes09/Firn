@@ -1,4 +1,4 @@
-From e602b6b792e892ae4b3babb7c2bb8a1aad06aedc Mon Sep 17 00:00:00 2001
+From 73c930849dd7de4d32288e46baa458c597216bfb Mon Sep 17 00:00:00 2001
 From: Yureka Lilian <yureka@cyberchaos.dev>
 Date: Sat, 25 Jul 2026 15:17:10 +0200
 Subject: [PATCH] arm64: dts: apple: t8132: Add the USB controllers and Type-C

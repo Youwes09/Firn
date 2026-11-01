@@ -1,4 +1,4 @@
-From b8a5f53b46b98240ee7749dbbcae2906fc2173f0 Mon Sep 17 00:00:00 2001
+From 802347aee7aaa4c418ce263eda884e93c67dfe31 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 2 Dec 2023 10:26:13 +0100
 Subject: [PATCH] drm: apple: Be less noisy about teardown notifies without

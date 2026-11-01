@@ -1,4 +1,4 @@
-From 5740637b205076843198ef498cc1dc9039ab4d49 Mon Sep 17 00:00:00 2001
+From d4bd4ddd0f5a787f418f5bcbdf3568f85538e67a Mon Sep 17 00:00:00 2001
 From: Jonathan Gray <jsg@jsg.id.au>
 Date: Mon, 22 Jan 2024 18:54:31 +1100
 Subject: [PATCH] drm/apple: spelling fixes
@@ -14,7 +14,7 @@ Signed-off-by: Jonathan Gray <jsg@jsg.id.au>
  6 files changed, 7 insertions(+), 7 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 6dcebb5c6220..3483a30f6f28 100644
+index b6f5e69a3f82..c7f5e22b2e36 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -459,7 +459,7 @@ static int apple_drm_init_dcp(struct device *dev)
@@ -40,7 +40,7 @@ index 72b4ca86ed31..b6fc500e7453 100644
  };
  
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 0aa4d27343f8..0319d8feda1e 100644
+index bfaaf8266739..61ef13442f0d 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -804,7 +804,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
@@ -62,7 +62,7 @@ index 0aa4d27343f8..0319d8feda1e 100644
  	ret = apple_rtkit_wake(dcp->rtk);
  	if (ret)
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index e3b9abebe5ed..1d5e0bf4b197 100644
+index 9ee2068f5839..a0aa0ff2f9e6 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -274,7 +274,7 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,

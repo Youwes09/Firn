@@ -1,0 +1,26 @@
+From a9c4a7761926325a6b2ecd0afc5daedeecb55d93 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 6 Jan 2026 22:23:53 +0100
+Subject: [PATCH] drm/apple: Send HPD event on disconnect only connector is
+ cconected
+
+Fixes a deadlock while disabling the CRTC from HPD event via drm_client.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/dcp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 689f18574539..2f6b1ad043bb 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -426,7 +426,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
+ 
+ static void disconnected_hpd_event(struct apple_connector *con)
+ {
+-	if (con) {
++	if (con && con->connected) {
+ 		con->connected = 0;
+ 		drm_kms_helper_connector_hotplug_event(&con->base);
+ 	}

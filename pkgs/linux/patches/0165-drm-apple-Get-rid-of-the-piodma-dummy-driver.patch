@@ -1,4 +1,4 @@
-From 6029d4d39ad2e927ba7297e81a7824883ccb846b Mon Sep 17 00:00:00 2001
+From 8691c95b13af44b3918619355db89dc852c2f64a Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 15 Jul 2023 18:59:10 +0200
 Subject: [PATCH] drm/apple: Get rid of the piodma dummy driver
@@ -32,7 +32,7 @@ index 2738d5d62dee..935ae56d7f26 100644
  obj-$(CONFIG_DRM_APPLE) += apple_dcp.o
 -obj-$(CONFIG_DRM_APPLE) += apple_piodma.o
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 140b7163d277..992facd17258 100644
+index 78e7e9ca7464..e17c4d2129eb 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -558,26 +558,6 @@ const struct component_master_ops apple_drm_ops = {
@@ -73,7 +73,7 @@ index 140b7163d277..992facd17258 100644
  	num_dcp = add_dcp_components(mdev, &match);
  	if (num_dcp < 1)
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 19c1f4f4e6cf..ee904dadea64 100644
+index 74bcc4e20029..c78879ab4cc5 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -13,6 +13,7 @@

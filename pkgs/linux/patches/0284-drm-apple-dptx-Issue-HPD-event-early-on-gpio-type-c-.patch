@@ -1,4 +1,4 @@
-From 03553ede84c93b6292ac436359373bf1dd8343b6 Mon Sep 17 00:00:00 2001
+From 97ce1201cef45fc6dacc18cc094e9ba3e63ab499 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 9 Feb 2025 21:29:55 +0100
 Subject: [PATCH] drm: apple: dptx: Issue HPD event early on gpio/type-c
@@ -16,7 +16,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 14 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 9dfd5cbcdad2..ab7eead4fd19 100644
+index eb86c04c752f..d70357042043 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -424,6 +424,14 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)

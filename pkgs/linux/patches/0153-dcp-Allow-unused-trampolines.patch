@@ -1,4 +1,4 @@
-From 3d615d1fad1fb7f893a509066259a220bea43500 Mon Sep 17 00:00:00 2001
+From 84e51fa957c16513141f7a9293b53f8d1fe29b34 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 11 Apr 2023 21:57:22 +0900
 Subject: [PATCH] dcp: Allow unused trampolines

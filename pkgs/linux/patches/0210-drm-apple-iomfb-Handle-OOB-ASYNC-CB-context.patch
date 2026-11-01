@@ -1,4 +1,4 @@
-From 543c2e696faece248008b08c65eb26b59f08e9d3 Mon Sep 17 00:00:00 2001
+From 342c62f667f09c705f91d0146024722978110a5c Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 26 Nov 2023 18:30:59 +0100
 Subject: [PATCH] drm: apple: iomfb: Handle OOB ASYNC/CB context
@@ -29,7 +29,7 @@ index ef6cddef40a4..72b4ca86ed31 100644
  	/* iomfb EP callback handlers */
  	const iomfb_cb_handler *cb_handlers;
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index f5ae64ea5862..bb4737fa0f25 100644
+index 9a3b73271e4d..dd7e53214e95 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -49,6 +49,8 @@ static int dcp_channel_offset(enum dcp_context_id id)

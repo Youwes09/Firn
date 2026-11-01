@@ -1,4 +1,4 @@
-From f3f2bf3025bf0c5ba4ef27a1ef15b471f667b64b Mon Sep 17 00:00:00 2001
+From a60421f9de8324e765399b3c22780e04cc3eaf29 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 19 Jul 2023 09:22:24 +0200
 Subject: [PATCH] drm/apple: Use iommu domain for piodma maps
@@ -27,7 +27,7 @@ index ffb6984af69f..1328640b3fae 100644
  	struct apple_crtc *crtc;
  	struct apple_connector *connector;
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index ee904dadea64..d8f3b7f3623e 100644
+index c78879ab4cc5..7e43d3735e31 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -320,17 +320,15 @@ static void dcp_work_register_backlight(struct work_struct *work)

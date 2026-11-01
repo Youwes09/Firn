@@ -1,4 +1,4 @@
-From a560ca95148c7bd2d26caa05d1e6e32a38f5dc9a Mon Sep 17 00:00:00 2001
+From a46d6af89310980f94dc1ca0948761e7be4d3163 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 7 Nov 2023 00:30:54 +0100
 Subject: [PATCH] drm: apple: dcp: Remove cargo-culted
@@ -12,7 +12,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 7 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index cacfde09fdf9..1da361e7b8f3 100644
+index 5154b1e9598b..650a07d00849 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -601,7 +601,6 @@ static int dcp_platform_probe(struct platform_device *pdev)

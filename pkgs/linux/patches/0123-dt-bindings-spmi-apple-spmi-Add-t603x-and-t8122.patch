@@ -1,4 +1,4 @@
-From f77ac0d38bbdbd93c23c323e923a6a54ec3131b6 Mon Sep 17 00:00:00 2001
+From 7592dbdb889cbc14682b6c01c4d72cf18945b628 Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <k@chaosmail.tech>
 Date: Tue, 18 Aug 2026 20:32:40 +0200
 Subject: [PATCH] dt-bindings: spmi: apple,spmi: Add t603x and t8122

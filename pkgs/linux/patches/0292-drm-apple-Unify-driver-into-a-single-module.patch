@@ -1,4 +1,4 @@
-From 508c882c79a92d330948d7c58ca563c0e18d574d Mon Sep 17 00:00:00 2001
+From ba18935387fc0bf36357b0745b245abb34362f62 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 10 Sep 2025 17:56:28 +0200
 Subject: [PATCH] drm/apple: Unify driver into a single module
@@ -10,9 +10,9 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  drivers/gpu/drm/apple/connector.c |  1 -
  drivers/gpu/drm/apple/dcp.c       | 32 +++----------------------------
  drivers/gpu/drm/apple/dcp.h       |  3 +++
- drivers/gpu/drm/apple/iomfb.c     |  7 -------
+ drivers/gpu/drm/apple/iomfb.c     |  9 +--------
  drivers/gpu/drm/apple/parser.c    |  2 --
- 7 files changed, 42 insertions(+), 50 deletions(-)
+ 7 files changed, 43 insertions(+), 51 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
 index 4f78757829ea..8d963ad6fded 100644
@@ -46,7 +46,7 @@ index 4f78757829ea..8d963ad6fded 100644
  obj-$(CONFIG_DRM_APPLE) += appledrm.o
 -obj-$(CONFIG_DRM_APPLE) += apple_dcp.o
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 173cf5fba969..a791a4a02810 100644
+index c59192a550fc..a1b436f1df14 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -812,7 +812,33 @@ static struct platform_driver apple_platform_driver = {
@@ -97,7 +97,7 @@ index 9e7866708933..15b3664d8563 100644
  static void dcp_connector_set_dict(struct apple_connector *connector,
  				   struct dcp_chunks *dict,
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 0b3e301e7d83..25c866c74c81 100644
+index c829016f89fa..ddd384ae3976 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -201,7 +201,6 @@ int dcp_set_crc(struct drm_crtc *crtc, bool enabled)
@@ -108,7 +108,7 @@ index 0b3e301e7d83..25c866c74c81 100644
  
  /*
   * Helper to send a DRM vblank event. We do not know how call swap_submit_dcp
-@@ -361,7 +360,6 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -361,7 +360,6 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commi
  
  	return 0;
  }
@@ -213,7 +213,7 @@ index 0b3e301e7d83..25c866c74c81 100644
 -MODULE_DESCRIPTION("Apple Display Controller DRM driver");
 -MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index cf598e037aee..ce18fa49e4da 100644
+index 70955b1ab154..6f4098c2a9d9 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -68,6 +68,9 @@ int dpavservep_init(struct apple_dcp *dcp);
@@ -227,7 +227,7 @@ index cf598e037aee..ce18fa49e4da 100644
  void __exit dcp_audio_unregister(void);
  
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 8310508c7a8f..18685aa80793 100644
+index 1e4da308578e..075835c0aed9 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -258,7 +258,6 @@ void dcp_hotplug(struct work_struct *work)
@@ -246,14 +246,18 @@ index 8310508c7a8f..18685aa80793 100644
  
  /* The user may own drm_display_mode, so we need to search for our copy */
  struct dcp_display_mode *lookup_mode(struct apple_dcp *dcp,
-@@ -440,7 +438,6 @@ enum drm_mode_status dcp_mode_valid(struct drm_connector *connector,
+@@ -440,10 +438,9 @@ enum drm_mode_status dcp_mode_valid(struct drm_connector *connector,
  
  	return lookup_mode(dcp, mode) ? MODE_OK : MODE_BAD;
  }
 -EXPORT_SYMBOL_GPL(dcp_mode_valid);
  
  int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
- 			    struct drm_atomic_state *state)
+-			    struct drm_atomic_state *state)
++			    struct drm_atomic_commit *commit)
+ {
+ 	struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
+ 	struct apple_dcp *dcp = platform_get_drvdata(apple_crtc->dcp);
 @@ -479,7 +476,6 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
  
  	return ret;
@@ -269,8 +273,8 @@ index 8310508c7a8f..18685aa80793 100644
 -EXPORT_SYMBOL(dcp_crtc_mode_fixup);
  
  
- void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
-@@ -527,7 +522,6 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+@@ -527,7 +522,6 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  		break;
  	}
  }

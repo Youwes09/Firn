@@ -1,4 +1,4 @@
-From 6598e4388a1ce82bdc1dee35db598392f86fe288 Mon Sep 17 00:00:00 2001
+From 154571c271788366e6ba3cae03ecb2a2be97e764 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 17 Aug 2023 23:00:08 +0200
 Subject: [PATCH] mux: apple dp crossbar: Support t602x DP cross bar variant

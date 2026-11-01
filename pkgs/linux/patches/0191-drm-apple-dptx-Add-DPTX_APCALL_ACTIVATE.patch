@@ -1,4 +1,4 @@
-From 5c201560d9756eb50a811849fb5f86c509c65a96 Mon Sep 17 00:00:00 2001
+From 6c99d7fbf05c4930c815bbcdd38dd14164c1fc5e Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 23:37:27 +0100
 Subject: [PATCH] drm: apple: dptx: Add DPTX_APCALL_ACTIVATE

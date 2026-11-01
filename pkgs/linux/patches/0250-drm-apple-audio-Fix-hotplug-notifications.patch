@@ -1,4 +1,4 @@
-From f14f93d5b4a62c7e5b357be517117638ecddd025 Mon Sep 17 00:00:00 2001
+From 9f53d64d2cd026d74b58f43ab45a79b4ca01bee6 Mon Sep 17 00:00:00 2001
 From: Asahi Lina <lina@asahilina.net>
 Date: Sat, 15 Jun 2024 21:12:46 +0900
 Subject: [PATCH] drm/apple: audio: Fix hotplug notifications

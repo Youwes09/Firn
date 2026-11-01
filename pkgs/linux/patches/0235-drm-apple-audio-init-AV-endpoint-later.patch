@@ -1,4 +1,4 @@
-From 664aeb630739b2aa4034dd11efea440fc62bfe10 Mon Sep 17 00:00:00 2001
+From 92d4b386b771959693ba4f210c6db1a1721a0f47 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 14 Apr 2024 16:47:01 +0200
 Subject: [PATCH] drm: apple: audio: init AV endpoint later
@@ -11,7 +11,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 9 insertions(+), 8 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index d9fc0db51dba..b4d6834f1da9 100644
+index 2d4d45fb6f45..d9e35622f2f3 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -371,14 +371,6 @@ int dcp_start(struct platform_device *pdev)

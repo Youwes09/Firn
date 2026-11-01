@@ -1,4 +1,4 @@
-From 34931891f30459600d3d0e5192380d785ab63085 Mon Sep 17 00:00:00 2001
+From 46c342c36a7b6177e03b17ad96f267c853f8adab Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 10 Dec 2023 13:27:12 +0100
 Subject: [PATCH] drm: apple: epic: Pass full notfiy/report payload to handler

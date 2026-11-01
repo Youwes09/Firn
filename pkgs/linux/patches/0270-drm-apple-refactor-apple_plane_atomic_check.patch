@@ -1,4 +1,4 @@
-From 259cd3883c3b21c8e347825468f3e0115f4795d1 Mon Sep 17 00:00:00 2001
+From 84aeecadea97732b9a48ff3a7efd7ee3fbed29db Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 8 Dec 2024 15:51:37 +0100
 Subject: [PATCH] drm: apple: refactor apple_plane_atomic_check
@@ -13,7 +13,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 24 insertions(+), 17 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index b38e2170a417..954c388786a8 100644
+index c6252824a8be..d2277eebb182 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -82,6 +82,7 @@ static int apple_plane_atomic_check(struct drm_plane *plane,

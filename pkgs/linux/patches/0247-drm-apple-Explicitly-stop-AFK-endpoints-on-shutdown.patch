@@ -1,4 +1,4 @@
-From 12ceb2108350264caf38bcec01ac07f1c7f6e2a2 Mon Sep 17 00:00:00 2001
+From 9c530890b5d564701f453f69cbe8a9634e9819cd Mon Sep 17 00:00:00 2001
 From: Asahi Lina <lina@asahilina.net>
 Date: Sat, 15 Jun 2024 14:29:48 +0900
 Subject: [PATCH] drm/apple: Explicitly stop AFK endpoints on shutdown
@@ -47,7 +47,7 @@ index 0f91f32e08e3..be3f0b105de5 100644
  int afk_send_epic(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
  		  enum epic_type etype, enum epic_category ecat, u8 stype,
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index afa77fafe8fe..8ee980bfc6af 100644
+index 5acb1456b499..a2e9b3e3817a 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -1018,10 +1018,33 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)

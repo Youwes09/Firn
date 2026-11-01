@@ -1,4 +1,4 @@
-From 9114577de826b1bb7eedffb89c0d3d8598901202 Mon Sep 17 00:00:00 2001
+From 0e340a00d8957409ba16b7e8a8e0bcc3ea73546d Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 23:36:20 +0100
 Subject: [PATCH] drm: apple: dptx: Add set_active_lanes APCALL

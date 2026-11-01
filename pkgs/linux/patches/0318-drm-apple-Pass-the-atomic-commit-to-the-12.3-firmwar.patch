@@ -1,0 +1,54 @@
+From 14e585c09f35152e12e1a3f6a6cc912f4dc8fe28 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 23 Aug 2026 22:56:48 +0200
+Subject: [PATCH] drm/apple: Pass the atomic commit to the 12.3 firmware's
+ flush
+
+dcp_flush() takes a struct drm_atomic_commit, but the 12.3 firmware's
+flush still took the state by its old type and name. Take the commit,
+as the 13.5 firmware's flush does.
+
+[Youwes09: AsahiLinux/linux ea3f3260a007 ("fixup! drm/apple: Add
+ support for the macOS 13.2 DCP firmware"), kept as its own commit as
+ the commits in between rework the same lines]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/iomfb.c          | 2 +-
+ drivers/gpu/drm/apple/iomfb_template.c | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 6b5ce6826b47..9e22e82bcbd8 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -480,7 +480,7 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+ 
+ 	switch (dcp->fw_compat) {
+ 	case DCP_FIRMWARE_V_12_3:
+-		iomfb_flush_v12_3(dcp, crtc, state);
++		iomfb_flush_v12_3(dcp, crtc, commit);
+ 		break;
+ 	case DCP_FIRMWARE_V_13_5:
+ 		iomfb_flush_v13_3(dcp, crtc, commit);
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 61429a9f9c2b..3690a64fb660 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1277,7 +1277,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 	return 0;
+ }
+ 
+-void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_state *state)
++void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+ {
+ 	struct drm_plane *plane;
+ 	struct drm_plane_state *new_state, *old_state;
+@@ -1286,7 +1286,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 	int plane_idx, l;
+ 	int has_surface = 0;
+ 
+-	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
+ 
+ 	/* Reset all surfaces to defaults */
+ 	memset(req, 0, sizeof(*req));

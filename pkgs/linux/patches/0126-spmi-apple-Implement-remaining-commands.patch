@@ -1,4 +1,4 @@
-From 882e57b0f8a4d5c383ba8d767fe892438b4efc91 Mon Sep 17 00:00:00 2001
+From 156d0b2ebc0aabb493811c9cec91b2c33aaf81b1 Mon Sep 17 00:00:00 2001
 From: Alba Mendez <me@alba.sh>
 Date: Tue, 18 Aug 2026 20:32:43 +0200
 Subject: [PATCH] spmi: apple: Implement remaining commands

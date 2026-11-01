@@ -1,4 +1,4 @@
-From 3ee7824871b67669db6448592ff7c719a4f3d986 Mon Sep 17 00:00:00 2001
+From 7ed6324d86d1dea1d46b3d39b0604696e21de0cd Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 12 Mar 2023 21:38:50 +0100
 Subject: [PATCH] drm/apple: Support color transformation matrices
@@ -17,7 +17,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  5 files changed, 25 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index f4da8b3f8ec4..1fb2a70fd888 100644
+index 5842f2dd2829..584df868ef8c 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -336,6 +336,7 @@ static int apple_probe_per_dcp(struct device *dev,

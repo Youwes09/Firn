@@ -1,4 +1,4 @@
-From d09c3f90aa7d46d6d9e1e87f1f7a1c3ae61ebced Mon Sep 17 00:00:00 2001
+From d0af399e61c5f1b6b402512712cfb034dda6ca3b Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <fnkl.kernel@gmail.com>
 Date: Thu, 26 Feb 2026 17:53:50 +0100
 Subject: [PATCH] soc: apple: Add support for the PMP co-processor
@@ -12,29 +12,29 @@ Signed-off-by: Sasha Finkelstein <fnkl.kernel@gmail.com>
 [Youwes09: ported to lifetime-bound drivers and the reworked RTKit
  binding; PMP buffers are DMA allocations tied to the binding, read
  through the I/O accessors; the IOVA table is acknowledged empty, as
- nothing provides apple,pio-ranges]
+ nothing provides apple,pio-ranges; depends on RUST_APPLE_RTKIT
+ rather than selecting it]
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
- drivers/soc/apple/Kconfig  |  13 ++
+ drivers/soc/apple/Kconfig  |  12 ++
  drivers/soc/apple/Makefile |   2 +
  drivers/soc/apple/pmp.rs   | 317 +++++++++++++++++++++++++++++++++++++
- 3 files changed, 332 insertions(+)
+ 3 files changed, 331 insertions(+)
  create mode 100644 drivers/soc/apple/pmp.rs
 
 diff --git a/drivers/soc/apple/Kconfig b/drivers/soc/apple/Kconfig
-index d3544df0d36f..9f7eba4ac9b0 100644
+index 407091a23402..63970f15855f 100644
 --- a/drivers/soc/apple/Kconfig
 +++ b/drivers/soc/apple/Kconfig
-@@ -80,6 +80,19 @@ config RUST_APPLE_RTKIT
- 	depends on RUST
- 	select APPLE_RTKIT
+@@ -83,6 +83,18 @@ config RUST_APPLE_RTKIT
+ 	  Adds support needed for co-processor drivers written in Rust. It
+ 	  provides a wrapper around the C RTKit library.
  
 +config APPLE_PMP
 +	tristate "Apple Power Management Processor"
 +	depends on ARCH_APPLE || COMPILE_TEST
-+	depends on RUST
++	depends on RUST_APPLE_RTKIT
 +	select APPLE_PMP_REPORT
-+	select RUST_APPLE_RTKIT
 +	default y if ARCH_APPLE
 +	help
 +	  A co-processor present on Apple SoCs, controlling power states of

@@ -1,4 +1,4 @@
-From 20a05fc4f18c5cb862bfb240a7878f00d7c6053c Mon Sep 17 00:00:00 2001
+From c3e6ae24016f176eb2b826de53c8d3ff5df914fe Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 9 Apr 2025 18:24:13 +0200
 Subject: [PATCH] iommu: apple-dart: Revert separate iommu_ops for

@@ -1,0 +1,32 @@
+From b2a3f048cca18e371046a98955bb2afbf6feb1cc Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sat, 31 Oct 2026 13:26:10 -0500
+Subject: [PATCH] drm/apple: parser: Clear each mode before parsing it
+
+The mode array comes from kmalloc_array(), and a rejected mode leaves
+its slot to the next one. parse_mode() sets the VRR fields and the score
+only when the firmware provides them, so a mode could inherit them from
+heap contents or from the rejected mode.
+
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+[Youwes09: from Gravity Linux a8aa5e2f7d1d]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/parser.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/parser.c b/drivers/gpu/drm/apple/parser.c
+index d0b20f2d2035..b546a426733c 100644
+--- a/drivers/gpu/drm/apple/parser.c
++++ b/drivers/gpu/drm/apple/parser.c
+@@ -605,6 +605,10 @@ struct dcp_display_mode *enumerate_modes(struct dcp_parse_ctx *handle,
+ 
+ 	for (; it.idx < it.len; ++it.idx) {
+ 		mode = &modes[*count];
++		/* Optional fields (including VRR) must not inherit heap contents or
++		 * a rejected mode that reused this slot. */
++		memset(mode, 0, sizeof(*mode));
++		score = -1;
+ 		ret = parse_mode(it.handle, mode, &score, width_mm, height_mm, notch_height);
+ 
+ 		/* Errors for a single mode are recoverable -- just skip it. */

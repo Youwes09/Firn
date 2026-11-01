@@ -1,4 +1,4 @@
-From 0cfcc2df5307513f9e3b5abc22e8811fbd212196 Mon Sep 17 00:00:00 2001
+From 7a90ac8ec71248eaf3173fce18ad2a03484ef0c0 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Thu, 23 Feb 2023 13:07:49 +0100
 Subject: [PATCH] drm: apple: Add 'parse_blob'

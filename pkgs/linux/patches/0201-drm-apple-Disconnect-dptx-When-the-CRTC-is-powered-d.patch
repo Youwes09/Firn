@@ -1,4 +1,4 @@
-From b4e58516a73b189af20df4db23f63d603f721825 Mon Sep 17 00:00:00 2001
+From 19963588748a72d8c3aec5824e27140ead84a868 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 20 Nov 2023 22:56:43 +0100
 Subject: [PATCH] drm: apple: Disconnect dptx When the CRTC is powered down
@@ -15,7 +15,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  2 files changed, 64 insertions(+), 51 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 05f88a83dd60..9d5c07bd0857 100644
+index 72c4be381aa3..3e528854dcdb 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -287,6 +287,7 @@ static int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
@@ -97,7 +97,7 @@ index 05f88a83dd60..9d5c07bd0857 100644
  {
  	int ret;
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index af61d74ca443..d6af92637355 100644
+index 920c9b268774..d009bf8b7e7e 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -219,57 +219,6 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context)

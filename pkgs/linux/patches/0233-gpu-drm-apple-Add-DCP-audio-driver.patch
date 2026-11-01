@@ -1,4 +1,4 @@
-From b3e9b18fe3463682c480b81f9b0a4b0aa51c4257 Mon Sep 17 00:00:00 2001
+From ce64f8bb98993a46853870fc29f97400d9cd448d Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Thu, 23 Feb 2023 12:49:43 +0100
 Subject: [PATCH] gpu: drm: apple: Add DCP audio driver

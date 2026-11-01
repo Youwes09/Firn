@@ -1,4 +1,4 @@
-From eea4cbcf7f4bf9c20d97465ae745f42d7f40a3a6 Mon Sep 17 00:00:00 2001
+From 759dd20953caf74b0b8db3881fd165c89dca1d9d Mon Sep 17 00:00:00 2001
 From: Sasha Finkelstein <k@chaosmail.tech>
 Date: Thu, 6 Aug 2026 11:37:20 +0200
 Subject: [PATCH] dt-bindings: usb: tps6598x: Add sn201202x/ACE3

@@ -1,4 +1,4 @@
-From 263239c6088e6ef6badda6415ab9053e5fc5819d Mon Sep 17 00:00:00 2001
+From 14a0162a7cbf7c493d31420ca595f1104418ed17 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 25 Aug 2025 22:14:01 +0200
 Subject: [PATCH] drm: apple: Remove conflicting devices as late as possible
@@ -18,7 +18,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 8 insertions(+), 8 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index ab17a53cd2c7..173cf5fba969 100644
+index 68a3a234b552..c59192a550fc 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -624,14 +624,6 @@ static int apple_drm_init(struct device *dev)

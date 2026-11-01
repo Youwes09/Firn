@@ -1,4 +1,4 @@
-From f1d977107b7d31ff2c61217ec5105a874b448453 Mon Sep 17 00:00:00 2001
+From 6f95a9a7fe9f1a90c433f701039a6be91211e71e Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 22 Nov 2023 09:41:29 +0100
 Subject: [PATCH] drm: apple: Extract modeset crtc's atomic_flush()
@@ -18,11 +18,11 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  drivers/gpu/drm/apple/dcp.h            |   2 +
  drivers/gpu/drm/apple/iomfb.c          |  41 ++++++++
  drivers/gpu/drm/apple/iomfb_template.c | 137 ++++++++++++++-----------
- drivers/gpu/drm/apple/iomfb_template.h |   2 +
- 6 files changed, 124 insertions(+), 61 deletions(-)
+ drivers/gpu/drm/apple/iomfb_template.h |   4 +-
+ 6 files changed, 125 insertions(+), 62 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index d54a0d4712c6..93c1c1038ae1 100644
+index 0b2c3adfded9..7e05f44f3176 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -301,6 +301,8 @@ static const struct drm_connector_funcs apple_connector_funcs = {
@@ -47,7 +47,7 @@ index 4817412edf64..ef6cddef40a4 100644
  	struct dcp_set_digital_out_mode_req mode;
  
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index b502718a3df5..4fa76418802b 100644
+index 05b605a5e1d7..78ae4641af6e 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -57,6 +57,8 @@ void dcp_drm_crtc_vblank(struct apple_crtc *crtc);
@@ -60,7 +60,7 @@ index b502718a3df5..4fa76418802b 100644
  			 const struct drm_display_mode *mode,
  			 struct drm_display_mode *adjusted_mode);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 0d0a82f54417..3ca3563ee250 100644
+index 774f9091fb16..8b984f3eeb61 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -422,6 +422,47 @@ int dcp_mode_valid(struct drm_connector *connector,
@@ -78,7 +78,7 @@ index 0d0a82f54417..3ca3563ee250 100644
 +	int ret = -EIO;
 +	bool modeset;
 +
-+	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
++	crtc_state = drm_atomic_get_new_crtc_state(commit, crtc);
 +	if (!crtc_state)
 +		return 0;
 +
@@ -285,15 +285,17 @@ index 87b58f647651..5f598204eda1 100644
  		if (crtc_state->enable && crtc_state->active &&
  		    !crtc_state->planes_changed) {
 diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
-index 4a4708229f08..3ff0fadff652 100644
+index 4a4708229f08..7bfc9b246502 100644
 --- a/drivers/gpu/drm/apple/iomfb_template.h
 +++ b/drivers/gpu/drm/apple/iomfb_template.h
-@@ -172,6 +172,8 @@ struct DCP_FW_NAME(dcp_map_reg_resp) {
+@@ -172,7 +172,9 @@ struct DCP_FW_NAME(dcp_map_reg_resp) {
  
  struct apple_dcp;
  
+-void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_state *state);
 +int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 +			       struct drm_crtc_state *crtc_state);
- void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_state *state);
++void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, struct drm_atomic_commit *commit);
  void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp);
  void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp);
+ void DCP_FW_NAME(iomfb_sleep)(struct apple_dcp *dcp);

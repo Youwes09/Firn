@@ -1,4 +1,4 @@
-From 603589b53ad71c5208ce73d8ec69e21422a85503 Mon Sep 17 00:00:00 2001
+From 00070b77e5d2bade279268b965057f2801fcc387 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Nov 2023 23:57:07 +0100
 Subject: [PATCH] drm: apple: iomfb: Improve hotplug related logging
@@ -10,7 +10,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  2 files changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index d6af92637355..0d0a82f54417 100644
+index d009bf8b7e7e..774f9091fb16 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -236,7 +236,8 @@ void dcp_hotplug(struct work_struct *work)

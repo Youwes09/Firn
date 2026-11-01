@@ -1,4 +1,4 @@
-From fe21da291d0ad818c032c3496a33b97ef0243d30 Mon Sep 17 00:00:00 2001
+From afd807a6aca5f30d57d6300f5e6b9754b1a0ef8a Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 9 Apr 2025 18:40:16 +0200
 Subject: [PATCH] drm: apple: Use piodma default iommu domain
@@ -13,7 +13,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 6 insertions(+), 13 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index ab7eead4fd19..0b3e301e7d83 100644
+index d70357042043..c829016f89fa 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -748,22 +748,16 @@ static int dcp_create_piodma_iommu_dev(struct apple_dcp *dcp)

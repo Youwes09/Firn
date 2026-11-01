@@ -1,4 +1,4 @@
-From 88ae0c2ec1303caf2a123a4dc1e021cb1b5e8dc2 Mon Sep 17 00:00:00 2001
+From 9da06b0f8e747af29e2116d7cefa533e15bc51d3 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 21:13:29 +0100
 Subject: [PATCH] drm: apple: Remove explicit asc-dram-mask handling
@@ -28,7 +28,7 @@ index e6dac0c9ab9b..54e61fd7290f 100644
  	bool crashed;
  
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 1da361e7b8f3..7be710e8a3f5 100644
+index 650a07d00849..21618a5e325c 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -145,8 +145,7 @@ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
@@ -74,7 +74,7 @@ index 1da361e7b8f3..7be710e8a3f5 100644
  	// TDOD: mem_desc IDs start at 1, for simplicity just skip '0' entry
  	set_bit(0, dcp->memdesc_map);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 8715574e0ca4..af61d74ca443 100644
+index fb2d29f4955d..920c9b268774 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -558,7 +558,6 @@ int iomfb_start_rtkit(struct apple_dcp *dcp)

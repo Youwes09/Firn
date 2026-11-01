@@ -1,0 +1,1029 @@
+From 3958fba9c507e3bd1aef8c1e17f6fd9dcf3c12b0 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 18 Aug 2026 23:07:33 -0400
+Subject: [PATCH] drm/apple: bring up T8132 HDMI audio [dcp]
+
+Recover unplugged PCM streams as XRUNs, complete SIO termination before invalidating link state, and admit persistent streams to the reconnected display generation. Use an ordered reclaim-safe workqueue for SIO termination.
+
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(split from commit 49045c3465d21bec855666831e927edf4b3da1cf: dcp changes only)
+---
+ drivers/gpu/drm/apple/Kconfig  |   1 +
+ drivers/gpu/drm/apple/afk.c    |   8 +-
+ drivers/gpu/drm/apple/afk.h    |   2 +-
+ drivers/gpu/drm/apple/audio.c  | 245 ++++++++++++++++++++++++++++++---
+ drivers/gpu/drm/apple/av.c     | 228 +++++++++++++++++++++++++-----
+ drivers/gpu/drm/apple/av.h     |  10 ++
+ drivers/gpu/drm/apple/dcp.c    |  28 +++-
+ drivers/gpu/drm/apple/dptxep.c |  36 ++++-
+ 8 files changed, 489 insertions(+), 69 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/Kconfig b/drivers/gpu/drm/apple/Kconfig
+index 2efc7bdf7e07..651d87d2d426 100644
+--- a/drivers/gpu/drm/apple/Kconfig
++++ b/drivers/gpu/drm/apple/Kconfig
+@@ -20,6 +20,7 @@ config DRM_APPLE_AUDIO
+ 	default y
+ 	depends on DRM_APPLE
+ 	depends on SND
++	select APPLE_SIO
+ 	select SND_PCM
+ 	select SND_DMAENGINE_PCM
+ 
+diff --git a/drivers/gpu/drm/apple/afk.c b/drivers/gpu/drm/apple/afk.c
+index 6237cbb2779a..7c8c4abddb6f 100644
+--- a/drivers/gpu/drm/apple/afk.c
++++ b/drivers/gpu/drm/apple/afk.c
+@@ -748,7 +748,8 @@ static void afk_recv_handle_compact_call(struct apple_dcp_afkep *ep,
+ 			 ep->endpoint, channel, le16_to_cpu(call->group),
+ 			 le32_to_cpu(call->command));
+ 	} else {
+-		ret = service->ops->call(service, le32_to_cpu(call->command),
++		ret = service->ops->call(service, le16_to_cpu(call->group),
++					le32_to_cpu(call->command),
+ 					call + 1, call_size, reply_call + 1,
+ 					call_size);
+ 	}
+@@ -1008,7 +1009,7 @@ static void afk_recv_handle_std_service(struct apple_dcp_afkep *ep, u32 channel,
+ 		if (!reply)
+ 			return;
+ 
+-		ret = service->ops->call(service, le32_to_cpu(call->type),
++		ret = service->ops->call(service, 0, le32_to_cpu(call->type),
+ 					 payload + sizeof(*call), call_size,
+ 					 reply + sizeof(*call), call_size);
+ 		if (ret) {
+@@ -1822,7 +1823,8 @@ static void afk_populate_service_debugfs(struct apple_epic_service *srv)
+ 	if (!srv->ep->debugfs_entry || !srv->ops)
+ 		return;
+ 
+-	if (strcmp(srv->ops->name, "DCPAVAudioInterface") == 0) {
++	if (!strcmp(srv->ops->name, "DCPAVAudioInterface") ||
++	    !strcmp(srv->ops->name, "dcpav-audio-interface-")) {
+ 		srv->debugfs.entry = debugfs_create_dir(srv->ops->name,
+ 							srv->ep->debugfs_entry);
+ 		debugfs_create_file("call", 0600, srv->debugfs.entry, srv,
+diff --git a/drivers/gpu/drm/apple/afk.h b/drivers/gpu/drm/apple/afk.h
+index 4582513dd66e..23739ca5197d 100644
+--- a/drivers/gpu/drm/apple/afk.h
++++ b/drivers/gpu/drm/apple/afk.h
+@@ -68,7 +68,7 @@ struct apple_epic_service_ops {
+ 
+ 	void (*init)(struct apple_epic_service *service, const char *name,
+ 			      const char *class, s64 unit);
+-	int (*call)(struct apple_epic_service *service, u32 idx,
++	int (*call)(struct apple_epic_service *service, u16 group, u32 idx,
+ 		    const void *data, size_t data_size, void *reply,
+ 		    size_t reply_size);
+ 	int (*report)(struct apple_epic_service *service, enum epic_subtype type,
+diff --git a/drivers/gpu/drm/apple/audio.c b/drivers/gpu/drm/apple/audio.c
+index 38718e2f5611..656a2599a2d8 100644
+--- a/drivers/gpu/drm/apple/audio.c
++++ b/drivers/gpu/drm/apple/audio.c
+@@ -39,10 +39,13 @@ struct dcp_audio {
+ 	struct device *dma_dev;
+ 	struct device_link *dma_link;
+ 	struct dma_chan *chan;
++	bool dma_buffer_configured;
+ 	struct snd_card *card;
+ 	struct snd_jack *jack;
+ 	struct snd_pcm_substream *substream;
+ 	unsigned int open_cookie;
++	bool power_held;
++	bool link_started;
+ 
+ 	struct mutex data_lock;
+ 	bool dcp_connected; /// dcp status keep for delayed initialization
+@@ -59,7 +62,7 @@ struct dcp_audio {
+ 
+ static const struct snd_pcm_hardware dcp_pcm_hw = {
+ 	.info	 = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
+-		   SNDRV_PCM_INFO_INTERLEAVED,
++		   SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BATCH,
+ 	.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_LE |
+ 		   SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE,
+ 	.rates			= SNDRV_PCM_RATE_CONTINUOUS,
+@@ -117,6 +120,7 @@ static void dcpaud_fill_fmt_sieve(struct snd_pcm_hw_params *params,
+ 				SNDRV_PCM_HW_PARAM_FORMAT);
+ 	int i;
+ 
++	memset(sieve, 0, sizeof(*sieve));
+ 	sieve->nchans = GENMASK(c->max, c->min);
+ 	sieve->formats = f->bits[0] | ((u64) f->bits[1]) << 32; /* TODO: don't open-code */
+ 
+@@ -213,9 +217,12 @@ static int dcpaud_rule_rate(struct snd_pcm_hw_params *params,
+         return snd_interval_rate_bits(r, hits.rates);
+ }
+ 
+-static int dcpaud_init_dma(struct dcp_audio *dcpaud)
++extern bool hdmi_audio;
++
++static int dcpaud_request_dma(struct dcp_audio *dcpaud)
+ {
+ 	struct dma_chan *chan;
++
+ 	if (dcpaud->chan)
+ 		return 0;
+ 
+@@ -232,10 +239,24 @@ static int dcpaud_init_dma(struct dcp_audio *dcpaud)
+ 		return PTR_ERR(chan);
+ 	}
+ 	dcpaud->chan = chan;
++	return 0;
++}
++
++static int dcpaud_init_dma(struct dcp_audio *dcpaud)
++{
++	int ret;
+ 
+-	snd_pcm_set_managed_buffer(dcpaud->substream, SNDRV_DMA_TYPE_DEV_IRAM,
+-				   dcpaud->chan->device->dev, 1024 * 1024,
+-				   SIZE_MAX);
++	ret = dcpaud_request_dma(dcpaud);
++	if (ret)
++		return ret;
++
++	if (!dcpaud->dma_buffer_configured) {
++		snd_pcm_set_managed_buffer(dcpaud->substream,
++					   SNDRV_DMA_TYPE_DEV_IRAM,
++					   dcpaud->chan->device->dev,
++					   1024 * 1024, SIZE_MAX);
++		dcpaud->dma_buffer_configured = true;
++	}
+ 
+ 	return 0;
+ }
+@@ -251,8 +272,10 @@ static int dcp_pcm_open(struct snd_pcm_substream *substream)
+ 
+ 	mutex_lock(&dcpaud->data_lock);
+ 	ret = dcpaud_init_dma(dcpaud);
+-	if (ret < 0)
++	if (ret < 0) {
++		mutex_unlock(&dcpaud->data_lock);
+ 		return ret;
++	}
+ 
+ 	if (!dcpaud->connected) {
+ 		mutex_unlock(&dcpaud->data_lock);
+@@ -277,7 +300,7 @@ static int dcp_pcm_open(struct snd_pcm_substream *substream)
+ 
+ 	hw = dcp_pcm_hw;
+ 	hw.info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
+-			  SNDRV_PCM_INFO_INTERLEAVED;
++			  SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BATCH;
+ 	hw.periods_min = 2;
+ 	hw.periods_max = UINT_MAX;
+ 	hw.period_bytes_min = 256;
+@@ -290,7 +313,34 @@ static int dcp_pcm_open(struct snd_pcm_substream *substream)
+ 		return ret;
+ 	substream->runtime->hw = hw;
+ 
+-	return snd_dmaengine_pcm_open(substream, dcpaud->chan);
++	ret = snd_dmaengine_pcm_open(substream, dcpaud->chan);
++	if (ret)
++		return ret;
++
++	/* Native 26.6 keeps the physical audio link fixed at 48 kHz and
++	 * resamples CoreAudio clients into it.  We retain that link across ALSA
++	 * clients below, so accepting a different rate here would leave SIO and
++	 * the already-started DCP link running at different rates. */
++	if (of_device_is_compatible(dcpaud->dev->of_node,
++				    "apple,t8132-dpaudio")) {
++		ret = snd_pcm_hw_constraint_single(substream->runtime,
++					       SNDRV_PCM_HW_PARAM_RATE, 48000);
++		/* A positive return means the interval was successfully narrowed. */
++		if (ret < 0)
++			goto err_close;
++
++		ret = snd_pcm_hw_constraint_step(substream->runtime, 0,
++					 SNDRV_PCM_HW_PARAM_PERIOD_BYTES,
++					 SZ_4K);
++		if (ret)
++			goto err_close;
++	}
++
++	return 0;
++
++err_close:
++	snd_dmaengine_pcm_close(substream);
++	return ret;
+ }
+ 
+ static int dcp_pcm_close(struct snd_pcm_substream *substream)
+@@ -317,6 +367,8 @@ static int dcp_pcm_hw_params(struct snd_pcm_substream *substream,
+ 	struct dcp_audio *dcpaud = substream->pcm->private_data;
+ 	struct dma_slave_config slave_config;
+ 	struct dma_chan *chan = snd_dmaengine_pcm_get_chan(substream);
++	bool acquired_power = false;
++	bool just_powered = false;
+ 	int ret;
+ 
+ 	if (!dcpaud_connection_up(dcpaud))
+@@ -328,11 +380,37 @@ static int dcp_pcm_hw_params(struct snd_pcm_substream *substream,
+ 	if (!ret)
+ 		return -EINVAL;
+ 
++	/* T8132 needs the DPA power domain up while AVService prepares the
++	 * link, not merely when the final PCM trigger starts DMA. Native 26.6
++	 * keeps that hardware session resident across CoreAudio clients and
++	 * continuously feeds silence, so retain the DPA reference across ALSA
++	 * PCM closes rather than invalidating the AV binding after every sound. */
++	if (!dcpaud->power_held) {
++		ret = pm_runtime_get_if_active(dcpaud->dev);
++		if (ret < 0)
++			return ret;
++		if (!ret) {
++			/* Native closes the stale AV binding while DPA is inactive,
++			 * then powers DPA up, configures SIO, and opens it again. */
++			ret = dcp_audiosrv_close_for_power_transition(
++							 dcpaud->dcp_dev);
++			if (ret < 0)
++				return ret;
++
++			ret = pm_runtime_resume_and_get(dcpaud->dev);
++			if (ret < 0)
++				return ret;
++			just_powered = true;
++		}
++		acquired_power = true;
++		dcpaud->power_held = true;
++	}
++
+ 	memset(&slave_config, 0, sizeof(slave_config));
+ 	ret = snd_hwparams_to_dma_slave_config(substream, params, &slave_config);
+ 	dev_info(dcpaud->dev, "snd_hwparams_to_dma_slave_config: %d\n", ret);
+ 	if (ret < 0)
+-		return ret;
++		goto rpm_put;
+ 
+ 	slave_config.direction = DMA_MEM_TO_DEV;
+ 	/*
+@@ -343,44 +421,116 @@ static int dcp_pcm_hw_params(struct snd_pcm_substream *substream,
+ 
+ 	ret = dmaengine_slave_config(chan, &slave_config);
+ 	dev_info(dcpaud->dev, "dmaengine_slave_config: %d\n", ret);
++	if (ret < 0)
++		goto rpm_put;
++
++	/* Native 26.6 configures SIO channel 0x64 before issuing another AV audio
++	 * open after a DPA power transition. */
++	if (just_powered) {
++		ret = dcp_audiosrv_open_after_power_transition(dcpaud->dcp_dev);
++		if (ret < 0)
++			goto rpm_put;
++	}
++	return ret;
++
++rpm_put:
++	if (acquired_power) {
++		pm_runtime_mark_last_busy(dcpaud->dev);
++		pm_runtime_put_autosuspend(dcpaud->dev);
++		dcpaud->power_held = false;
++	}
+ 	return ret;
+ }
+ 
+ static int dcp_pcm_hw_free(struct snd_pcm_substream *substream)
+ {
+ 	struct dcp_audio *dcpaud = substream->pcm->private_data;
++	int ret = 0;
+ 
+-	if (!dcpaud_connection_up(dcpaud))
++	if (of_device_is_compatible(dcpaud->dev->of_node,
++				    "apple,t8132-dpaudio") &&
++	    dcpaud->link_started)
+ 		return 0;
+ 
+-	return dcp_audiosrv_unprepare(dcpaud->dcp_dev);
++	if (dcpaud_connection_up(dcpaud)) {
++		ret = dcp_audiosrv_unprepare(dcpaud->dcp_dev);
++		dev_dbg(dcpaud->dev, "AVService unprepare returned %d\n", ret);
++	}
++
++	return ret;
+ }
+ 
+ static int dcp_pcm_prepare(struct snd_pcm_substream *substream)
+ {
+ 	struct dcp_audio *dcpaud = substream->pcm->private_data;
++	int ret;
+ 
+ 	if (!dcpaud_connection_up(dcpaud))
+ 		return -ENXIO;
+ 
+-	return dcp_audiosrv_prepare(dcpaud->dcp_dev,
+-				    &dcpaud->selected_cookie);
++	/* T8132/26.6 submits SIO DMA before AVService prepare/start.  Defer
++	 * prepare to the START trigger so that ordering can be preserved. */
++	if (of_device_is_compatible(dcpaud->dev->of_node,
++				    "apple,t8132-dpaudio"))
++		return 0;
++
++	ret = dcp_audiosrv_prepare(dcpaud->dcp_dev,
++				   &dcpaud->selected_cookie);
++	dev_dbg(dcpaud->dev, "AVService prepare returned %d\n", ret);
++	return ret;
+ }
+ 
+ static int dcp_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ {
+ 	struct dcp_audio *dcpaud = substream->pcm->private_data;
++	bool t8132 = of_device_is_compatible(dcpaud->dev->of_node,
++					     "apple,t8132-dpaudio");
+ 	int ret;
+ 
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
++		if (!dcpaud_connection_up(dcpaud))
++			return -ENXIO;
++
++		if (t8132) {
++			/* Native 26.6 has audio DMA pending before it prepares and
++			 * starts the DCP link.  Starting the link first leaves T8132
++			 * acknowledging SIO descriptors without consuming them. */
++			ret = snd_dmaengine_pcm_trigger(substream, cmd);
++			if (ret < 0)
++				return ret;
++			if (dcpaud->link_started)
++				return 0;
++
++			ret = dcp_audiosrv_prepare(dcpaud->dcp_dev,
++						   &dcpaud->selected_cookie);
++			dev_dbg(dcpaud->dev,
++				 "AVService deferred prepare returned %d\n", ret);
++			if (ret < 0)
++				goto stop_dma;
++		}
++
++		ret = dcp_audiosrv_startlink(dcpaud->dcp_dev,
++					     &dcpaud->selected_cookie);
++		dev_dbg(dcpaud->dev, "AVService startLink returned %d\n", ret);
++		if (ret < 0) {
++			if (t8132)
++				goto stop_dma;
++			return ret;
++		}
++		if (t8132) {
++			dcpaud->link_started = true;
++			return 0;
++		}
++		break;
++
+ 	case SNDRV_PCM_TRIGGER_RESUME:
+ 		if (!dcpaud_connection_up(dcpaud))
+ 			return -ENXIO;
+ 
+-		WARN_ON(pm_runtime_get_sync(dcpaud->dev) < 0);
+ 		ret = dcp_audiosrv_startlink(dcpaud->dcp_dev,
+ 					     &dcpaud->selected_cookie);
++		dev_dbg(dcpaud->dev, "AVService startLink returned %d\n", ret);
+ 		if (ret < 0)
+ 			return ret;
+ 		break;
+@@ -404,15 +554,20 @@ static int dcp_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
++		if (t8132 && dcpaud->link_started)
++			return 0;
+ 		ret = dcp_audiosrv_stoplink(dcpaud->dcp_dev);
+-		pm_runtime_mark_last_busy(dcpaud->dev);
+-		__pm_runtime_put_autosuspend(dcpaud->dev);
++		dev_dbg(dcpaud->dev, "AVService stopLink returned %d\n", ret);
+ 		if (ret < 0)
+ 			return ret;
+ 		break;
+ 	}
+ 
+ 	return 0;
++
++stop_dma:
++	snd_dmaengine_pcm_trigger(substream, SNDRV_PCM_TRIGGER_STOP);
++	return ret;
+ }
+ 
+ struct snd_pcm_ops dcp_playback_ops = {
+@@ -422,6 +577,7 @@ struct snd_pcm_ops dcp_playback_ops = {
+ 	.hw_free = dcp_pcm_hw_free,
+ 	.prepare = dcp_pcm_prepare,
+ 	.trigger = dcp_pcm_trigger,
++	.sync_stop = snd_dmaengine_pcm_sync_stop,
+ 	.pointer = snd_dmaengine_pcm_pointer,
+ };
+ 
+@@ -489,6 +645,7 @@ static int dcpaud_create_pcm(struct dcp_audio *dcpaud)
+ static void dcpaud_report_hotplug(struct dcp_audio *dcpaud, bool connected)
+ {
+ 	struct snd_pcm_substream *substream = dcpaud->substream;
++	bool sync_stop = false;
+ 
+ 	if (!dcpaud->card || dcpaud->connected == connected) {
+ 		mutex_unlock(&dcpaud->data_lock);
+@@ -496,17 +653,38 @@ static void dcpaud_report_hotplug(struct dcp_audio *dcpaud, bool connected)
+ 	}
+ 
+ 	dcpaud->connected = connected;
+-	if (connected)
++	if (connected) {
+ 		dcpaud->connection_cookie++;
++		/*
++		 * The sound card is persistent across HPD, unlike macOS's audio
++		 * device.  Admit an already-open stream into the new connection
++		 * generation so its XRUN recovery can build a fresh DCP session.
++		 */
++		dcpaud->open_cookie = dcpaud->connection_cookie;
++	}
+ 	mutex_unlock(&dcpaud->data_lock);
+ 
+ 	snd_jack_report(dcpaud->jack, connected ? SND_JACK_AVOUT : 0);
+ 
+ 	if (!connected) {
+ 		snd_pcm_stream_lock(substream);
+-		if (substream->runtime)
+-			snd_pcm_stop(substream, SNDRV_PCM_STATE_DISCONNECTED);
++		if (substream->runtime) {
++			snd_pcm_stop(substream, SNDRV_PCM_STATE_XRUN);
++			sync_stop = true;
++		}
+ 		snd_pcm_stream_unlock(substream);
++
++		/*
++		 * STOP only schedules apple-sio's TERMINATE64 work.  Native waits
++		 * for its ACK and all final reports before DPA/AV teardown, so make
++		 * that boundary explicit before invalidating the DCP link state.
++		 */
++		if (sync_stop)
++			snd_dmaengine_pcm_sync_stop(substream);
++
++		mutex_lock(&dcpaud->data_lock);
++		dcpaud->link_started = false;
++		mutex_unlock(&dcpaud->data_lock);
+ 	}
+ }
+ 
+@@ -542,8 +720,6 @@ static void dcpaud_expose_debugfs_blob(struct dcp_audio *dcpaud, const char *nam
+ static void dcpaud_expose_debugfs_blob(struct dcp_audio *dcpaud, const char *name, void *base, size_t size) {}
+ #endif
+ 
+-extern bool hdmi_audio;
+-
+ static int dcpaud_init_snd_card(struct dcp_audio *dcpaud)
+ {
+ 	int ret;
+@@ -687,6 +863,17 @@ static void dcpaud_comp_unbind(struct device *dev, struct device *main,
+ 	/* snd_card_free_when_closed() checks for NULL */
+ 	snd_card_free_when_closed(dcpaud->card);
+ 
++	if (dcpaud->link_started) {
++		dcp_audiosrv_stoplink(dcpaud->dcp_dev);
++		dcp_audiosrv_unprepare(dcpaud->dcp_dev);
++		dcpaud->link_started = false;
++	}
++
++	if (dcpaud->power_held) {
++		pm_runtime_put_sync(dcpaud->dev);
++		dcpaud->power_held = false;
++	}
++
+ 	if (dcpaud->dma_link)
+ 		device_link_del(dcpaud->dma_link);
+ }
+@@ -699,6 +886,7 @@ static const struct component_ops dcpaud_comp_ops = {
+ static int dcpaud_probe(struct platform_device *pdev)
+ {
+ 	struct dcp_audio *dcpaud;
++	int ret;
+ 
+ 	dcpaud = devm_kzalloc(&pdev->dev, sizeof(*dcpaud), GFP_KERNEL);
+ 	if (!dcpaud)
+@@ -718,6 +906,20 @@ static int dcpaud_probe(struct platform_device *pdev)
+ 	mutex_init(&dcpaud->data_lock);
+ 	platform_set_drvdata(pdev, dcpaud);
+ 
++	/* DCP 26.6 constructs its AV audio interface against the live SIO
++	 * firmware state.  Unlike older systems it cannot recover if SIO probes
++	 * after AVService, so keep the display component graph deferred until
++	 * the DMA provider is actually ready. */
++	if (hdmi_audio && of_device_is_compatible(pdev->dev.of_node,
++						  "apple,t8132-dpaudio")) {
++		ret = dcpaud_request_dma(dcpaud);
++		if (ret == -ENXIO)
++			ret = -EPROBE_DEFER;
++		if (ret)
++			return dev_err_probe(&pdev->dev, ret,
++					     "waiting for SIO DMA provider\n");
++	}
++
+ 	return component_add(&pdev->dev, &dcpaud_comp_ops);
+ }
+ 
+@@ -773,4 +975,3 @@ void __exit dcp_audio_unregister(void)
+ {
+         platform_driver_unregister(&dcpaud_driver);
+ }
+-
+diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
+index 0a0e59872dee..f001733032cb 100644
+--- a/drivers/gpu/drm/apple/av.c
++++ b/drivers/gpu/drm/apple/av.c
+@@ -69,6 +69,8 @@ struct audiosrv_data {
+ 	bool is_open;
+ };
+ 
++#define DCP_AV_COMPACT_ELEMENTS_MAXSIZE 3072
++
+ static void av_interface_init(struct apple_epic_service *service, const char *name,
+ 			      const char *class, s64 unit)
+ {
+@@ -90,6 +92,25 @@ static void av_interface_teardown(struct apple_epic_service *service)
+ 	mutex_unlock(&asrv->plug_lock);
+ }
+ 
++static void av_aux_interface_teardown(struct apple_epic_service *service)
++{
++	service->enabled = false;
++}
++
++static int av_interface_call(struct apple_epic_service *service, u16 group,
++			     u32 idx,
++			     const void *data, size_t data_size,
++			     void *reply, size_t reply_size)
++{
++	if (group)
++		return -ENOSYS;
++
++	if (reply && reply_size)
++		memset(reply, 0, reply_size);
++
++	return 0;
++}
++
+ static void av_audiosrv_init(struct apple_epic_service *service, const char *name,
+ 			     const char *class, s64 unit)
+ {
+@@ -116,6 +137,7 @@ static void av_audiosrv_teardown(struct apple_epic_service *service)
+ 
+ 	down_write(&asrv->srv_rwsem);
+ 	asrv->srv = NULL;
++	asrv->is_open = false;
+ 	up_write(&asrv->srv_rwsem);
+ 
+ 	asrv->plugged = false;
+@@ -125,17 +147,84 @@ static void av_audiosrv_teardown(struct apple_epic_service *service)
+ 	mutex_unlock(&asrv->plug_lock);
+ }
+ 
+-int dcp_audiosrv_prepare(struct device *dev, struct dcp_sound_cookie *cookie)
++int dcp_audiosrv_close_for_power_transition(struct device *dev)
+ {
+ 	struct apple_dcp *dcp = dev_get_drvdata(dev);
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+-	int ret;
++	struct apple_epic_service *service;
++	int ret = 0;
++
++	if (!asrv || dcp->fw_compat != DCP_FIRMWARE_V_26_6)
++		return 0;
+ 
+ 	down_write(&asrv->srv_rwsem);
+-	ret = afk_service_call(asrv->srv, 0, asrv->cmds.prepare, cookie,
+-			       sizeof(*cookie), 64 - sizeof(*cookie), NULL, 0,
+-			       64);
++	service = asrv->srv;
++	if (!service) {
++		ret = -ENODEV;
++		goto out;
++	}
++	if (!asrv->is_open)
++		goto out;
++
++	/* Native 26.6 closes the AV binding after DPA has gone inactive and
++	 * before powering it back up.  Closing a live binding instead tears
++	 * down the complete IOAV display interface. */
++	ret = afk_service_call(service, 0, asrv->cmds.close, NULL, 0, 16,
++			       NULL, 0, 16);
++	if (!ret)
++		asrv->is_open = false;
++
++out:
+ 	up_write(&asrv->srv_rwsem);
++	return ret;
++}
++
++int dcp_audiosrv_open_after_power_transition(struct device *dev)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	struct apple_epic_service *service;
++	int ret = 0;
++
++	if (!asrv || dcp->fw_compat != DCP_FIRMWARE_V_26_6)
++		return 0;
++
++	down_write(&asrv->srv_rwsem);
++	service = asrv->srv;
++	if (!service) {
++		ret = -ENODEV;
++		goto out;
++	}
++
++	/* This is the matching half of close_for_power_transition(): DPA is up
++	 * and SIO has been configured before native issues open. */
++	ret = afk_service_call(service, 0, asrv->cmds.open, NULL, 0, 32,
++			       NULL, 0, 32);
++	if (!ret)
++		asrv->is_open = true;
++
++out:
++	up_write(&asrv->srv_rwsem);
++	return ret;
++}
++
++int dcp_audiosrv_prepare(struct device *dev, struct dcp_sound_cookie *cookie)
++{
++	struct apple_dcp *dcp = dev_get_drvdata(dev);
++	struct audiosrv_data *asrv = dcp->audiosrv;
++	int ret;
++
++	if (!asrv)
++		return -ENODEV;
++
++	down_read(&asrv->srv_rwsem);
++	if (asrv->srv)
++		ret = afk_service_call(asrv->srv, 0, asrv->cmds.prepare, cookie,
++				       sizeof(*cookie), 64 - sizeof(*cookie), NULL, 0,
++				       64);
++	else
++		ret = -ENODEV;
++	up_read(&asrv->srv_rwsem);
+ 
+ 	return ret;
+ }
+@@ -146,11 +235,17 @@ int dcp_audiosrv_startlink(struct device *dev, struct dcp_sound_cookie *cookie)
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+ 	int ret;
+ 
+-	down_write(&asrv->srv_rwsem);
+-	ret = afk_service_call(asrv->srv, 0, asrv->cmds.start_link, cookie,
+-			       sizeof(*cookie), 64 - sizeof(*cookie), NULL, 0,
+-			       64);
+-	up_write(&asrv->srv_rwsem);
++	if (!asrv)
++		return -ENODEV;
++
++	down_read(&asrv->srv_rwsem);
++	if (asrv->srv)
++		ret = afk_service_call(asrv->srv, 0, asrv->cmds.start_link, cookie,
++				       sizeof(*cookie), 64 - sizeof(*cookie), NULL, 0,
++				       64);
++	else
++		ret = -ENODEV;
++	up_read(&asrv->srv_rwsem);
+ 
+ 	return ret;
+ }
+@@ -161,10 +256,16 @@ int dcp_audiosrv_stoplink(struct device *dev)
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+ 	int ret;
+ 
+-	down_write(&asrv->srv_rwsem);
+-	ret = afk_service_call(asrv->srv, 0, asrv->cmds.stop_link, NULL, 0, 64,
+-			       NULL, 0, 64);
+-	up_write(&asrv->srv_rwsem);
++	if (!asrv)
++		return -ENODEV;
++
++	down_read(&asrv->srv_rwsem);
++	if (asrv->srv)
++		ret = afk_service_call(asrv->srv, 0, asrv->cmds.stop_link, NULL, 0,
++				       64, NULL, 0, 64);
++	else
++		ret = -ENODEV;
++	up_read(&asrv->srv_rwsem);
+ 
+ 	return ret;
+ }
+@@ -175,10 +276,16 @@ int dcp_audiosrv_unprepare(struct device *dev)
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+ 	int ret;
+ 
+-	down_write(&asrv->srv_rwsem);
+-	ret = afk_service_call(asrv->srv, 0, asrv->cmds.unprepare, NULL, 0, 64,
+-			       NULL, 0, 64);
+-	up_write(&asrv->srv_rwsem);
++	if (!asrv)
++		return -ENODEV;
++
++	down_read(&asrv->srv_rwsem);
++	if (asrv->srv)
++		ret = afk_service_call(asrv->srv, 0, asrv->cmds.unprepare, NULL, 0,
++				       64, NULL, 0, 64);
++	else
++		ret = -ENODEV;
++	up_read(&asrv->srv_rwsem);
+ 
+ 	return ret;
+ }
+@@ -208,7 +315,7 @@ dcp_audiosrv_osobject_call(struct apple_epic_service *service, u16 group,
+ 	ret = afk_service_call(service, group, command, hdr, sizeof(*hdr), output_maxsize,
+ 			       bfr, sizeof(*hdr) + output_maxsize, 0);
+ 	if (ret)
+-		return ret;
++		goto out;
+ 
+ 	if (output)
+ 		memcpy(output, bfr + sizeof(*hdr), output_maxsize);
+@@ -216,25 +323,43 @@ dcp_audiosrv_osobject_call(struct apple_epic_service *service, u16 group,
+ 	if (output_size)
+ 		*output_size = le64_to_cpu(hdr->used_size);
+ 
+-	return 0;
++out:
++	kfree(bfr);
++	return ret;
+ }
+ 
+ int dcp_audiosrv_get_elements(struct device *dev, void *elements, size_t maxsize)
+ {
+ 	struct apple_dcp *dcp = dev_get_drvdata(dev);
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+-	size_t size;
++	size_t request_maxsize = maxsize;
++	size_t size = 0;
+ 	int ret;
+ 
+-	down_write(&asrv->srv_rwsem);
+-	ret = dcp_audiosrv_osobject_call(asrv->srv, 1, asrv->cmds.get_elements,
+-					 elements, maxsize, &size);
+-	up_write(&asrv->srv_rwsem);
++	if (!asrv)
++		return -ENODEV;
++
++	memset(elements, 0, maxsize);
++	down_read(&asrv->srv_rwsem);
++	if (!asrv->srv) {
++		ret = -ENODEV;
++	} else {
++		/* Native advertises a much larger buffer and fragments the compact
++		 * transaction.  The 26.6 response observed on J773g is 1952 bytes,
++		 * so keep this request within one AFK ring entry. */
++		if (asrv->srv->ep->compact)
++			request_maxsize = min_t(size_t, request_maxsize,
++						    DCP_AV_COMPACT_ELEMENTS_MAXSIZE);
++		ret = dcp_audiosrv_osobject_call(asrv->srv, 1,
++						 asrv->cmds.get_elements, elements,
++						 request_maxsize, &size);
++	}
++	up_read(&asrv->srv_rwsem);
+ 
+-	if (ret && asrv->warned_get_elements) {
++	if (ret && !asrv->warned_get_elements) {
+ 		dev_err(dev, "audiosrv: error getting elements: %d\n", ret);
+ 		asrv->warned_get_elements = true;
+-	} else {
++	} else if (!ret) {
+ 		dev_dbg(dev, "audiosrv: got %zd bytes worth of elements\n", size);
+ 	}
+ 
+@@ -245,19 +370,26 @@ int dcp_audiosrv_get_product_attrs(struct device *dev, void *attrs, size_t maxsi
+ {
+ 	struct apple_dcp *dcp = dev_get_drvdata(dev);
+ 	struct audiosrv_data *asrv = dcp->audiosrv;
+-	size_t size;
++	size_t size = 0;
+ 	int ret;
+ 
+-	down_write(&asrv->srv_rwsem);
+-	ret = dcp_audiosrv_osobject_call(asrv->srv, 1,
+-					 asrv->cmds.get_product_attrs, attrs,
+-					 maxsize, &size);
+-	up_write(&asrv->srv_rwsem);
++	if (!asrv)
++		return -ENODEV;
+ 
+-	if (ret && asrv->warned_get_product_attrs) {
++	memset(attrs, 0, maxsize);
++	down_read(&asrv->srv_rwsem);
++	if (asrv->srv)
++		ret = dcp_audiosrv_osobject_call(asrv->srv, 1,
++						 asrv->cmds.get_product_attrs, attrs,
++						 maxsize, &size);
++	else
++		ret = -ENODEV;
++	up_read(&asrv->srv_rwsem);
++
++	if (ret && !asrv->warned_get_product_attrs) {
+ 		dev_err(dev, "audiosrv: error getting product attributes: %d\n", ret);
+ 		asrv->warned_get_product_attrs = true;
+-	} else {
++	} else if (!ret) {
+ 		dev_dbg(dev, "audiosrv: got %zd bytes worth of product attributes\n", size);
+ 	}
+ 
+@@ -279,14 +411,35 @@ static const struct apple_epic_service_ops avep_ops[] = {
+ 	{
+ 		.name = "DCPAVSimpleVideoInterface",
+ 		.init = av_interface_init,
++		.call = av_interface_call,
+ 		.teardown = av_interface_teardown,
+ 	},
+ 	{
+ 		.name = "DCPAVAudioInterface",
+ 		.init = av_audiosrv_init,
++		.call = av_interface_call,
++		.report = av_audiosrv_report,
++		.teardown = av_audiosrv_teardown,
++	},
++	{
++		.name = "dcpav-video-interface-",
++		.init = av_interface_init,
++		.call = av_interface_call,
++		.teardown = av_aux_interface_teardown,
++	},
++	{
++		.name = "dcpav-audio-interface-",
++		.init = av_audiosrv_init,
++		.call = av_interface_call,
+ 		.report = av_audiosrv_report,
+ 		.teardown = av_audiosrv_teardown,
+ 	},
++	{
++		.name = "dcpav-cec-interface-ep",
++		.init = av_interface_init,
++		.call = av_interface_call,
++		.teardown = av_aux_interface_teardown,
++	},
+ 	{}
+ };
+ 
+@@ -412,20 +565,21 @@ int avep_init(struct apple_dcp *dcp)
+ 	if (!audio_node || !of_device_is_available(audio_node)) {
+ 		of_node_put(audio_node);
+ 		dev_info(dev, "No audio support\n");
+-		return 0;
++		goto start_ep;
+ 	}
+ 
+ 	audio_pdev = of_find_device_by_node(audio_node);
+ 	of_node_put(audio_node);
+ 	if (!audio_pdev) {
+ 		dev_info(dev, "No DP/HDMI audio device not ready\n");
+-		return 0;
++		goto start_ep;
+ 	}
+ 	dcp->audiosrv->audio_dev = audio_pdev;
+ 
+ 	device_link_add(&audio_pdev->dev, dev,
+ 			DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME);
+ 
++start_ep:
+ 	dcp->avep = afk_init(dcp, AV_ENDPOINT, avep_ops);
+ 	if (IS_ERR(dcp->avep))
+ 		return PTR_ERR(dcp->avep);
+diff --git a/drivers/gpu/drm/apple/av.h b/drivers/gpu/drm/apple/av.h
+index c00cbef549fd..ac0556a8ff8d 100644
+--- a/drivers/gpu/drm/apple/av.h
++++ b/drivers/gpu/drm/apple/av.h
+@@ -9,9 +9,19 @@
+ #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+ void av_service_connect(struct apple_dcp *dcp);
+ void av_service_disconnect(struct apple_dcp *dcp);
++int dcp_audiosrv_close_for_power_transition(struct device *dev);
++int dcp_audiosrv_open_after_power_transition(struct device *dev);
+ #else
+ static inline void av_service_connect(struct apple_dcp *dcp) { }
+ static inline void av_service_disconnect(struct apple_dcp *dcp) { }
++static inline int dcp_audiosrv_close_for_power_transition(struct device *dev)
++{
++	return 0;
++}
++static inline int dcp_audiosrv_open_after_power_transition(struct device *dev)
++{
++	return 0;
++}
+ #endif
+ 
+ #endif /* __AV_H__ */
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 7a0e3791834f..6772db2330d7 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -672,10 +672,14 @@ static void dcp_compact_aux_init(struct apple_epic_service *service,
+ 		service->ep->endpoint, name ?: "", class ?: "", unit);
+ }
+ 
+-static int dcp_compact_aux_call(struct apple_epic_service *service, u32 idx,
++static int dcp_compact_aux_call(struct apple_epic_service *service, u16 group,
++				u32 idx,
+ 				const void *data, size_t data_size,
+ 				void *reply, size_t reply_size)
+ {
++	if (group)
++		return -ENOSYS;
++
+ 	if (reply && reply_size)
+ 		memset(reply, 0, reply_size);
+ 	return 0;
+@@ -736,13 +740,16 @@ static int dcp_hdcp_notify_dpdev(struct apple_dcp *dcp)
+ 	return ret;
+ }
+ 
+-static int dcp_hdcp_call(struct apple_epic_service *service, u32 idx,
++static int dcp_hdcp_call(struct apple_epic_service *service, u16 group, u32 idx,
+ 			 const void *data, size_t data_size,
+ 			 void *reply, size_t reply_size)
+ {
+ 	struct apple_dcp *dcp = service->ep->dcp;
+ 	__le64 ready = cpu_to_le64(1);
+ 
++	if (group)
++		return -ENOSYS;
++
+ 	if (reply && reply_size) {
+ 		memset(reply, 0, reply_size);
+ 		if (data && data_size)
+@@ -1017,10 +1024,21 @@ int dcp_start(struct platform_device *pdev)
+ 			return dev_err_probe(dcp->dev, ret,
+ 					     "Failed to start DPSAC endpoint\n");
+ 
+-		ret = dcp_start_aux_ep(dcp, AV_ENDPOINT, &dcp->avauxep);
++		/*
++		 * The 26.6 AV endpoint is compact, but its audio service still uses
++		 * the established DCPAV command ABI.  Let the audio-aware endpoint
++		 * own 0x29 when requested; starting the generic endpoint here would
++		 * make the later avep_init() call a permanent no-op.
++		 */
++#if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
++		if (hdmi_audio)
++			ret = avep_init(dcp);
++		else
++#endif
++			ret = dcp_start_aux_ep(dcp, AV_ENDPOINT, &dcp->avauxep);
+ 		if (ret)
+ 			return dev_err_probe(dcp->dev, ret,
+-					     "Failed to start AV auxiliary endpoint\n");
++					     "Failed to start AV endpoint\n");
+ 
+ 		ret = dcp_start_aux_ep(dcp, REMOTE_ALLOC_ENDPOINT,
+ 				       &dcp->remoteallocep);
+@@ -1142,7 +1160,7 @@ int dcp_start(struct platform_device *pdev)
+ 	}
+ 
+ #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
+-	if (hdmi_audio && !dcp->avauxep) {
++	if (hdmi_audio && !dcp->avep && !dcp->avauxep) {
+ 		ret = avep_init(dcp);
+ 		if (ret)
+ 			dev_warn(dcp->dev, "Failed to start AV endpoint: %d", ret);
+diff --git a/drivers/gpu/drm/apple/dptxep.c b/drivers/gpu/drm/apple/dptxep.c
+index 5a919c082432..48b455d9125c 100644
+--- a/drivers/gpu/drm/apple/dptxep.c
++++ b/drivers/gpu/drm/apple/dptxep.c
+@@ -533,11 +533,45 @@ dptxport_call_deactivate(struct apple_epic_service *service,
+ 	return 0;
+ }
+ 
+-static int dptxport_call(struct apple_epic_service *service, u32 idx,
++/*
++ * Compact firmware adds a second DPTX callback group whose command numbers
++ * overlap the original link/PHY callbacks. Commands 3 and 4 carry an
++ * 80-byte record. Preserve the traced input prefix, clear the result word,
++ * and never echo the pointer-bearing tail back to firmware.
++ */
++static int dptxport_call_group1(u32 idx, const void *data, size_t data_size,
++				void *reply, size_t reply_size)
++{
++	size_t preserved = min_t(size_t, 32, min(data_size, reply_size));
++	size_t result_offset;
++
++	if (idx != 3 && idx != 4)
++		return -ENOSYS;
++
++	memcpy(reply, data, preserved);
++	if (reply_size > preserved)
++		memset(reply + preserved, 0, reply_size - preserved);
++
++	result_offset = idx == 3 ? 0 : 16;
++	if (reply_size < result_offset + sizeof(__le32))
++		return -EINVAL;
++	memset(reply + result_offset, 0, sizeof(__le32));
++
++	return 0;
++}
++
++static int dptxport_call(struct apple_epic_service *service, u16 group, u32 idx,
+ 			 const void *data, size_t data_size, void *reply,
+ 			 size_t reply_size)
+ {
+ 	struct dptx_port *dptx = service->cookie;
++
++	if (group == 1)
++		return dptxport_call_group1(idx, data, data_size, reply,
++					    reply_size);
++	if (group)
++		return -ENOSYS;
++
+ 	trace_dptxport_apcall(dptx, idx, data_size);
+ 
+ 	switch (idx) {

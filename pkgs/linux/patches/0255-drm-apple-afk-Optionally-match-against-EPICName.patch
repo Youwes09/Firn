@@ -1,4 +1,4 @@
-From b4a6992400b9d274d9d656efcad00b9fb06af01b Mon Sep 17 00:00:00 2001
+From 8f478cec206d87454bd970448cec83e56c80060d Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 20 Aug 2024 23:04:29 +0200
 Subject: [PATCH] drm: apple: afk: Optionally match against EPICName

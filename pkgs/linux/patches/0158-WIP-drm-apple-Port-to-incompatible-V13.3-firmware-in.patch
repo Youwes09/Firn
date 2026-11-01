@@ -1,4 +1,4 @@
-From 3e71960c983569346722554242fe82baa0e3ea91 Mon Sep 17 00:00:00 2001
+From 686b9127046ee437a8cd38535f49d0ed3a3af179 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 14 Apr 2023 08:07:52 +0200
 Subject: [PATCH] WIP: drm/apple: Port to incompatible V13.3 firmware interface
@@ -64,7 +64,7 @@ index e1cec2a9bbe3..a58435e19be2 100644
  
  	/* Current display mode */
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 8655bdf70e24..0fc6321aa05b 100644
+index 0a35f8895daa..d04329519163 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -403,8 +403,8 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
@@ -79,7 +79,7 @@ index 8655bdf70e24..0fc6321aa05b 100644
  	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",
  		compat_str, fw_str);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 0ce1e02309d8..8fd55baa22ea 100644
+index 443289d38346..bf91ed3d0a49 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -225,8 +225,8 @@ void dcp_sleep(struct apple_dcp *dcp)
@@ -115,7 +115,7 @@ index 0ce1e02309d8..8fd55baa22ea 100644
  		break;
  	default:
  		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
-@@ -505,8 +505,8 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -505,8 +505,8 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  	case DCP_FIRMWARE_V_12_3:
  		iomfb_flush_v12_3(dcp, crtc, state);
  		break;

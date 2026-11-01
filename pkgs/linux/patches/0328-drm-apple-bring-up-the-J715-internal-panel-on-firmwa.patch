@@ -1,0 +1,533 @@
+From 8de759633fd40df4a1e4c47324d726ec7081bfcc Mon Sep 17 00:00:00 2001
+From: Josh Rodd <josh@rodd.us>
+Date: Thu, 24 Sep 2026 15:32:56 -0400
+Subject: [PATCH] drm/apple: bring up the J715 internal panel on firmware
+ 26.6.2 [dcp]
+
+Enables the J715 panel and inherited display DARTs.
+Map retained RTKit buffers safely.
+Handle internal-panel service readiness and fixed timing.
+Encode the 26.6.2 brightness ABI.
+Preserve firmware modeset errors.
+Keep this display-only change independent of the MTP input-support series.
+
+Tested on M4 MacBook Air 15" only, not 13".
+
+Suspend/resume and SMP is not tested yet due to lack of M4 support for
+that yet.
+
+Assisted-by: LLM
+Signed-off-by: Josh Rodd <josh@rodd.us>
+(split from commit 1a0bfae9821e08c59c9044b0a347ab12e545a4f4: dcp changes only)
+---
+ drivers/gpu/drm/apple/Kconfig          |   3 +-
+ drivers/gpu/drm/apple/dcp-internal.h   |   2 -
+ drivers/gpu/drm/apple/dcp.c            | 101 ++++++++++++++++++++-----
+ drivers/gpu/drm/apple/dcp_backlight.c  |  14 +++-
+ drivers/gpu/drm/apple/iomfb_template.c |  87 ++++++++++++++++++---
+ drivers/gpu/drm/apple/iomfb_template.h |   6 ++
+ drivers/gpu/drm/apple/iomfb_v26_6.c    |   7 ++
+ 7 files changed, 184 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/Kconfig b/drivers/gpu/drm/apple/Kconfig
+index 651d87d2d426..b5fd5627baec 100644
+--- a/drivers/gpu/drm/apple/Kconfig
++++ b/drivers/gpu/drm/apple/Kconfig
+@@ -5,11 +5,12 @@ config DRM_APPLE
+ 	depends on ARCH_APPLE || COMPILE_TEST
+ 	depends on APPLE_RTKIT
+ 	depends on OF_ADDRESS
++	depends on TYPEC || !TYPEC
+ 	select DRM_CLIENT_SELECTION
+ 	select DRM_KMS_HELPER
+-	select DRM_KMS_DMA_HELPER
+ 	select DRM_GEM_DMA_HELPER
+ 	select VIDEOMODE_HELPERS
++	select VMAP_PFN
+ 	depends on BACKLIGHT_CLASS_DEVICE
+ 	select MULTIPLEXER
+ 	help
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 53827fb81cb3..26d5c3eb5d17 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -304,8 +304,6 @@ struct apple_dcp {
+ 	int hdmi_hpd_irq;
+ };
+ 
+-void *dcp_vmap_wc(phys_addr_t phys, size_t size, void **map_base);
+-
+ void dcp_drm_crtc_page_flip(struct apple_dcp *dcp, ktime_t now);
+ 
+ int dcp_backlight_register(struct apple_dcp *dcp);
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 1aa5f01fa933..be83e7d4f3c5 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -19,6 +19,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_platform.h>
++#include <linux/overflow.h>
+ #include <linux/slab.h>
+ #include <linux/soc/apple/rtkit.h>
+ #include <linux/string.h>
+@@ -309,28 +310,65 @@ static void dcp_rtk_crashed(void *cookie, const void *crashlog, size_t crashlog_
+ 	complete(&dcp->start_done);
+ }
+ 
+-void *dcp_vmap_wc(phys_addr_t phys, size_t size, void **map_base)
++static int dcp_vmap_wc(phys_addr_t phys, size_t size,
++		       void __iomem **iomem, void **map_base)
+ {
+ 	unsigned long offset = offset_in_page(phys);
+-	unsigned int count = DIV_ROUND_UP(offset + size, PAGE_SIZE);
+ 	unsigned long first_pfn = PHYS_PFN(phys);
+-	struct page **pages;
++	phys_addr_t last;
++	size_t span, nr_pages;
++	unsigned int count, i;
+ 	void *base;
+-	unsigned int i;
+ 
+-	pages = kcalloc(count, sizeof(*pages), GFP_KERNEL);
+-	if (!pages)
+-		return NULL;
+-	for (i = 0; i < count; i++)
+-		pages[i] = pfn_to_page(first_pfn + i);
++	if (!size)
++		return -EINVAL;
++	if (check_add_overflow(phys, (phys_addr_t)size - 1, &last) ||
++	    check_add_overflow(size, offset, &span))
++		return -EOVERFLOW;
++	if (last > PHYS_MASK)
++		return -EOVERFLOW;
++	nr_pages = (span - 1) / PAGE_SIZE + 1;
++	if (nr_pages > UINT_MAX)
++		return -E2BIG;
++	count = nr_pages;
++
++	if (pfn_valid(first_pfn)) {
++		struct page **pages = kmalloc_array(count, sizeof(*pages), GFP_KERNEL);
++
++		if (!pages)
++			return -ENOMEM;
++		for (i = 0; i < count; i++) {
++			if (!pfn_valid(first_pfn + i)) {
++				kfree(pages);
++				return -EINVAL;
++			}
++			pages[i] = pfn_to_page(first_pfn + i);
++		}
++		base = vmap(pages, count, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
++		kfree(pages);
++	} else {
++		unsigned long *pfns = kmalloc_array(count, sizeof(*pfns), GFP_KERNEL);
+ 
+-	base = vmap(pages, count, VM_MAP, pgprot_writecombine(PAGE_KERNEL));
+-	kfree(pages);
++		if (!pfns)
++			return -ENOMEM;
++		for (i = 0; i < count; i++) {
++			if (pfn_valid(first_pfn + i)) {
++				kfree(pfns);
++				return -EINVAL;
++			}
++			pfns[i] = first_pfn + i;
++		}
++		/* Retained firmware carveouts need not have struct page entries.
++		 * vmap_pfn preserves WC without manufacturing invalid pages. */
++		base = vmap_pfn(pfns, count, pgprot_writecombine(PAGE_KERNEL));
++		kfree(pfns);
++	}
+ 	if (!base)
+-		return NULL;
++		return -ENOMEM;
+ 
+ 	*map_base = base;
+-	return base + offset;
++	*iomem = (void __iomem *)(base + offset);
++	return 0;
+ }
+ 
+ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
+@@ -341,22 +379,37 @@ static int dcp_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
+ 		struct iommu_domain *domain =
+ 			iommu_get_domain_for_dev(dcp->dev);
+ 		phys_addr_t phy_addr;
++		size_t offset;
++		int ret;
+ 
+ 		if (!domain)
+-			return -ENOMEM;
++			return -ENODEV;
+ 
+-		// TODO: get map from device-tree
++		if (!bfr->size)
++			return -EINVAL;
++		if (bfr->size - 1 > (dma_addr_t)-1 - bfr->iova)
++			return -EOVERFLOW;
+ 		phy_addr = iommu_iova_to_phys(domain, bfr->iova);
+ 		if (!phy_addr)
+-			return -ENOMEM;
++			return -EINVAL;
++		if (offset_in_page(phy_addr) != offset_in_page(bfr->iova))
++			return -EINVAL;
++		if (phy_addr > PHYS_MASK || bfr->size - 1 > PHYS_MASK - phy_addr)
++			return -EOVERFLOW;
++		/* The CPU alias is contiguous; verify the entire retained mapping,
++		 * not just the first DART page. */
++		for (offset = PAGE_SIZE - offset_in_page(bfr->iova);
++		     offset < bfr->size; offset += PAGE_SIZE) {
++			if (iommu_iova_to_phys(domain, bfr->iova + offset) != phy_addr + offset)
++				return -EINVAL;
++		}
+ 
+ 		/* Retained DCP buffers may be accessed through a realtime path.
+ 		 * A WB alias creates AMCC directory state that can fault when DCP
+ 		 * subsequently accesses the same memory. */
+-		bfr->iomem = (void __iomem *)dcp_vmap_wc(phy_addr, bfr->size,
+-							 &bfr->private);
+-		if (!bfr->iomem)
+-			return -ENOMEM;
++		ret = dcp_vmap_wc(phy_addr, bfr->size, &bfr->iomem, &bfr->private);
++		if (ret)
++			return ret;
+ 
+ 		bfr->is_mapped = true;
+ 		dev_info(dcp->dev,
+@@ -841,8 +894,14 @@ static void dcp_dpavctrl_service_init(struct apple_epic_service *service,
+ 		dcp->dpavctrl_late_service = service;
+ 	}
+ 
+-	if (service->ep->num_channels >= 4)
++	/* The internal panel announces only the AV controller on interface 5
++	 * and the deferred DP controller on interface 7, not the HDMI quartet. */
++	if (dcp_has_panel(dcp)) {
++		if (dcp->dpavctrl_av_controller[1] && dcp->dpavctrl_late_service)
++			complete_all(&dcp->dpavctrl_ready);
++	} else if (service->ep->num_channels >= 4) {
+ 		complete_all(&dcp->dpavctrl_ready);
++	}
+ }
+ 
+ static const struct apple_epic_service_ops dcp_dpavctrl_ops[] = {
+diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
+index 3078175a377b..f8daf1358b1d 100644
+--- a/drivers/gpu/drm/apple/dcp_backlight.c
++++ b/drivers/gpu/drm/apple/dcp_backlight.c
+@@ -215,7 +215,10 @@ static int dcp_set_brightness(struct backlight_device *bd)
+ 		return -ERESTARTSYS;
+ 	}
+ 
+-	dcp->brightness.dac = calculate_dac(dcp, brightness);
++	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6)
++		dcp->brightness.nits = brightness;
++	else
++		dcp->brightness.dac = calculate_dac(dcp, brightness);
+ 	dcp->brightness.update = true;
+ 
+ 	drm_modeset_drop_locks(&ctx);
+@@ -238,7 +241,11 @@ int dcp_backlight_register(struct apple_dcp *dcp)
+ 		.brightness = dcp->brightness.nits,
+ 		.scale = BACKLIGHT_SCALE_LINEAR,
+ 	};
+-	props.max_brightness = min(dcp->brightness.maximum, MAX_BRIGHTNESS_PART2 - 1);
++	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6)
++		props.max_brightness = dcp->brightness.maximum;
++	else
++		props.max_brightness = min(dcp->brightness.maximum,
++					  MAX_BRIGHTNESS_PART2 - 1);
+ 
+ 	bl_dev = devm_backlight_device_register(dev, "apple-panel-bl", dev, dcp,
+ 						&dcp_backlight_ops, &props);
+@@ -246,7 +253,8 @@ int dcp_backlight_register(struct apple_dcp *dcp)
+ 		return PTR_ERR(bl_dev);
+ 
+ 	dcp->brightness.bl_dev = bl_dev;
+-	dcp->brightness.dac = calculate_dac(dcp, dcp->brightness.nits);
++	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6)
++		dcp->brightness.dac = calculate_dac(dcp, dcp->brightness.nits);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index eb6e20683e70..2435adba523b 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -16,6 +16,7 @@
+ #include <linux/of_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/slab.h>
++#include <linux/unaligned.h>
+ 
+ #include <drm/drm_fb_dma_helper.h>
+ #include <drm/drm_fourcc.h>
+@@ -81,6 +82,24 @@ static dcp_bool_arg_t dcp_bool_arg(bool value)
+ 		.padding = { 0xaa, 0xaa, 0xaa },
+ 	};
+ }
++
++/* Native 26.6 brightness and display-off swaps use binary64 nits, not iDAC. */
++static void dcp_swap_set_brightness(struct DCP_FW_NAME(dcp_swap) *swap, u32 nits)
++{
++	u64 bits = 0;
++
++	if (nits) {
++		unsigned int exponent = fls(nits) - 1;
++
++		/* All u32 integers are exactly representable; no kernel FP use. */
++		bits = (u64)(exponent + 1023) << 52;
++		bits |= ((u64)nits << (52 - exponent)) & GENMASK_ULL(51, 0);
++	}
++
++	swap->bl_update = 1;
++	swap->bl_flags[1] = 1;
++	put_unaligned_le64(bits, &swap->bl_nits);
++}
+ #else
+ typedef struct dcp_set_power_state_req dcp_power_state_req_t;
+ typedef struct iomfb_abort_swaps_dcp_req dcp_abort_swaps_req_t;
+@@ -308,6 +327,7 @@ static bool iomfbep_cb_match_backlight_service(struct apple_dcp *dcp, int tag, v
+ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *prop)
+ {
+ 	switch (prop->id) {
++#if DCP_FW_VER < DCP_FW_VERSION(26, 6, 0)
+ 	case IOMFB_PROPERTY_NITS:
+ 	{
+ 		if (dcp_has_panel(dcp)) {
+@@ -319,6 +339,7 @@ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *pr
+ 		}
+ 		break;
+ 	}
++#endif
+ 	default:
+ 		dev_dbg(dcp->dev, "pr_publish: id: %d = %u\n", prop->id, prop->value);
+ 	}
+@@ -1162,6 +1183,9 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ 	 * brightness.
+ 	 */
+ 	if (dcp_has_panel(dcp)) {
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++		dcp_swap_set_brightness(&swap->swap, 0);
++#else
+ #if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+ 		swap->swap.bl_update = 1;
+ #else
+@@ -1169,6 +1193,7 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
+ #endif
+ 		swap->swap.bl_value = 0;
+ 		swap->swap.bl_power = 0;
++#endif
+ 	}
+ 
+ 	/* Null all surfaces */
+@@ -1486,24 +1511,32 @@ static void do_swap(struct apple_dcp *dcp, void *data, void *cookie)
+ 		dcp_drm_crtc_vblank(dcp->crtc);
+ }
+ 
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++struct dcp_modeset_cookie {
++	/* Must be first: release_wait_cookie() frees this allocation. */
++	struct dcp_wait_cookie wait;
++	struct dcp_set_digital_out_mode_req actual;
++	struct dcp_set_digital_out_mode_req bootstrap;
++	u32 result;
++};
++#endif
++
+ static void complete_set_digital_out_mode(struct apple_dcp *dcp, void *data,
+ 					  void *cookie)
+ {
+ 	struct dcp_wait_cookie *wait = cookie;
+ 
+ 	if (wait) {
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++		((struct dcp_modeset_cookie *)cookie)->result =
++			get_unaligned_le32(data);
++#endif
+ 		complete(&wait->done);
+ 		kref_put(&wait->refcount, release_wait_cookie);
+ 	}
+ }
+ 
+ #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
+-struct dcp_modeset_cookie {
+-	/* Must be first: release_wait_cookie() frees this allocation. */
+-	struct dcp_wait_cookie wait;
+-	struct dcp_set_digital_out_mode_req actual;
+-	struct dcp_set_digital_out_mode_req bootstrap;
+-};
+ 
+ static void dcp_get_mode_info(struct apple_dcp *dcp,
+ 			      const struct dcp_set_digital_out_mode_req *mode,
+@@ -1539,6 +1572,11 @@ static void dcp_modeset_after_bootstrap(struct apple_dcp *dcp, void *data,
+ {
+ 	struct dcp_modeset_cookie *modeset = cookie;
+ 
++	if (get_unaligned_le32(data)) {
++		complete_set_digital_out_mode(dcp, data, cookie);
++		return;
++	}
++
+ 	dcp_get_mode_info(dcp, &modeset->actual,
+ 			  dcp_modeset_after_actual_info, cookie);
+ }
+@@ -1572,7 +1610,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 	}
+ 
+ 	dev_info(dcp->dev,
+-		 "set_digital_out_mode(color:%d timing:%d) " DRM_MODE_FMT "\n",
++		 "select_mode(color:%d timing:%d) " DRM_MODE_FMT "\n",
+ 		 mode->color_mode_id, mode->timing_mode_id,
+ 		 DRM_MODE_ARG(&crtc_state->mode));
+ 	if (mode->color_mode_id == mode->sdr_rgb.id)
+@@ -1585,7 +1623,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 		cmode = &mode->best;
+ 	if (cmode)
+ 		dev_info(dcp->dev,
+-			"set_digital_out_mode() color mode depth:%hhu format:%u "
++			"select_mode() color mode depth:%hhu format:%u "
+ 			"colorimetry:%u eotf:%u range:%u vrr:%u\n", cmode->depth,
+ 			cmode->format, cmode->colorimetry, cmode->eotf,
+ 			cmode->range, mode->vrr);
+@@ -1599,6 +1637,17 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 	dcp->use_timestamps = mode->vrr;
+ 
+ #if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	/*
++	 * Native fixed-panel mode changes use A407 source/destination geometry,
++	 * not the external digital-output A364/A413 sequence. Accept only the
++	 * single firmware-advertised non-VRR timing, already matched above.
++	 */
++	if (dcp_has_panel(dcp) && dcp->main_display &&
++	    dcp->nr_modes == 1 && !mode->vrr) {
++		dcp->valid_mode = true;
++		return 0;
++	}
++
+ 	modeset_cookie = kzalloc(sizeof(*modeset_cookie), GFP_KERNEL);
+ 	if (!modeset_cookie)
+ 		return -ENOMEM;
+@@ -1649,6 +1698,15 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 	 */
+ 	ret = wait_for_completion_timeout(&cookie->done,
+ 					  msecs_to_jiffies(8500));
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	if (ret > 0 && modeset_cookie->result) {
++		dev_err(dcp->dev, "set_digital_out_mode returned 0x%08x\n",
++			modeset_cookie->result);
++		ret = -EIO;
++	}
++	if (ret <= 0)
++		dcp->valid_mode = false;
++#endif
+ 
+ 	kref_put(&cookie->refcount, release_wait_cookie);
+ 	dcp->during_modeset = false;
+@@ -1659,7 +1717,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
+ 		return -EIO;
+ 	} else if (ret < 0) {
+ 		dev_info(dcp->dev,
+-			 "waiting on set_digital_out_mode failed:%d\n", ret);
++			 "set_digital_out_mode failed:%d\n", ret);
+ 		return -EIO;
+ 
+ 	} else if (ret > 0) {
+@@ -1787,6 +1845,9 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 
+ 	/* update brightness if changed */
+ 	if (dcp_has_panel(dcp) && dcp->brightness.update) {
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++		dcp_swap_set_brightness(&req->swap, dcp->brightness.nits);
++#else
+ #if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+ 		req->swap.bl_update = 1;
+ #else
+@@ -1794,6 +1855,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ #endif
+ 		req->swap.bl_value = dcp->brightness.dac;
+ 		req->swap.bl_power = 0x40;
++#endif
+ 		dcp->brightness.update = false;
+ 	}
+ 
+@@ -1829,6 +1891,13 @@ static void res_is_main_display(struct apple_dcp *dcp, void *out, void *cookie)
+ 	}
+ 
+ 	dcp->active = true;
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	/* 26.6 no longer publishes the legacy initial-nits property (D300/15).
++	 * Start with the requested value zero; userspace sets its desired nits.
++	 */
++	if (dcp_has_panel(dcp) && dcp->brightness.maximum > 0)
++		schedule_work(&dcp->bl_register_wq);
++#endif
+ 	complete(&dcp->start_done);
+ }
+ 
+diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
+index fe0b191d40db..db0e7b593ec9 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.h
++++ b/drivers/gpu/drm/apple/iomfb_template.h
+@@ -58,6 +58,11 @@ struct DCP_FW_NAME(dcp_swap) {
+ 	u8 unk_2cc[0x40];
+ 	u32 bl_update;
+ #endif
++#if DCP_FW_VER >= DCP_FW_VERSION(26, 6, 0)
++	u8 bl_flags[6];
++	__le64 bl_nits; /* IEEE-754 binary64, unaligned at 0x35e */
++	u8 unk_2f3[0x2b];
++#else
+ #if DCP_FW_VER < DCP_FW_VERSION(13, 2, 0)
+ 	u16 unk_2e2;
+ #else
+@@ -71,6 +76,7 @@ struct DCP_FW_NAME(dcp_swap) {
+ 	u32 bl_value; // min value is 0x10000000
+ 	u8  bl_power; // constant 0x40 for on
+ 	u8 unk_2f3[0x2d];
++#endif
+ #if DCP_FW_VER >= DCP_FW_VERSION(13, 2, 0)
+ 	u8 unk_320[0x147];
+ #if DCP_FW_VER >= DCP_FW_VERSION(14, 7, 0)
+diff --git a/drivers/gpu/drm/apple/iomfb_v26_6.c b/drivers/gpu/drm/apple/iomfb_v26_6.c
+index 488e4a88a97d..961754e08eef 100644
+--- a/drivers/gpu/drm/apple/iomfb_v26_6.c
++++ b/drivers/gpu/drm/apple/iomfb_v26_6.c
+@@ -76,6 +76,9 @@ static bool trampoline_passthrough_dict_v26_6(struct apple_dcp *dcp, int tag,
+ }
+ 
+ static_assert(sizeof(struct dcp_swap_v26_6_0) == 0x588);
++static_assert(offsetof(struct dcp_swap_v26_6_0, bl_update) == 0x354);
++static_assert(offsetof(struct dcp_swap_v26_6_0, bl_flags) == 0x358);
++static_assert(offsetof(struct dcp_swap_v26_6_0, bl_nits) == 0x35e);
+ static_assert(sizeof(struct dcp_swap_start_req_v26_6_0) == 0x10);
+ static_assert(sizeof(struct dcp_swap_start_resp_v26_6_0) == 0x8);
+ static_assert(sizeof(struct dcp_swap_submit_req_v26_6_0) == 0x1bd8);
+@@ -120,6 +123,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	/* set_tiling_state: 26.6 returns the value followed by success. */
+ 	[115] = trampoline_get_tiling_state,
+ 	[121] = dcpep_cb_boot_1,
++	[122] = trampoline_false, /* native display sleep/wake query */
+ 	[123] = trampoline_false,
+ 	[125] = trampoline_read_edt_data,
+ 	[127] = trampoline_prop_start,
+@@ -134,6 +138,7 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[300] = trampoline_pr_publish,
+ 	[400] = trampoline_nop,
+ 	[401] = trampoline_get_uint_prop,
++	[406] = trampoline_nop, /* set_fx_prop: host property notification */
+ 	[408] = trampoline_get_frequency,
+ 	[411] = trampoline_map_reg,
+ 	[413] = trampoline_true,
+@@ -150,8 +155,10 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
+ 	[575] = trampoline_hotplug,
+ 	[576] = trampoline_nop,
+ 	[581] = trampoline_nop,
++	[582] = trampoline_true, /* create_default_fb_surface */
+ 	[590] = trampoline_swap_complete,
+ 	[592] = trampoline_swap_complete_intent_gated,
++	[594] = trampoline_nop, /* native display re-enable notification: empty ACK */
+ 	[595] = trampoline_nop,
+ 	[598] = trampoline_nop,
+ 	[599] = trampoline_nop,

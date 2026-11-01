@@ -1,4 +1,4 @@
-From 3ac7637afe5b054264c158c716b8092270032040 Mon Sep 17 00:00:00 2001
+From 74f7faefe5129ac5e1f286c55f495bcced764fad Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 4 Sep 2023 23:07:45 +0200
 Subject: [PATCH] drm: apple: Update supported firmware versions to 12.3 and
@@ -14,8 +14,8 @@ Signed-off-by: Janne Grunau <j@jannau.net>
 ---
  drivers/gpu/drm/apple/dcp-internal.h |  2 +-
  drivers/gpu/drm/apple/dcp.c          | 14 ++++++++++++--
- drivers/gpu/drm/apple/iomfb.c        | 12 ++++++------
- 3 files changed, 19 insertions(+), 9 deletions(-)
+ drivers/gpu/drm/apple/iomfb.c        | 14 +++++++-------
+ 3 files changed, 20 insertions(+), 10 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
 index 1328640b3fae..e6dac0c9ab9b 100644
@@ -31,7 +31,7 @@ index 1328640b3fae..e6dac0c9ab9b 100644
  
  enum {
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index d8f3b7f3623e..b00e64e8d07b 100644
+index 7e43d3735e31..389f50e544be 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -441,8 +441,18 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
@@ -56,7 +56,7 @@ index d8f3b7f3623e..b00e64e8d07b 100644
  	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",
  		compat_str, fw_str);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 8fd55baa22ea..8715574e0ca4 100644
+index bf91ed3d0a49..fb2d29f4955d 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -225,7 +225,7 @@ void dcp_sleep(struct apple_dcp *dcp)
@@ -86,15 +86,17 @@ index 8fd55baa22ea..8715574e0ca4 100644
  		iomfb_poweroff_v13_3(dcp);
  		break;
  	default:
-@@ -505,7 +505,7 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -505,8 +505,8 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  	case DCP_FIRMWARE_V_12_3:
  		iomfb_flush_v12_3(dcp, crtc, state);
  		break;
 -	case DCP_FIRMWARE_V_13_3:
+-		iomfb_flush_v13_3(dcp, crtc, state);
 +	case DCP_FIRMWARE_V_13_5:
- 		iomfb_flush_v13_3(dcp, crtc, state);
++		iomfb_flush_v13_3(dcp, crtc, commit);
  		break;
  	default:
+ 		WARN_ONCE(true, "Unexpected firmware version: %u\n", dcp->fw_compat);
 @@ -521,7 +521,7 @@ static void iomfb_start(struct apple_dcp *dcp)
  	case DCP_FIRMWARE_V_12_3:
  		iomfb_start_v12_3(dcp);

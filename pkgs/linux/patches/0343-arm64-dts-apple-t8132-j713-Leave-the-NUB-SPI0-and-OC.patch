@@ -1,0 +1,35 @@
+From 860d3cbfe5e37d57a22250f26e03f834349d0c7f Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sat, 31 Oct 2026 14:11:25 -0500
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Leave the NUB SPI0 and OCLA
+ power states off
+
+The ADT flags both critical, which the T8132 power domains carry over as
+always-on, but on the J713 iBoot leaves them off and no driver uses
+them. Let them stay off instead of having Linux power them on at boot.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index cd00a8a59c16..4060f47274cb 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -270,6 +270,15 @@ &ps_atc3_usb {
+ 	status = "disabled";
+ };
+ 
++/* Critical in the ADT, but iBoot leaves them off and nothing uses them. */
++&ps_nub_ocla {
++	/delete-property/ apple,always-on;
++};
++
++&ps_nub_spi0 {
++	/delete-property/ apple,always-on;
++};
++
+ #include "hwmon-laptop.dtsi"
+ 
+ &smc_hwmon {

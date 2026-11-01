@@ -1,4 +1,4 @@
-From ffa1cfaf8c572d83034ca916aa69ac738ee60309 Mon Sep 17 00:00:00 2001
+From 484bca99c9277b05432011003964b5190e755950 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 11 Apr 2023 21:57:38 +0900
 Subject: [PATCH] dcp: Add get_tiling_state

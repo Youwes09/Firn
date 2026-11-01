@@ -1,4 +1,4 @@
-From 79c4b973af7cf4c00e0692508081adc98921cae0 Mon Sep 17 00:00:00 2001
+From 27c2dd6c05736461c9914b6dbe3712b4f21a0e1c Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 26 Nov 2023 18:57:07 +0100
 Subject: [PATCH] drm: apple: iomfb: Extend hotplug/mode parsing logging
@@ -14,7 +14,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  2 files changed, 4 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index bb4737fa0f25..e3b9abebe5ed 100644
+index dd7e53214e95..9ee2068f5839 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -238,8 +238,8 @@ void dcp_hotplug(struct work_struct *work)

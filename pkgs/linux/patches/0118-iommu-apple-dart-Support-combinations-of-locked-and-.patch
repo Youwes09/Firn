@@ -1,4 +1,4 @@
-From 9b5c0fbcc4112154d4d9eecf1ee0612805a6e4b8 Mon Sep 17 00:00:00 2001
+From 56ab86db6c2b62d1428b8ccf5c124e4befc952c2 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 9 Apr 2025 18:08:08 +0200
 Subject: [PATCH] iommu: apple-dart: Support combinations of locked and

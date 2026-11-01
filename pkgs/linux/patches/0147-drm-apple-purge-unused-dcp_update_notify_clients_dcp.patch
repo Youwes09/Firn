@@ -1,4 +1,4 @@
-From 8e62e930f1e378844a94993db8d36ee48732926e Mon Sep 17 00:00:00 2001
+From f777392b397e5b614abd3c2c28399f149bf3616b Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 28 Feb 2023 20:34:03 +0100
 Subject: [PATCH] drm/apple: purge unused dcp_update_notify_clients_dcp
@@ -10,7 +10,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  2 files changed, 23 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 237d3a628a41..545ef7d46971 100644
+index 696087feff1f..75bb79cc3052 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -171,7 +171,6 @@ static u8 dcp_pop_depth(u8 *depth)

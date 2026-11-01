@@ -1,4 +1,4 @@
-From acadf5946543304ca1fb54854bec681215c617fb Mon Sep 17 00:00:00 2001
+From 73afd24b4299ac1788122d537a2b17309c40d284 Mon Sep 17 00:00:00 2001
 From: Oliver Bestmann <oliver.bestmann@googlemail.com>
 Date: Tue, 16 Dec 2025 11:59:22 +0100
 Subject: [PATCH] drm: apple: set timestamps for 120hz
@@ -77,7 +77,7 @@ index 113df02584ae..e9c44a8c546c 100644
  	req->swap.swap_completed = req->swap.swap_enabled;
  
 diff --git a/drivers/gpu/drm/apple/iomfb_template.h b/drivers/gpu/drm/apple/iomfb_template.h
-index 3ff0fadff652..19383639ab07 100644
+index 7bfc9b246502..112b6d4cf34a 100644
 --- a/drivers/gpu/drm/apple/iomfb_template.h
 +++ b/drivers/gpu/drm/apple/iomfb_template.h
 @@ -18,7 +18,14 @@

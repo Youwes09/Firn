@@ -1,4 +1,4 @@
-From d7f27e621ef6b2b51d63141db7fa0b304e0aa907 Mon Sep 17 00:00:00 2001
+From e187cc14799a5124675b33643825fa50ba5bd68c Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 26 Mar 2024 22:05:50 +0100
 Subject: [PATCH] drm: apple: dptx: Debounce HPD by simple msleep()
@@ -12,7 +12,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 6 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index bda0802e692c..cc19e2bc00f0 100644
+index 1dd1f54d0e9b..ed9d36d3faad 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -329,6 +329,12 @@ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)

@@ -1,4 +1,4 @@
-From 2e633b25b91273853d7e436570e303d76197dc39 Mon Sep 17 00:00:00 2001
+From cdacac229a7446bec4673f09f10f2c96672d1a4f Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 1 Dec 2023 23:41:53 +0100
 Subject: [PATCH] drm: apple: Prefer RGB SDR modes

@@ -1,4 +1,4 @@
-From ccc572a383cda825566dc52ecfdcd18c155ac7ba Mon Sep 17 00:00:00 2001
+From 283602eea0c90a8548bdb4f06773be8d52ad0c93 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 15:05:36 +0200
 Subject: [PATCH] mux: apple dp crossbar: FIFO_RD_UNK_EN seems to use 2 bits

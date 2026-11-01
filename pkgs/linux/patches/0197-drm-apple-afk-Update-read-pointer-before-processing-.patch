@@ -1,4 +1,4 @@
-From adf4d507950dbcdace215bfa43b3da0e9cef140d Mon Sep 17 00:00:00 2001
+From 0ae661344687d6cbaaba68840105ab5f81cc2f66 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 6 Nov 2023 22:27:54 +0100
 Subject: [PATCH] drm: apple: afk: Update read pointer before processing

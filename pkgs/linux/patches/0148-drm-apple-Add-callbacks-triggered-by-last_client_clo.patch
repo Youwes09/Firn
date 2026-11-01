@@ -1,4 +1,4 @@
-From 6a2332d3426294525504952d33b22d18d855564f Mon Sep 17 00:00:00 2001
+From b75f704a26b4fb89e25d05141d3c2c5f0f899563 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 8 Jan 2023 21:30:22 +0100
 Subject: [PATCH] drm/apple: Add callbacks triggered by last_client_close_dcp()
@@ -9,7 +9,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 5 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 545ef7d46971..35904d8511d4 100644
+index 75bb79cc3052..9ca237166b29 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -1331,9 +1331,14 @@ bool (*const dcpep_cb_handlers[DCPEP_MAX_CB])(struct apple_dcp *, int, void *,

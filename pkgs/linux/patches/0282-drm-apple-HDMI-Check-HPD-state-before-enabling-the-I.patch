@@ -1,4 +1,4 @@
-From 3df693acaabb3083f60c7582b13564b267c603e3 Mon Sep 17 00:00:00 2001
+From b54de29f913f7b25ec386b1d4048655b27915a3a Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Jan 2025 20:32:16 +0100
 Subject: [PATCH] drm: apple: HDMI: Check HPD state before enabling the IRQ
@@ -12,7 +12,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 9 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 992e53b5f607..9dfd5cbcdad2 100644
+index da406310edd3..eb86c04c752f 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -569,6 +569,15 @@ EXPORT_SYMBOL(dcp_start);

@@ -1,0 +1,27 @@
+From ca7b84e5dd69bd7c2a26639d7de0ebf0fea3e24a Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 17 Sep 2026 20:37:53 -0400
+Subject: [PATCH] drm/apple: recognize the 26.6.2 DCP firmware compatibility
+ version
+
+Match the compatibility string supplied by the current T8132 bootloader and retain the existing 26.6 protocol implementation. This pair was validated by the running dual-audio kernel build #107.
+
+Assisted-by: Codex:gpt-6-astra
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+---
+ drivers/gpu/drm/apple/dcp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 6772db2330d7..97588247a7d0 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -1596,7 +1596,7 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
+ 		return DCP_FIRMWARE_V_13_5;
+ 	else if (strncmp(compat_str, "13.5.0", sizeof(compat_str)) == 0)
+ 		return DCP_FIRMWARE_V_13_5;
+-	else if (strncmp(compat_str, "26.6.0", sizeof(compat_str)) == 0)
++	else if (strncmp(compat_str, "26.6.2", sizeof(compat_str)) == 0)
+ 		return DCP_FIRMWARE_V_26_6;
+ 
+ 	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",

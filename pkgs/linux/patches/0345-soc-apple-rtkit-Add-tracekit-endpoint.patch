@@ -1,0 +1,33 @@
+From c47ce62854be09fefee121fe01f9e69ab3292870 Mon Sep 17 00:00:00 2001
+From: Sasha Finkelstein <fnkl.kernel@gmail.com>
+Date: Sat, 9 Nov 2024 17:55:47 +0100
+Subject: [PATCH] soc: apple: rtkit: Add tracekit endpoint.
+
+This system endpoint is advertised by AOP and also needs to be
+turned on for it to function.
+
+Signed-off-by: Sasha Finkelstein <fnkl.kernel@gmail.com>
+---
+ drivers/soc/apple/rtkit.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/soc/apple/rtkit.c b/drivers/soc/apple/rtkit.c
+index 92c97db5e38d..febda8e3faf3 100644
+--- a/drivers/soc/apple/rtkit.c
++++ b/drivers/soc/apple/rtkit.c
+@@ -24,6 +24,7 @@ enum {
+ 	/* Advertised by newer firmware and required to complete RTKit boot. */
+ 	APPLE_RTKIT_EP_UNKNOWN7 = 7,
+ 	APPLE_RTKIT_EP_OSLOG = 8,
++	APPLE_RTKIT_EP_TRACEKIT = 0xa,
+ };
+ 
+ #define APPLE_RTKIT_MGMT_TYPE GENMASK_ULL(59, 52)
+@@ -196,6 +197,7 @@ static void apple_rtkit_management_rx_epmap(struct apple_rtkit *rtk, u64 msg)
+ 		case APPLE_RTKIT_EP_IOREPORT:
+ 		case APPLE_RTKIT_EP_UNKNOWN7:
+ 		case APPLE_RTKIT_EP_OSLOG:
++		case APPLE_RTKIT_EP_TRACEKIT:
+ 			dev_dbg(rtk->dev,
+ 				"RTKit: Starting system endpoint 0x%02x\n", ep);
+ 			apple_rtkit_start_ep(rtk, ep);

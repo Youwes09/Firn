@@ -1,0 +1,43 @@
+From c49724e661b43b7a1dc685aac28b5a5ce5e0a750 Mon Sep 17 00:00:00 2001
+From: James Calligeros <jcalligeros99@gmail.com>
+Date: Thu, 1 Jan 2026 16:18:52 +1000
+Subject: [PATCH] drm: apple: Assume all RGB planes are sRGB
+
+DCP enables us to specify a colourspace and transfer function for
+each plane, and will automatically tonemap them to the connected
+display's native colourspace. It also has a fallback "NATIVE"
+colourspace that tells it to assume the input framebuffer has
+already been transformed correctly. We were previously using this
+fallback for all RGB framebuffers, however this is incorrect.
+
+By convention, userspace treats the default colourspace as sRGB.
+This is fine when a display is in sRGB mode, however modern
+displays almost always cover a wider colour gamut out of the box,
+This is true of the MacBook builtin displays, which have full DCI-P3
+coverage. The result of passing through sRGB framebuffers as "native" is
+oversaturated colours and bloomy highlights.
+
+It is exceedingly rare for userspace to ever output RGB framebuffers
+in non-sRGB colourspaces unless HDR is enabled, which we currently
+do not support. Let's just tell DCP that all RGB framebuffers are
+sRGB until the per-plane colour management patches are merged, at
+which point we can revisit this logic to make it more accurate.
+
+Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
+---
+ drivers/gpu/drm/apple/plane.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/apple/plane.c b/drivers/gpu/drm/apple/plane.c
+index 145970632e53..42ee10ee3419 100644
+--- a/drivers/gpu/drm/apple/plane.c
++++ b/drivers/gpu/drm/apple/plane.c
+@@ -191,7 +191,7 @@ static enum dcp_colorspace get_colorspace(bool is_yuv,
+ 					  enum drm_color_encoding enc)
+ {
+ 	if (!is_yuv)
+-		return DCP_COLORSPACE_NATIVE;
++		return DCP_COLORSPACE_BG_SRGB;
+ 
+ 	switch (enc) {
+ 	case DRM_COLOR_YCBCR_BT601:

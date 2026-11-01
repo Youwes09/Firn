@@ -1,4 +1,4 @@
-From f4cac8dc254c43d0c38fef536bb43b7fca7d4951 Mon Sep 17 00:00:00 2001
+From 4f9f090392b02b35671e2de7f5396ffc92e557ee Mon Sep 17 00:00:00 2001
 From: Niklas Sheth <hi@niklassheth.com>
 Date: Mon, 26 Oct 2026 02:08:10 -0400
 Subject: [PATCH] usb: typec: tipd: cd321x: factor out the data connection test
@@ -6,6 +6,9 @@ Subject: [PATCH] usb: typec: tipd: cd321x: factor out the data connection test
 Move the test that decides whether the PHY leaves safe mode into
 cd321x_data_connected(), so that every place that needs to know the PHY
 state a status implies uses the same predicate. No functional change.
+
+[Youwes09: from niklassheth/linux acfd7fafe5f9]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/usb/typec/tipd/core.c | 12 +++++++++++-
  1 file changed, 11 insertions(+), 1 deletion(-)

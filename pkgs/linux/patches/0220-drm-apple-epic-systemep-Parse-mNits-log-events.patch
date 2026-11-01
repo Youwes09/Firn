@@ -1,4 +1,4 @@
-From e7f7c7235fd801dae72767f27faaa4b08beabcd2 Mon Sep 17 00:00:00 2001
+From 88fa29b00bad1d1749c803e6468811d7170b6475 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 10 Dec 2023 13:40:14 +0100
 Subject: [PATCH] drm: apple: epic: systemep: Parse "mNits" log events

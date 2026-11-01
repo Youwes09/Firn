@@ -1,4 +1,4 @@
-From 5cc1127495d49ec715be1a69b9535a3934c205eb Mon Sep 17 00:00:00 2001
+From ad27ab7b2332698285342279a517b6e3d72aa410 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 3 Dec 2023 23:24:11 +0100
 Subject: [PATCH] drm: apple: Add dcpav-service-ep
@@ -105,7 +105,7 @@ index 0eb8227ef816..d678a1965b5f 100644
  	struct apple_dcp_afkep *avep;
  	struct audiosrv_data *audiosrv;
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 7973bcc52575..5c07a70c8a0a 100644
+index 9c9f3484a6ee..6fbd42d21837 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -50,6 +50,10 @@ bool hdmi_audio;
@@ -156,7 +156,7 @@ index 7973bcc52575..5c07a70c8a0a 100644
  		iomfb_shutdown(dcp);
  
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index df3d767ac4ba..b1a151140c90 100644
+index 2563dfe8c4a6..0914483ae25f 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -63,6 +63,7 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message);

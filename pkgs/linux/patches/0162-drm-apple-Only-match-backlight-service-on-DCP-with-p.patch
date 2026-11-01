@@ -1,4 +1,4 @@
-From bee7837890fe324d39a83a135f1291a9c417f274 Mon Sep 17 00:00:00 2001
+From 278a4b6e97760a713bf11bf30200ebf0a7b53902 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 16:01:01 +0200
 Subject: [PATCH] drm: apple: Only match backlight service on DCP with panel
@@ -24,7 +24,7 @@ index a58435e19be2..ffb6984af69f 100644
  
  #endif /* __APPLE_DCP_INTERNAL_H__ */
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index c5f53b313d80..19c1f4f4e6cf 100644
+index 5259afd51c2e..74bcc4e20029 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -85,6 +85,11 @@ void dcp_set_dimensions(struct apple_dcp *dcp)

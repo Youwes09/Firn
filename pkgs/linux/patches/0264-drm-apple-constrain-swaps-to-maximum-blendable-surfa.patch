@@ -1,4 +1,4 @@
-From 1bde089c53d49bc2f8f2d8a6866c549208e435f5 Mon Sep 17 00:00:00 2001
+From cf7fd58f90680a1f0ac1c8c9c821159a028b25a7 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Tue, 14 May 2024 19:23:04 +1000
 Subject: [PATCH] drm: apple: constrain swaps to maximum blendable surfaces

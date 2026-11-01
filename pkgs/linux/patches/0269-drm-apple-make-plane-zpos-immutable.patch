@@ -1,4 +1,4 @@
-From c16bc577dac7cc5b6a79f6c275155242acf3326c Mon Sep 17 00:00:00 2001
+From f3d3d8ab51bf96aef8bb4444873d1a166fe2628c Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Mon, 1 Jul 2024 17:27:05 +1000
 Subject: [PATCH] drm: apple: make plane zpos immutable
@@ -16,7 +16,7 @@ Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
  2 files changed, 12 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 9fe6de168e12..b38e2170a417 100644
+index d70fd4253c5e..c6252824a8be 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -20,6 +20,7 @@

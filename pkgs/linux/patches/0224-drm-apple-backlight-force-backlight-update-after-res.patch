@@ -1,4 +1,4 @@
-From 73dc9a62ed34b77c86e4b3e8c4377674f944ee10 Mon Sep 17 00:00:00 2001
+From 4f9d38ac84a9041882b5a41b0c8684f302c1cc6f Mon Sep 17 00:00:00 2001
 From: Mark Kettenis <kettenis@openbsd.org>
 Date: Thu, 28 Dec 2023 11:41:55 +0100
 Subject: [PATCH] drm: apple: backlight: force backlight update after resume
@@ -40,7 +40,7 @@ index b6fc500e7453..3e78435edbf5 100644
  
  #define DCP_AUDIO_MAX_CHANS 15
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 0319d8feda1e..b2bc07867e6a 100644
+index 61ef13442f0d..ad189c784199 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -515,6 +515,15 @@ static void dcp_work_register_backlight(struct work_struct *work)
@@ -68,7 +68,7 @@ index 0319d8feda1e..b2bc07867e6a 100644
  		dcp->connector_type = DRM_MODE_CONNECTOR_HDMIA;
  	else if (of_property_match_string(dev->of_node, "apple,connector-type", "DP") >= 0)
 diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
-index 0eeb3d6d92c5..dfc78f3ce37b 100644
+index c3363736e42d..f1cc10fe9de2 100644
 --- a/drivers/gpu/drm/apple/dcp_backlight.c
 +++ b/drivers/gpu/drm/apple/dcp_backlight.c
 @@ -172,20 +172,8 @@ static int drm_crtc_set_brightness(struct apple_dcp *dcp)

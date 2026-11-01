@@ -1,4 +1,4 @@
-From 6c71131a5c1429615a5a4b8dbb20ba0c6fda77ac Mon Sep 17 00:00:00 2001
+From 2fef6539aa6c8c26404343644dd900c138338519 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Nov 2023 23:32:07 +0100
 Subject: [PATCH] drm: apple: dptx: Wait for completion of dptx_connect.
@@ -13,7 +13,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  3 files changed, 17 insertions(+), 5 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 9d5c07bd0857..ff4b90db75ee 100644
+index 3e528854dcdb..bd02e756a8ba 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -256,6 +256,8 @@ EXPORT_SYMBOL_GPL(dcp_get_connector_type);

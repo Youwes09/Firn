@@ -1,4 +1,4 @@
-From f45aa057ad8dd189fb6b0d19ab2d04372d0969b8 Mon Sep 17 00:00:00 2001
+From bbe814fe14a499c1623b7dc75f41b08e7b53c9a6 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Tue, 14 May 2024 20:42:20 +1000
 Subject: [PATCH] drm: apple: reject plane commit if it will crash DCP
@@ -23,7 +23,7 @@ Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
  1 file changed, 13 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index ea3483f83be9..6ceb604b93ce 100644
+index f8bb44aa1c8d..48f9434a76b4 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -91,6 +91,19 @@ static int apple_plane_atomic_check(struct drm_plane *plane,

@@ -1,4 +1,4 @@
-From 3b7c6bbfc57661d0b18b350dc82e691c8ad1dc66 Mon Sep 17 00:00:00 2001
+From 49c816df1e0c4953452428555aceec9192d1655d Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 22 Oct 2022 12:24:54 +0200
 Subject: [PATCH] iommu: Parse translated reserved regions

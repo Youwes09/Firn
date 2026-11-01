@@ -1,4 +1,4 @@
-From 2a9a7916329407f473e99c8eda5562a0d6cb5cf1 Mon Sep 17 00:00:00 2001
+From 2e3ec00a4d0bb371009e250be4fd7a38e6e97606 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 3 Dec 2023 23:57:25 +0100
 Subject: [PATCH] drm: apple: dptx: Wait for link config on connect
@@ -15,7 +15,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  3 files changed, 21 insertions(+), 10 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 52201834a0d5..0aa4d27343f8 100644
+index 4a75ad332a2f..bfaaf8266739 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -10,6 +10,7 @@

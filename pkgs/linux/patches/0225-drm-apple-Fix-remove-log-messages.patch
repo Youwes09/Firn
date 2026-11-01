@@ -1,4 +1,4 @@
-From d0cce6f569b2e42234cfa61884c7a0ec98c41ae8 Mon Sep 17 00:00:00 2001
+From a242002c163a4ae2d9af963a4b4970d580c717e7 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 22 Jan 2024 22:24:11 +0100
 Subject: [PATCH] drm: apple: Fix/remove log messages
@@ -56,7 +56,7 @@ index a0241a3cb9b4..dbe47150b4e1 100644
  		return;
  	}
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 3483a30f6f28..900e509faa2f 100644
+index c7f5e22b2e36..52c34788e4b6 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -197,9 +197,7 @@ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
@@ -80,7 +80,7 @@ index 3483a30f6f28..900e509faa2f 100644
  
  	if (crtc->state->event && !crtc->state->active) {
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index b2bc07867e6a..bda0802e692c 100644
+index ad189c784199..1dd1f54d0e9b 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -128,7 +128,7 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
@@ -119,7 +119,7 @@ index b2bc07867e6a..bda0802e692c 100644
  			 (uintptr_t)bfr->iova, (uintptr_t)bfr->buffer);
  	}
  
-@@ -226,7 +226,7 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -226,7 +226,7 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commi
  
  	needs_modeset = drm_atomic_crtc_needs_modeset(crtc_state) || !dcp->valid_mode;
  	if (!needs_modeset && !dcp->connector->connected) {
@@ -128,7 +128,7 @@ index b2bc07867e6a..bda0802e692c 100644
  		return -EINVAL;
  	}
  
-@@ -239,7 +239,7 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -239,7 +239,7 @@ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commi
  	}
  
  	if (plane_count > DCP_MAX_PLANES) {
@@ -210,7 +210,7 @@ index b2bc07867e6a..bda0802e692c 100644
  			}
  			ret = mux_control_select(dcp->xbar, mux_index);
 diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
-index dfc78f3ce37b..ed3b240ead85 100644
+index f1cc10fe9de2..6cb2c57202cc 100644
 --- a/drivers/gpu/drm/apple/dcp_backlight.c
 +++ b/drivers/gpu/drm/apple/dcp_backlight.c
 @@ -99,7 +99,7 @@ static u32 interpolate(int val, int min, int max, u32 *tbl, size_t tbl_size)
@@ -223,7 +223,7 @@ index dfc78f3ce37b..ed3b240ead85 100644
  
  	frac = interpolated & (SCALE_FACTOR - 1);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 1d5e0bf4b197..788d63d90e37 100644
+index a0aa0ff2f9e6..f2bea4ecad3a 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -326,7 +326,7 @@ static void dcpep_got_msg(struct apple_dcp *dcp, u64 message)
@@ -235,7 +235,7 @@ index 1d5e0bf4b197..788d63d90e37 100644
  		return;
  	}
  
-@@ -482,7 +482,7 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -482,7 +482,7 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  
  	if (dcp_channel_busy(&dcp->ch_cmd))
  	{

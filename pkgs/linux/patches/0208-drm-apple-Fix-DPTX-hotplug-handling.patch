@@ -1,4 +1,4 @@
-From a3a1d0a20ecdfd8be7127efbd84cec54ba814693 Mon Sep 17 00:00:00 2001
+From aa77371c895ccbffee845a3358b4fa55ab8ebc2d Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 23 Nov 2023 22:58:51 +0100
 Subject: [PATCH] drm: apple: Fix DPTX hotplug handling
@@ -15,7 +15,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 8 insertions(+), 11 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 698723f118a5..64d33c9f6b58 100644
+index 130b5254f5a4..c457e8486bc4 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -292,16 +292,9 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)

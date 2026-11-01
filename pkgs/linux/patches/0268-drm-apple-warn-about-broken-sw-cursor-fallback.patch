@@ -1,4 +1,4 @@
-From 09a619af110b1217d9296a051e08eb3531b00ad9 Mon Sep 17 00:00:00 2001
+From 608425214246778f19d84e80f8af24ec44cfed70 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Wed, 15 May 2024 20:42:07 +1000
 Subject: [PATCH] drm: apple: warn about broken sw cursor fallback
@@ -15,7 +15,7 @@ Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
  1 file changed, 12 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 45bdc4340bf3..9fe6de168e12 100644
+index e2692f44db8e..d70fd4253c5e 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -101,6 +101,18 @@ static int apple_plane_atomic_check(struct drm_plane *plane,

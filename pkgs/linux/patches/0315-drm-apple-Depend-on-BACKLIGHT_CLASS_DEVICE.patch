@@ -1,0 +1,31 @@
+From 06994e0b5dbdc5ed57bb52190e505e5c815346f4 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 27 Dec 2025 11:42:53 +0100
+Subject: [PATCH] drm/apple: Depend on BACKLIGHT_CLASS_DEVICE
+
+The driver registers a backlight device for the internal panel. Depend
+on the backlight class instead of selecting it, as DRM panel drivers
+do, so that it cannot take part in a Kconfig dependency cycle.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+[Youwes09: AsahiLinux/linux 9d6d7d57a3bf ("fixup! drm: apple: Brightness
+ control via atomic commits") and a74b89e24089 ("HACK: drm/apple: depend
+ on BACKLIGHT_CLASS_DEVICE to break x86 Kconfig cycles") in one, without
+ the x86 EEEPC change, as DRM_APPLE depends on ARM64]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/apple/Kconfig b/drivers/gpu/drm/apple/Kconfig
+index 9828a5fa1932..2efc7bdf7e07 100644
+--- a/drivers/gpu/drm/apple/Kconfig
++++ b/drivers/gpu/drm/apple/Kconfig
+@@ -10,6 +10,7 @@ config DRM_APPLE
+ 	select DRM_KMS_DMA_HELPER
+ 	select DRM_GEM_DMA_HELPER
+ 	select VIDEOMODE_HELPERS
++	depends on BACKLIGHT_CLASS_DEVICE
+ 	select MULTIPLEXER
+ 	help
+ 	  Say Y if you have an Apple Silicon chipset.

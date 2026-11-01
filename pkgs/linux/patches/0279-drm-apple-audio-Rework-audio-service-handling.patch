@@ -1,4 +1,4 @@
-From 7c95ea09a94041fa53188936ea981cf5e9bbdb70 Mon Sep 17 00:00:00 2001
+From 2ef0013997bc04ad7b6a24e448a212603a6dcf55 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 14 Jan 2025 23:10:18 +0100
 Subject: [PATCH] drm: apple: audio: Rework audio service handling
@@ -194,7 +194,7 @@ index b1f92fb5d07f..baeefeca0a33 100644
 +
  #endif /* __AV_H__ */
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index b5e234d8599a..992e53b5f607 100644
+index 83db7dd8ee73..da406310edd3 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -31,6 +31,7 @@

@@ -1,4 +1,4 @@
-From e39d27c74dededb5847a25e7c928cf12df340a3b Mon Sep 17 00:00:00 2001
+From 9a46eda8c61421b0d609dd61352254e932fb8022 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 21 Dec 2025 20:14:16 +0100
 Subject: [PATCH] drm: apple: Use typec mux to switch atc-phy into DP
@@ -18,7 +18,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  4 files changed, 42 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index a791a4a02810..1e466c7d706b 100644
+index a1b436f1df14..92d6b057c07a 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -735,6 +735,17 @@ static int add_dcp_components(struct device *dev,
@@ -60,7 +60,7 @@ index 4a37741d01e0..f2eb2483c9a8 100644
  	struct gpio_desc *hdmi_hpd;
  	struct gpio_desc *hdmi_pwren;
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 25c866c74c81..81ab1a63d8bb 100644
+index ddd384ae3976..689f18574539 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -21,6 +21,9 @@

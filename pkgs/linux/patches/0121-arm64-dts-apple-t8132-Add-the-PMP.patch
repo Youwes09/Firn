@@ -1,4 +1,4 @@
-From 8fc747fe2b04e1cc7ddcb5296e63b889064f033a Mon Sep 17 00:00:00 2001
+From 0c408b714f4291521d5369b55c1cb7b44a2b72c2 Mon Sep 17 00:00:00 2001
 From: Cody Ho <codyho@stanford.edu>
 Date: Wed, 28 Oct 2026 21:36:50 -0700
 Subject: [PATCH] arm64: dts: apple: t8132: Add the PMP

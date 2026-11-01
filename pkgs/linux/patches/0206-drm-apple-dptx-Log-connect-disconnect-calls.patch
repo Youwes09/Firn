@@ -1,4 +1,4 @@
-From c5b883145fe53cfbea28086eaf6a77f29ad597c2 Mon Sep 17 00:00:00 2001
+From dad9fda4261eb1fb9b887785316fc48f46404655 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 22 Nov 2023 09:53:09 +0100
 Subject: [PATCH] drm: apple: dptx: Log connect/disconnect calls
@@ -9,7 +9,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 2 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 22ff9fc97d1f..698723f118a5 100644
+index ab0a4dc6fcc7..130b5254f5a4 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -262,6 +262,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)

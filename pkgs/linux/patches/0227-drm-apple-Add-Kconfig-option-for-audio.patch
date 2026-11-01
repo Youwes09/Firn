@@ -1,4 +1,4 @@
-From 18c1b4ba3aea1eac4b03309e5d32074d044af028 Mon Sep 17 00:00:00 2001
+From 5f324bb4a22534d7fe8dfd60ffa11408a6f70717 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 21 Jan 2024 14:47:56 +0100
 Subject: [PATCH] drm: apple: Add Kconfig option for audio

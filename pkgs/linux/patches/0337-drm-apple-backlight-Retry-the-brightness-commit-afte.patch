@@ -1,0 +1,117 @@
+From 41cddee729ca7503d233ceb00a5b88d2b5abea9b Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sat, 31 Oct 2026 13:27:01 -0500
+Subject: [PATCH] drm/apple: backlight: Retry the brightness commit after a
+ deadlock
+
+drm_crtc_set_brightness() returned -EDEADLK to the backlight core after
+backing off instead of retrying, and neither it nor dcp_set_brightness()
+finished its acquire context; the latter also left it held on
+-ERESTARTSYS. Retry after backing off, finish the context, and take the
+single CRTC lock directly where nothing else is locked.
+
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+[Youwes09: from Gravity Linux d332256c62d5]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/dcp_backlight.c | 53 ++++++++++++---------------
+ 1 file changed, 24 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/gpu/drm/apple/dcp_backlight.c b/drivers/gpu/drm/apple/dcp_backlight.c
+index f8daf1358b1d..a929e2163b92 100644
+--- a/drivers/gpu/drm/apple/dcp_backlight.c
++++ b/drivers/gpu/drm/apple/dcp_backlight.c
+@@ -142,41 +142,42 @@ static int drm_crtc_set_brightness(struct apple_dcp *dcp)
+ 	struct drm_crtc_state *crtc_state;
+ 	struct drm_modeset_acquire_ctx ctx;
+ 	struct drm_crtc *crtc = &dcp->crtc->base;
+-	int ret = 0;
++	int ret;
++
++	commit = drm_atomic_commit_alloc(crtc->dev);
++	if (!commit)
++		return -ENOMEM;
+ 
+ 	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
++	commit->acquire_ctx = &ctx;
++retry:
+ 	ret = drm_modeset_lock(&crtc->mutex, &ctx);
+-	if (ret == -EDEADLK) {
+-		drm_modeset_backoff(&ctx);
+-		return -EDEADLK;
+-	} else if (ret == -ERESTARTSYS) {
+-		return -ERESTARTSYS;
+-	}
++	if (ret)
++		goto out;
+ 
+ 	if (!dcp->brightness.update)
+-		goto done;
+-
+-	commit = drm_atomic_commit_alloc(crtc->dev);
+-	if (!commit) {
+-		ret = -ENOMEM;
+-		goto done;
+-	}
++		goto out;
+ 
+-	commit->acquire_ctx = &ctx;
+ 	crtc_state = drm_atomic_get_crtc_state(commit, crtc);
+ 	if (IS_ERR(crtc_state)) {
+ 		ret = PTR_ERR(crtc_state);
+-		goto fail;
++		goto out;
+ 	}
+ 
+ 	crtc_state->color_mgmt_changed |= true;
+ 
+ 	ret = drm_atomic_commit(commit);
++out:
++	if (ret == -EDEADLK) {
++		drm_atomic_commit_clear(commit);
++		ret = drm_modeset_backoff(&ctx);
++		if (!ret)
++			goto retry;
++	}
+ 
+-fail:
+ 	drm_atomic_commit_put(commit);
+-done:
+ 	drm_modeset_drop_locks(&ctx);
++	drm_modeset_acquire_fini(&ctx);
+ 
+ 	return ret;
+ }
+@@ -201,19 +202,13 @@ int dcp_backlight_update(struct apple_dcp *dcp)
+ 
+ static int dcp_set_brightness(struct backlight_device *bd)
+ {
+-	int ret = 0;
+ 	struct apple_dcp *dcp = bl_get_data(bd);
+-	struct drm_modeset_acquire_ctx ctx;
+ 	int brightness = backlight_get_brightness(bd);
++	int ret;
+ 
+-	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
+-	ret = drm_modeset_lock(&dcp->crtc->base.mutex, &ctx);
+-	if (ret == -EDEADLK) {
+-		drm_modeset_backoff(&ctx);
+-		return -EDEADLK;
+-	} else if (ret == -ERESTARTSYS) {
+-		return -ERESTARTSYS;
+-	}
++	ret = drm_modeset_lock_single_interruptible(&dcp->crtc->base.mutex);
++	if (ret)
++		return ret;
+ 
+ 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6)
+ 		dcp->brightness.nits = brightness;
+@@ -221,7 +216,7 @@ static int dcp_set_brightness(struct backlight_device *bd)
+ 		dcp->brightness.dac = calculate_dac(dcp, brightness);
+ 	dcp->brightness.update = true;
+ 
+-	drm_modeset_drop_locks(&ctx);
++	drm_modeset_unlock(&dcp->crtc->base.mutex);
+ 
+ 	return dcp_backlight_update(dcp);
+ }

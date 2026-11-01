@@ -1,4 +1,4 @@
-From 01e1ea673baf5a913df5294d7ae1e572ef8e7d08 Mon Sep 17 00:00:00 2001
+From c3bbc6262807818856ac4fae22c52aced21ee403 Mon Sep 17 00:00:00 2001
 From: Jonathan Gray <jsg@jsg.id.au>
 Date: Sun, 21 Apr 2024 11:15:04 +1000
 Subject: [PATCH] drm/apple: fix double words in comments

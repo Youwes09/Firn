@@ -1,4 +1,4 @@
-From cea2302619a5dba0447554388bdb28d67111cbe3 Mon Sep 17 00:00:00 2001
+From 360e4a3a0477c3b8396b8b64affcb97aa74c613f Mon Sep 17 00:00:00 2001
 From: Alba Mendez <me@alba.sh>
 Date: Tue, 18 Aug 2026 20:32:45 +0200
 Subject: [PATCH] spmi: apple: Add interrupt functionality

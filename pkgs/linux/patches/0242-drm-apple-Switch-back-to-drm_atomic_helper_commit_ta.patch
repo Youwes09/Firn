@@ -1,4 +1,4 @@
-From 00b09b5195e4d6e208eb147ce1378f5e530a6387 Mon Sep 17 00:00:00 2001
+From c708657346b344032822da69c6de610f98e8d809 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 27 Apr 2024 17:55:25 +0200
 Subject: [PATCH] drm: apple: Switch back to
@@ -17,7 +17,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 1 insertion(+), 21 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index a91aa3969054..e3988701e0cc 100644
+index fe4eb2bf21fd..780761f69649 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -239,26 +239,6 @@ static void apple_crtc_atomic_begin(struct drm_crtc *crtc,

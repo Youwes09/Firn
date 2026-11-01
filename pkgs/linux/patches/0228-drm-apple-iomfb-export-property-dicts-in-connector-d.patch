@@ -1,4 +1,4 @@
-From 966d500b7a30cb0233990ee3239ad5885cb912ca Mon Sep 17 00:00:00 2001
+From 9e6e1a7d2bbef5b6414ddd614d2418f29996cc7e Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 25 Dec 2023 18:03:37 +0100
 Subject: [PATCH] drm: apple: iomfb: export property dicts in connector debugfs
@@ -28,7 +28,7 @@ index dde8fa879b3a..20796e2e5899 100644
  apple_dcp-y += iomfb_v12_3.o
  apple_dcp-y += iomfb_v13_3.o
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 900e509faa2f..8a995bea255e 100644
+index 52c34788e4b6..89fa7c7e1c66 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -296,6 +296,7 @@ static const struct drm_connector_funcs apple_connector_funcs = {
@@ -221,7 +221,7 @@ index 000000000000..5324b1b81f49
 +			       struct dcp_chunks *chunks);
 +#endif
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index 268bda8fa3bf..557d42c1d875 100644
+index dcbc3ee344dc..4f70df3834d5 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -8,6 +8,7 @@

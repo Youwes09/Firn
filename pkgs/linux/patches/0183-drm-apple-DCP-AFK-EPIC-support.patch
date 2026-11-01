@@ -1,4 +1,4 @@
-From fe3057e1089104c087396adad2b86d5de570564b Mon Sep 17 00:00:00 2001
+From 1fe9710e76b8bb8af19520cc902d612e3c728bd7 Mon Sep 17 00:00:00 2001
 From: Sven Peter <sven@svenpeter.dev>
 Date: Sun, 12 Feb 2023 15:51:58 +0100
 Subject: [PATCH] drm: apple: DCP AFK/EPIC support
@@ -1199,7 +1199,7 @@ index 90f09159257d..05a0459c1cec 100644
  enum dcp_firmware_version {
  	DCP_FIRMWARE_UNKNOWN,
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 7be710e8a3f5..0b5e8a793d0c 100644
+index 21618a5e325c..85e28912f42d 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -26,6 +26,7 @@

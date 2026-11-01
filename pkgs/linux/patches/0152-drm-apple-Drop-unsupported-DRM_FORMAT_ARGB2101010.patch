@@ -1,4 +1,4 @@
-From 83b6f3d18a7c173abf6e01574cfdcf636159ff50 Mon Sep 17 00:00:00 2001
+From 26b29d346d48f9fc0ecc0e533289413b1120b76f Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 23 Mar 2023 08:40:42 +0100
 Subject: [PATCH] drm/apple: Drop unsupported DRM_FORMAT_ARGB2101010
@@ -12,7 +12,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  2 files changed, 2 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 1fb2a70fd888..a6e65c8c5d48 100644
+index 584df868ef8c..782b5bbe6ef4 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -147,7 +147,6 @@ static const struct drm_plane_funcs apple_plane_funcs = {
@@ -24,7 +24,7 @@ index 1fb2a70fd888..a6e65c8c5d48 100644
  	DRM_FORMAT_ARGB8888,
  	DRM_FORMAT_XBGR8888,
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 48f9a80f76fc..0ce1e02309d8 100644
+index 96afa15a5d2e..443289d38346 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -412,7 +412,6 @@ u32 drm_format_to_dcp(u32 drm)

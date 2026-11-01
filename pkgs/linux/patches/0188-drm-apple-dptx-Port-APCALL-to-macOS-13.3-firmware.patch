@@ -1,4 +1,4 @@
-From 242c9e57e3c693d3b628b5406e8eef4ed860a84f Mon Sep 17 00:00:00 2001
+From 6dfd6d0ef6061ae52c8b05307b2dc9b29027ca1d Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 28 Apr 2023 22:24:59 +0200
 Subject: [PATCH] drm: apple: dptx: Port APCALL to macOS 13.3 firmware

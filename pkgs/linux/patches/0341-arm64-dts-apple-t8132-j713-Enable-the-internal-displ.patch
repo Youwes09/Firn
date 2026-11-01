@@ -1,0 +1,69 @@
+From db0bf0862b2ffc63a72993d9220ecc8cc560a15b Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 18 Aug 2026 05:57:36 -0400
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Enable the internal display
+
+The internal eDP panel is driven through the DP TX PHY, which DCP needs
+powered.
+
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+[Youwes09: from niklassheth/linux 877c574dfa4f and Gravity Linux's J713
+ panel node, its size and brightness checked against the J713]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 41 ++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 158a9f516999..cd00a8a59c16 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -46,6 +46,47 @@ &bluetooth0 {
+ 	brcm,board-type = "apple,garden";
+ };
+ 
++/*
++ * The internal eDP panel is driven through the DPTX PHY. Without it the
++ * panel stays dark, DPTX reports FIFO errors and DCP crashes on power-off
++ * touching the PHY registers.
++ */
++&dcp {
++	phys = <&dptxphy>;
++	phy-names = "dp-phy";
++	apple,dptx-phy = <4>;
++
++	status = "okay";
++
++	panel: panel {
++		compatible = "apple,panel-j713", "apple,panel";
++		/*
++		 * 2560x1664 pixels at 224 ppi, 1600 rows below the notch. The
++		 * backlight-marketing-table in the ADT tops out at 525 nits.
++		 */
++		width-mm = <290>;
++		height-mm = <189>;
++		adj-height-mm = <181>;
++		apple,max-brightness = <525>;
++	};
++};
++
++&dcp_dart {
++	status = "okay";
++};
++
++&dcp_mbox {
++	status = "okay";
++};
++
++&disp0_dart {
++	status = "okay";
++};
++
++&dptxphy {
++	status = "okay";
++};
++
+ &fpwm1 {
+ 	status = "okay";
+ };

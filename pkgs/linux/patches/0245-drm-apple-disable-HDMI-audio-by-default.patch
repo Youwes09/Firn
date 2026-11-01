@@ -1,4 +1,4 @@
-From cfb5463b8acfdffc4823ef42b97221f65d5a410b Mon Sep 17 00:00:00 2001
+From c2ca2acc1760b6c323d430a1adb71879fce738cb Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Wed, 8 May 2024 16:55:11 +0200
 Subject: [PATCH] drm: apple: disable HDMI audio by default
@@ -34,7 +34,7 @@ index 9266af803808..923f54212983 100644
  	/* squelch dma channel request errors, the driver will try again alter */
  	if (!chan) {
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index f81d05c47af1..f110ee6bf879 100644
+index 5536f7d5f6c3..4daa7a78bf18 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -46,9 +46,9 @@ static bool show_notch;

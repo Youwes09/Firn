@@ -1,4 +1,4 @@
-From 09bd184b895d3df93646ea0fe01bec55b1e914f9 Mon Sep 17 00:00:00 2001
+From 86ea9ad6ac4e022c9cc0b6254a84ba12af1a0981 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 20 Aug 2024 22:39:06 +0200
 Subject: [PATCH] drm: apple: iomfb: Provide the EDID as connector property
@@ -35,7 +35,7 @@ index 02f2d3904b09..ef2c23737aac 100644
  	struct work_struct hotplug_wq;
  
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 5c07a70c8a0a..020c53d9aa6a 100644
+index 6fbd42d21837..54d9673a007d 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -242,6 +242,8 @@ static void dcp_rtk_crashed(void *cookie, const void *crashlog, size_t crashlog_
@@ -48,7 +48,7 @@ index 5c07a70c8a0a..020c53d9aa6a 100644
  	}
  	complete(&dcp->start_done);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 2fadc9e614d5..52818d34ccf7 100644
+index 3bbb4cd05629..8fe348674410 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -16,6 +16,7 @@

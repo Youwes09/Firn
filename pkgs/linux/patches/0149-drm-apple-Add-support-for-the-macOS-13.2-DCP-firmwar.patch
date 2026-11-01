@@ -1,4 +1,4 @@
-From 97582502161bb72f81b5e36a9d2831b32e718bca Mon Sep 17 00:00:00 2001
+From 7802111886c7f5b3b36b217344d8c311d9722dbb Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Fri, 17 Feb 2023 23:17:10 +0100
 Subject: [PATCH] drm/apple: Add support for the macOS 13.2 DCP firmware
@@ -88,7 +88,7 @@ index 2e9c1fafba4d..e1cec2a9bbe3 100644
  	/* Current display mode */
  	bool valid_mode;
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 340103ec0797..a62b7aff16a5 100644
+index 8b2faaa238b4..c7c76ecbc491 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -403,6 +403,8 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
@@ -101,7 +101,7 @@ index 340103ec0797..a62b7aff16a5 100644
  	dev_err(dev, "DCP firmware-compat %s (FW: %s) is not supported\n",
  		compat_str, fw_str);
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 35904d8511d4..48f9a80f76fc 100644
+index 9ca237166b29..96afa15a5d2e 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
 @@ -1,20 +1,20 @@
@@ -1439,7 +1439,7 @@ index 35904d8511d4..48f9a80f76fc 100644
 -	}
 -}
  
- void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  {
  	struct platform_device *pdev = to_apple_crtc(crtc)->dcp;
  	struct apple_dcp *dcp = platform_get_drvdata(pdev);
@@ -1458,7 +1458,7 @@ index 35904d8511d4..48f9a80f76fc 100644
  
  	if (dcp_channel_busy(&dcp->ch_cmd))
  	{
-@@ -1611,191 +502,34 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -1611,191 +502,34 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  		return;
  	}
  

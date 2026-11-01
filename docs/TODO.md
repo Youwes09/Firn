@@ -135,9 +135,12 @@ Known problems with the shipped system are in [ISSUES.md](ISSUES.md).
       the notch; the ADT's `backlight-marketing-table` tops out at 525
       nits. The firmware sends no DisplayAttributes, so DRM reports
       these.
-- [ ] Display left out: Janne's 11 `fixup!` commits stay unsquashed, as
-      Asahi's tree carries them (they conflict with later commits when
-      moved onto their targets); Martin Povišer's ALSA exports stay for
+- [x] Janne's 11 `fixup!` commits: nine squashed into their targets; the
+      backlight fixup and Asahi's x86 Kconfig HACK are one commit
+      without the x86 change; the 13.2 flush fixup stays its own commit,
+      as the commits in between rework its lines. Every commit carries
+      a Signed-off-by.
+- [ ] Display left out: Martin Povišer's ALSA export (a HACK) stays for
       `DRM_APPLE_AUDIO`, which Firn does not build; DCP bindings. The
       26.6 callbacks D202 (unmap PIODMA) and D454 (release memory)
       that Gravity handles were never seen on the J713 (boot,
@@ -179,7 +182,37 @@ Known problems with the shipped system are in [ISSUES.md](ISSUES.md).
 - [ ] Generate the config with the toolchain the kernel is built with
       (`make-config.sh ... LLVM=1` for Firn's Nix build).
 
+## Workarounds to replace
+
+- [ ] `arm64.nowfxt`: WFIT in `__delay()` stops the M4 at EL2. Belongs in
+      an arm64 erratum keyed on the M4's MIDR.
+- [ ] `idle=nop`: a plain wfi loses the core's registers, so the
+      default idle path must not run. Make the arch idle path safe on
+      T8132 instead.
+- [ ] `maxcpus=10`: the devicetree has exactly 10 CPUs; likely
+      redundant. firn-boot still requires it.
+- [ ] AIC skips the EL2 FIQ masks on T8132; KVM guests get no timer
+      interrupts until the hang is understood.
+- [ ] PMC is kept always-on for PMP. The driver whose firmware touches
+      PMC should claim it as a power domain.
+- [ ] `firn-cpu-cap` caps the clocks for lack of thermal throttling;
+      replace with SMC thermal zones and cpufreq cooling.
+- [ ] A closed lid powers off, as sleep does not work.
+- [ ] `nvme_apple.flush_interval=0` follows an Omarchy report, not a
+      fault seen on this Air.
+- [ ] brcmfmac's escan timer is a flat 30 s; scale it with the channel
+      count instead.
+- [ ] DCP scanout buffers leave the direct map, which forces
+      `DRM_APPLE=y`; never tested without it now that DMA is coherent.
+- [ ] Janne's page flip timestamp HACK moves completion up to 1 ms
+      earlier, for half-rate refresh on external displays.
+
 ## For upstream
+
+- [ ] Tell Asahi: `RUST_APPLE_RTKIT` selected `APPLE_RTKIT` from a bool,
+      forcing RTKit built in with a modular mailbox (allmodconfig
+      reports it); here it depends on `APPLE_RTKIT=y` and PMP depends
+      on it, as the Rust phylib abstractions do.
 
 - [ ] Yureka Lilian's SMC and PCIe devicetree commits carry no
       Signed-off-by from her; ask her for one before posting them.
@@ -211,7 +244,9 @@ Known problems with the shipped system are in [ISSUES.md](ISSUES.md).
 - [ ] Yureka's T8132 USB nodes give dwc3_2 IRQ 387; the J773 ADT says
       1403. Tell Yureka or Gravity.
 - [ ] Niklas Sheth's tipd commits (cd321x data role, data connection
-      test, role release) carry no Signed-off-by from him.
+      test, role release) and his DPTX endpoint commit carry only
+      Firn's sign-off (clause (b)), as does Janne's "Warn only once
+      about failed calls" from Asahi.
 - [ ] Sasha's M3 ATC PHY commit and Alba's SPMI commits have checkpatch
       style issues (long lines, udelay, alignment) to tidy before posting.
 - [ ] Tell Asahi: Daniel Berlin's "Clean up and common interface

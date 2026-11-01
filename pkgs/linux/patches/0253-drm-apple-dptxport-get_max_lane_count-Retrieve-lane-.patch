@@ -1,4 +1,4 @@
-From 1e6c130741e483d4ba953c024dd0472cc97ac5fb Mon Sep 17 00:00:00 2001
+From f9e3764ad23b515a103143473e06dbf3a6946652 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 9 Jun 2024 22:01:59 +0200
 Subject: [PATCH] drm: apple: dptxport: get_max_lane_count: Retrieve lane count

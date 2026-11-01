@@ -1,4 +1,4 @@
-From d818fb6617ee7c93dd2a20bb2abf47b7818da645 Mon Sep 17 00:00:00 2001
+From 4085526595fbd2cf5de0710c3b82c80858a8f84f Mon Sep 17 00:00:00 2001
 From: Sven Peter <sven@svenpeter.dev>
 Date: Sat, 5 Nov 2022 13:15:34 +0100
 Subject: [PATCH] drm: apple: Add DPTX support
@@ -66,7 +66,7 @@ index 12f72293bc49..dde8fa879b3a 100644
  apple_dcp-y += iomfb_v13_3.o
  apple_dcp-$(CONFIG_TRACING) += trace.o
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 992facd17258..d54a0d4712c6 100644
+index e17c4d2129eb..0b2c3adfded9 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -315,7 +315,7 @@ static const struct drm_crtc_helper_funcs apple_crtc_helper_funcs = {
@@ -196,7 +196,7 @@ index 05a0459c1cec..b7b5c9dcc046 100644
  
  int dcp_backlight_register(struct apple_dcp *dcp);
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 0b5e8a793d0c..96dfb0a8a5c1 100644
+index 85e28912f42d..385db6494379 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -8,6 +8,7 @@
@@ -231,7 +231,7 @@ index 0b5e8a793d0c..96dfb0a8a5c1 100644
 +				 true);
  }
  
- int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
+ int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
 @@ -243,6 +253,66 @@ int dcp_get_connector_type(struct platform_device *pdev)
  }
  EXPORT_SYMBOL_GPL(dcp_get_connector_type);
@@ -540,7 +540,7 @@ index 0b5e8a793d0c..96dfb0a8a5c1 100644
  };
  MODULE_DEVICE_TABLE(of, of_match);
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index e472fad58c55..b502718a3df5 100644
+index 3658baccada2..05b605a5e1d7 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -68,4 +68,7 @@ void iomfb_shutdown(struct apple_dcp *dcp);

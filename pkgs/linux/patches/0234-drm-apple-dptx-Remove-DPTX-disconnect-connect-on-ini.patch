@@ -1,4 +1,4 @@
-From 80eb1e9b1ab6c0b0aeddb6556262574926d0e480 Mon Sep 17 00:00:00 2001
+From c169aa65796697c5a74d418594cdcc0b506f1170 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 14 Apr 2024 16:22:25 +0200
 Subject: [PATCH] drm: apple: dptx: Remove DPTX disconnect/connect on init
@@ -12,7 +12,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 12 insertions(+), 4 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index eecd46d8510a..d9fc0db51dba 100644
+index 94a6a5b950b5..2d4d45fb6f45 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -386,10 +386,17 @@ int dcp_start(struct platform_device *pdev)

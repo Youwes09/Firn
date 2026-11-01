@@ -1,4 +1,4 @@
-From 132683b4dd793d89978938f2effc4ae4443192d8 Mon Sep 17 00:00:00 2001
+From 4f805c6249b68e930bf62c55ec5548b7738a7ebc Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 30 Jul 2024 22:00:45 +0200
 Subject: [PATCH] drm: apple: Support up to 3 DCP instances.
@@ -9,7 +9,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 3b7947cebde1..a10ed4028148 100644
+index 35faa4bfde65..7b5026482b0f 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -46,7 +46,7 @@

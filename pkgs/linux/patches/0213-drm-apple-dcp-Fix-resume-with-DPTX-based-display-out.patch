@@ -1,4 +1,4 @@
-From 66775f0103e95d367e2cdcc84742ca5e7ed7fa61 Mon Sep 17 00:00:00 2001
+From 743b6f458b4cbb62290e7fb4ab5c5cbd78cb051e Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 28 Nov 2023 14:27:18 +0100
 Subject: [PATCH] drm: apple: dcp: Fix resume with DPTX based display outputs
@@ -9,7 +9,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 7 insertions(+)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index d233e4d9208d..52201834a0d5 100644
+index d05ef8fb0660..4a75ad332a2f 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -1034,6 +1034,13 @@ static int dcp_platform_resume(struct device *dev)

@@ -1,4 +1,4 @@
-From 270a102966a5633cf11acb6051f9d5b3fecd5450 Mon Sep 17 00:00:00 2001
+From 3f76c5ee1fa21ff6cce5e02e42ca96c1eb1adb46 Mon Sep 17 00:00:00 2001
 From: James Calligeros <jcalligeros99@gmail.com>
 Date: Tue, 14 May 2024 22:04:28 +1000
 Subject: [PATCH] drm: apple: use correct min/max plane scaling factors
@@ -12,7 +12,7 @@ Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 350da9e71e42..45bdc4340bf3 100644
+index 2695178aaf34..e2692f44db8e 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -118,8 +118,8 @@ static int apple_plane_atomic_check(struct drm_plane *plane,

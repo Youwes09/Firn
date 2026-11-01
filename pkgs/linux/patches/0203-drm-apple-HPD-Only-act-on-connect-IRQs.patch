@@ -1,4 +1,4 @@
-From 832633b0d0cc2f12257254019f6573be8bcd083c Mon Sep 17 00:00:00 2001
+From 38535bf3f0adc9c883f43f2e264d32aa89168f22 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Nov 2023 23:50:49 +0100
 Subject: [PATCH] drm: apple: HPD: Only act on connect IRQs
@@ -12,7 +12,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 7 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index ff4b90db75ee..22ff9fc97d1f 100644
+index bd02e756a8ba..ab0a4dc6fcc7 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -314,12 +314,16 @@ static irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)

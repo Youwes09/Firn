@@ -1,4 +1,4 @@
-From 38d83aeed8f4c964e21604a9c9fe88f07464cfc1 Mon Sep 17 00:00:00 2001
+From 5d81599cd7777c1a6bfa2fdecf010aa70cf3f842 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 12 May 2024 09:39:59 +0200
 Subject: [PATCH] drm: apple: Override drm_vblank's page flip event handling
@@ -46,7 +46,7 @@ index 379d6ff5dec6..0eb8227ef816 100644
  int dcp_backlight_update(struct apple_dcp *dcp);
  bool dcp_has_panel(struct apple_dcp *dcp);
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index f110ee6bf879..afa77fafe8fe 100644
+index 4daa7a78bf18..5acb1456b499 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -50,6 +50,76 @@ bool hdmi_audio;

@@ -1,4 +1,4 @@
-From afd526ef3b90cb938ba57b669014c8f4d57a67ce Mon Sep 17 00:00:00 2001
+From dfb3b34eae8b6f0a8a9c248e7027fa0aedeab929 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 15:04:35 +0200
 Subject: [PATCH] mux: apple dp crossbar: Support t8112 varient

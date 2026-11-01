@@ -1,4 +1,4 @@
-From 67e886807e21a3642b0c0536e21aad36d8b91080 Mon Sep 17 00:00:00 2001
+From 89857bb343f3ae99b513e6daa94bb3e0b4750110 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Tue, 21 Jan 2025 20:20:20 +0100
 Subject: [PATCH] drm: apple: dptx: Rework/document get_max_lane_count()

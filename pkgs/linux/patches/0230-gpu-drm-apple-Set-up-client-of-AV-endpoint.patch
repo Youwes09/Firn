@@ -1,4 +1,4 @@
-From 1669bdb7bd1b8909908189c3374699557547a3be Mon Sep 17 00:00:00 2001
+From 2bd8518a69facb985c55f9c6d9e89463bf9f53b3 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Martin=20Povi=C5=A1er?= <povik+lin@cutebit.org>
 Date: Mon, 13 Feb 2023 14:56:24 +0100
 Subject: [PATCH] gpu: drm: apple: Set up client of AV endpoint
@@ -401,7 +401,7 @@ index a3991aab78df..b8df2f5c6e02 100644
  
  	struct dptx_port dptxport[2];
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index cc19e2bc00f0..eecd46d8510a 100644
+index ed9d36d3faad..94a6a5b950b5 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -11,6 +11,7 @@
@@ -449,7 +449,7 @@ index cc19e2bc00f0..eecd46d8510a 100644
  		ret = ibootep_init(dcp);
  		if (ret)
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index 557d42c1d875..257439118f0c 100644
+index 4f70df3834d5..f10cf2db0950 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -60,4 +60,6 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message);

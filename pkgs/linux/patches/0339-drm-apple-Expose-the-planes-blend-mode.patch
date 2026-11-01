@@ -1,0 +1,64 @@
+From 95b617cb704daac76f7695cb1cd216939bcab703 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sat, 31 Oct 2026 13:29:49 -0500
+Subject: [PATCH] drm/apple: Expose the planes' blend mode
+
+The DRM core warns about planes that offer formats with alpha but no
+"pixel blend mode" property, since userspace can no longer assume
+pre-multiplied alpha without it. DCP takes pre-multiplied or
+non-pre-multiplied (coverage) alpha per surface, so expose both, with
+the core's default of pre-multiplied, and blend formats with alpha as
+the property asks. Formats without alpha keep their blending.
+
+Before this, formats with alpha were always blended as coverage, though
+userspace drew them pre-multiplied as DRM documented for drivers
+without the property.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/plane.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/plane.c b/drivers/gpu/drm/apple/plane.c
+index 4befd25e107a..ed327348f17c 100644
+--- a/drivers/gpu/drm/apple/plane.c
++++ b/drivers/gpu/drm/apple/plane.c
+@@ -9,6 +9,7 @@
+ 
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_atomic_helper.h>
++#include <drm/drm_blend.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_fb_dma_helper.h>
+ #include <drm/drm_framebuffer.h>
+@@ -234,6 +235,8 @@ static void apple_plane_atomic_update(struct drm_plane *plane,
+ 	    fmt->format == DRM_FORMAT_XBGR8888 ||
+ 	    fmt->format == DRM_FORMAT_XBGR2101010)
+ 		is_premultiplied = true;
++	else if (fmt->has_alpha)
++		is_premultiplied = base->pixel_blend_mode == DRM_MODE_BLEND_PREMULTI;
+ 
+ 	new_state->src_rect = drm_to_dcp_rect_fp(&base->src);
+ 	new_state->dst_rect = drm_to_dcp_rect(&base->dst);
+@@ -442,6 +445,7 @@ struct drm_plane *apple_plane_init(struct drm_device *dev,
+ 	struct apple_plane *plane;
+ 	const u32 *fmts;
+ 	u32 num_fmts;
++	int ret;
+ 
+ 	switch (type) {
+ 	case DRM_PLANE_TYPE_PRIMARY:
+@@ -482,6 +486,13 @@ struct drm_plane *apple_plane_init(struct drm_device *dev,
+ 					  DRM_COLOR_YCBCR_BT709,
+ 					  DRM_COLOR_YCBCR_LIMITED_RANGE);
+ 
++	/* Each surface is either pre-multiplied or blended as coverage. */
++	ret = drm_plane_create_blend_mode_property(&plane->base,
++						   BIT(DRM_MODE_BLEND_PREMULTI) |
++						   BIT(DRM_MODE_BLEND_COVERAGE));
++	if (ret)
++		return ERR_PTR(ret);
++
+ 	if (type == DRM_PLANE_TYPE_PRIMARY)
+ 		drm_plane_helper_add(&plane->base, &apple_primary_plane_helper_funcs);
+ 	else

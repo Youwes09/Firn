@@ -1,4 +1,4 @@
-From c43c5fdf6fec6120b5a287abccff8c361e5d5f5e Mon Sep 17 00:00:00 2001
+From 1babb88162695def409d816a1cb20ebc35169a7f Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 4 Aug 2024 18:46:04 +0200
 Subject: [PATCH] drm: apple: Call dptxport_set_hpd in dcp_dptx_connect
@@ -11,7 +11,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 11 insertions(+), 12 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 447168440596..b5e234d8599a 100644
+index 52da7ca71b3c..83db7dd8ee73 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -370,7 +370,7 @@ int dcp_get_connector_type(struct platform_device *pdev)

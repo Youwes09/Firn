@@ -1,4 +1,4 @@
-From c05ff978eea7ee27396512761d3c92bd47928fea Mon Sep 17 00:00:00 2001
+From 2b21811865ef6855a09ad4cdf2aad6bcb38ef9d5 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 15 Apr 2023 16:43:39 +0200
 Subject: [PATCH] drm/apple: Remove simpledrm framebuffer before DRM device
@@ -14,7 +14,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 8 insertions(+), 9 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 27fe7f04d684..140b7163d277 100644
+index 07bf33c244dd..78e7e9ca7464 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -469,6 +469,14 @@ static int apple_drm_init(struct device *dev)

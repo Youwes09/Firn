@@ -1,4 +1,4 @@
-From 12c0d8e43c9bbd562d46d5c111ee26671b3ac3e8 Mon Sep 17 00:00:00 2001
+From e6f80808d08ae5478fc6837816eb52d417fcf651 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 19 Nov 2023 18:07:41 +0100
 Subject: [PATCH] drm: apple: Implement D592 callback

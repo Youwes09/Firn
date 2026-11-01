@@ -1,4 +1,4 @@
-From 886f3c3a05aa6dcfa3c94bda474408c018ff3391 Mon Sep 17 00:00:00 2001
+From 5e74331650ff8082e2decff380d902e8fcab1e74 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 9 Jun 2024 21:49:43 +0200
 Subject: [PATCH] drm: apple: dptx: Fix get_drive_settings retcode

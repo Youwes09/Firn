@@ -1,4 +1,4 @@
-From 417d063badfce7f1ebd0a61d5f6d3d5210c4cb8e Mon Sep 17 00:00:00 2001
+From 7c99e798d9d44f7fa390e253e9484f68821c96f7 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 27 Jan 2025 22:47:06 +0100
 Subject: [PATCH] drm: apple: iomfb: Adapt `IOMFB_METHOD` for gcc 15

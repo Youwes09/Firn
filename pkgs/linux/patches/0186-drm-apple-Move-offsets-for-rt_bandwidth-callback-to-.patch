@@ -1,4 +1,4 @@
-From ac2bf59f1dd7de0b6999204b9093e41ac59fab46 Mon Sep 17 00:00:00 2001
+From bd6380c25469954d9ed71a7bb044cbfc53a9b0c8 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 12 Nov 2023 10:06:45 +0100
 Subject: [PATCH] drm: apple: Move offsets for rt_bandwidth callback to DT
@@ -44,7 +44,7 @@ index b7b5c9dcc046..d7ffb8146e42 100644
  
  	/* Bitmap of memory descriptors used for mappings made by the DCP */
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 96dfb0a8a5c1..09f9bda27500 100644
+index 385db6494379..d2850bc9691f 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -13,6 +13,7 @@

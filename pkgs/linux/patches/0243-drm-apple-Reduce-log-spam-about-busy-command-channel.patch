@@ -1,4 +1,4 @@
-From e8f5ee3b6d3ebe349736afaeebb7c340198fdef5 Mon Sep 17 00:00:00 2001
+From 1b4be1a9a39f12e7a19b71b5842d20c09e21277b Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 4 May 2024 13:23:03 +0200
 Subject: [PATCH] drm: apple: Reduce log spam about busy command channel
@@ -26,10 +26,10 @@ index c1d6da9a433d..379d6ff5dec6 100644
  
  struct dcp_fb_reference {
 diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
-index 788d63d90e37..2fadc9e614d5 100644
+index f2bea4ecad3a..3bbb4cd05629 100644
 --- a/drivers/gpu/drm/apple/iomfb.c
 +++ b/drivers/gpu/drm/apple/iomfb.c
-@@ -482,12 +482,17 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_state *state)
+@@ -482,12 +482,17 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
  
  	if (dcp_channel_busy(&dcp->ch_cmd))
  	{

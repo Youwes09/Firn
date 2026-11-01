@@ -1,4 +1,4 @@
-From 33f8e96ffd5312b953def3f37bd6adacf0ccc239 Mon Sep 17 00:00:00 2001
+From 2c3c7b04bd57ffe5ea38ff1bf157f47bd12d127d Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 22 Jul 2024 20:26:55 +0200
 Subject: [PATCH] drm: apple: Add CRTC CRC support
@@ -12,12 +12,12 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  drivers/gpu/drm/apple/apple_drv.c      | 57 ++++++++++++++++++++++++++
  drivers/gpu/drm/apple/dcp-internal.h   |  3 ++
  drivers/gpu/drm/apple/dcp.c            | 11 +++++
- drivers/gpu/drm/apple/dcp.h            |  1 +
+ drivers/gpu/drm/apple/dcp.h            |  3 +-
  drivers/gpu/drm/apple/iomfb_template.c |  4 ++
- 5 files changed, 76 insertions(+)
+ 5 files changed, 77 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 613856d0af58..8d36c579b90f 100644
+index d6d985e54587..a783f814d8ce 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -261,6 +261,59 @@ static void apple_crtc_cleanup(struct drm_crtc *crtc)
@@ -106,7 +106,7 @@ index d678a1965b5f..793d32dafe84 100644
  	struct dcp_display_mode *modes;
  	unsigned int nr_modes;
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index 2ffc376dc6a3..447168440596 100644
+index f96a586a7318..52da7ca71b3c 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -191,6 +191,17 @@ bool dcp_has_panel(struct apple_dcp *dcp)
@@ -128,17 +128,19 @@ index 2ffc376dc6a3..447168440596 100644
   * Helper to send a DRM vblank event. We do not know how call swap_submit_dcp
   * without surfaces. To avoid timeouts in drm_atomic_helper_wait_for_vblanks
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index b1a151140c90..0505032abe54 100644
+index 0914483ae25f..ab19b1d47239 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
-@@ -31,6 +31,7 @@ struct apple_encoder {
+@@ -31,7 +31,8 @@ struct apple_encoder {
  
  void dcp_poweroff(struct platform_device *pdev);
  void dcp_poweron(struct platform_device *pdev);
+-int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state);
 +int dcp_set_crc(struct drm_crtc *crtc, bool enabled);
- int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state);
++int dcp_crtc_atomic_check(struct drm_crtc *crtc, struct drm_atomic_commit *commit);
  int dcp_get_connector_type(struct platform_device *pdev);
  void dcp_link(struct platform_device *pdev, struct apple_crtc *apple,
+ 	      struct apple_connector *connector);
 diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
 index bd110ed1b12b..ae616a05aa58 100644
 --- a/drivers/gpu/drm/apple/iomfb_template.c

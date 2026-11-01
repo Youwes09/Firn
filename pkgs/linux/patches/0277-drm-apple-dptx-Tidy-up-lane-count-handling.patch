@@ -1,4 +1,4 @@
-From 9edeb12abc7602cc088fded93350c196af33c6c1 Mon Sep 17 00:00:00 2001
+From 93fbf69f1ac8f39e2db622cf4aad3d08ee0138ef Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Thu, 16 Jan 2025 23:23:15 +0100
 Subject: [PATCH] drm: apple: dptx: Tidy up lane count handling

@@ -1,0 +1,26 @@
+From 5747297d59cfc7112df5ba8cb9f7cccefe18cec3 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Tue, 6 Jan 2026 22:47:35 +0100
+Subject: [PATCH] drm/apple: Add device link between display-subsystem and each
+ dcp*
+
+Fixes resume/suspend order between both devices.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index 910982a5c800..c71ad956922d 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -402,6 +402,8 @@ static int apple_drm_init_dcp(struct device *dev)
+ 		if (!dcp[num_dcp])
+ 			continue;
+ 
++		device_link_add(dev, &dcp[num_dcp]->dev, DL_FLAG_AUTOREMOVE_SUPPLIER);
++
+ 		ret = apple_probe_per_dcp(dev, &apple->drm, dcp[num_dcp],
+ 					  num_dcp, dcp_ext);
+ 		if (ret)

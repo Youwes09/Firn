@@ -1,4 +1,4 @@
-From d4aba960a913b84d4539e8b52db0ac5568ab7976 Mon Sep 17 00:00:00 2001
+From af0fc5e3bde3fba52517bf7bb8eb0d57bc783849 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Fri, 17 Nov 2023 00:03:36 +0900
 Subject: [PATCH] drm: apple: dptxep: Fix reply size check

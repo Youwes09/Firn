@@ -1,4 +1,4 @@
-From 0aaeeb52210952d83a350c0e3fcdb43efe5497a9 Mon Sep 17 00:00:00 2001
+From 477e2bfbc5a394ad5135ac47e81b5623783779a0 Mon Sep 17 00:00:00 2001
 From: Hector Martin <marcan@marcan.st>
 Date: Tue, 11 Apr 2023 22:54:28 +0900
 Subject: [PATCH] dcp: 42-bit DMA masks
@@ -11,7 +11,7 @@ Signed-off-by: Hector Martin <marcan@marcan.st>
  3 files changed, 3 insertions(+), 3 deletions(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index a6e65c8c5d48..27fe7f04d684 100644
+index 782b5bbe6ef4..07bf33c244dd 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -461,7 +461,7 @@ static int apple_drm_init(struct device *dev)
@@ -24,7 +24,7 @@ index a6e65c8c5d48..27fe7f04d684 100644
  		return ret;
  
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index a62b7aff16a5..8655bdf70e24 100644
+index c7c76ecbc491..0a35f8895daa 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -419,7 +419,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)

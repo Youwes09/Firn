@@ -1,4 +1,4 @@
-From 97d6b071217b3b8b79747769d226ed3d9dab1653 Mon Sep 17 00:00:00 2001
+From 2751657ff4463f881cf7d9894d5af7f63252a2ca Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 19 Nov 2023 18:25:22 +0100
 Subject: [PATCH] drm: apple: Keep information at which swap_id fb are still

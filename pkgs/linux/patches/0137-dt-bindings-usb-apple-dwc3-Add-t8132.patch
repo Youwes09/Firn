@@ -1,4 +1,4 @@
-From 5554fd945e731e88bc12607f8ceef8c71c59ba1c Mon Sep 17 00:00:00 2001
+From fe79a489d48258935ffe007c678977c746cb3fc5 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 21:19:11 -0500
 Subject: [PATCH] dt-bindings: usb: apple,dwc3: Add t8132

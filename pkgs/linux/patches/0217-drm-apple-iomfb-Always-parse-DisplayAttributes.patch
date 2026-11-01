@@ -1,4 +1,4 @@
-From d0fff5c20eb3befacd396d0a4fe477a7a8fa87cd Mon Sep 17 00:00:00 2001
+From e3599683bdd2dee41cb83a511b8a1022e3a83a60 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Mon, 4 Dec 2023 23:27:29 +0100
 Subject: [PATCH] drm: apple: iomfb: Always parse DisplayAttributes

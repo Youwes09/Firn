@@ -1,4 +1,4 @@
-From b454df0b2b5ec02ce5a511556567cf0d1ffaab37 Mon Sep 17 00:00:00 2001
+From c01bfed313bace39901c81d5330a3ef68f02aad5 Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sun, 30 Apr 2023 16:36:33 +0200
 Subject: [PATCH] drm: apple: iomfb: Increase modeset timeout to 2.5 seconds

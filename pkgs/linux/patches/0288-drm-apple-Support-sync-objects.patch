@@ -1,4 +1,4 @@
-From a2d1c933526583e4239d4b4c6f2abaf8727f75e1 Mon Sep 17 00:00:00 2001
+From a9ef34bdb7f4497163dbe7ad8872845126e54b4b Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 26 Jul 2025 15:44:57 +0200
 Subject: [PATCH] drm: apple: Support sync objects
@@ -18,7 +18,7 @@ Signed-off-by: Janne Grunau <j@jannau.net>
  1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index e5e8496c9850..ab17a53cd2c7 100644
+index 06073defdc3e..68a3a234b552 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
 @@ -73,7 +73,7 @@ static const struct drm_driver apple_drm_driver = {

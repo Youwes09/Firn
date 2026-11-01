@@ -1,4 +1,4 @@
-From 55b109f571cc19b4a9074f10e830ecaeb2b832a1 Mon Sep 17 00:00:00 2001
+From 514ce80177df08bfa30323dac8c1e2a7f2bf71df Mon Sep 17 00:00:00 2001
 From: Janne Grunau <j@jannau.net>
 Date: Sat, 20 Apr 2024 21:06:19 +0200
 Subject: [PATCH] drm: apple: audio: move the audio driver into the DCP module
@@ -60,7 +60,7 @@ index 223b03373221..e997a6deae7b 100644
 -MODULE_LICENSE("GPL");
 -MODULE_ALIAS("platform:" DRV_NAME);
 diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
-index b4d6834f1da9..f81d05c47af1 100644
+index d9e35622f2f3..5536f7d5f6c3 100644
 --- a/drivers/gpu/drm/apple/dcp.c
 +++ b/drivers/gpu/drm/apple/dcp.c
 @@ -1131,7 +1131,27 @@ static struct platform_driver apple_platform_driver = {
@@ -93,7 +93,7 @@ index b4d6834f1da9..f81d05c47af1 100644
  MODULE_AUTHOR("Asahi Linux contributors");
  MODULE_DESCRIPTION("Apple Display Controller DRM driver");
 diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
-index 257439118f0c..866a1a87d3fd 100644
+index f10cf2db0950..2720bee9f53f 100644
 --- a/drivers/gpu/drm/apple/dcp.h
 +++ b/drivers/gpu/drm/apple/dcp.h
 @@ -62,4 +62,8 @@ int dptxep_init(struct apple_dcp *dcp);

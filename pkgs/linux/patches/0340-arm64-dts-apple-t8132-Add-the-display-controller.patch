@@ -1,0 +1,170 @@
+From 388c2a5362b0a5e569c247bd89b1c0129fec54e8 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 18 Aug 2026 05:57:36 -0400
+Subject: [PATCH] arm64: dts: apple: t8132: Add the display controller
+
+Add DCP with its DARTs, mailbox and DP TX PHY, and the display
+subsystem. m1n1 finds them through the dcp, disp0 and disp0_piodma
+aliases to map the boot framebuffer and DCP's firmware memory.
+
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+[Youwes09: devicetree part of niklassheth/linux 877c574dfa4f, internal
+ display only; the DMA window in the five-cell DART specifier; T8132
+ mailbox compatible; no dma-noncoherent, as CLIDR_EL1.LoC == 0 makes
+ all DMA coherent; address order and style]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-jxxx.dtsi |  3 +
+ arch/arm64/boot/dts/apple/t8132.dtsi      | 96 +++++++++++++++++++++++
+ 2 files changed, 99 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi b/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
+index d32e1d5b181c..a0f33b57fb9f 100644
+--- a/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
+@@ -16,6 +16,9 @@ aliases {
+ 		atcphy2 = &atcphy2;
+ 		atcphy3 = &atcphy3;
+ 		bluetooth0 = &bluetooth0;
++		dcp = &dcp;
++		disp0 = &display;
++		disp0_piodma = &disp0_piodma;
+ 		serial0 = &serial0;
+ 		wifi0 = &wifi0;
+ 	};
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 606acc8aa1c4..ec2ff1f0dc62 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -358,6 +358,13 @@ opp20 {
+ 		};
+ 	};
+ 
++	clk_disp0: clock-disp0 {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <300000000>;
++		clock-output-names = "disp0";
++	};
++
+ 	clkref: clock-ref {
+ 		compatible = "fixed-clock";
+ 		#clock-cells = <0>;
+@@ -365,6 +372,11 @@ clkref: clock-ref {
+ 		clock-output-names = "clkref";
+ 	};
+ 
++	display: display-subsystem {
++		compatible = "apple,display-subsystem";
++		iommus = <&disp0_dart 0 0x100 0x0 0x10 0x0>;
++	};
++
+ 	soc: soc {
+ 		compatible = "simple-bus";
+ 		#address-cells = <2>;
+@@ -387,6 +399,72 @@ cpufreq_p: cpufreq@211e20000 {
+ 			#performance-domain-cells = <0>;
+ 		};
+ 
++		disp0_dart: iommu@30a300000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x3 0x0a300000 0x0 0xc000>;
++			#iommu-cells = <5>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 678 IRQ_TYPE_LEVEL_HIGH>;
++
++			status = "disabled";
++		};
++
++		dcp_dart: iommu@30a340000 {
++			compatible = "apple,t8132-dart", "apple,t8110-dart";
++			reg = <0x3 0x0a340000 0x0 0x20000>;
++			#iommu-cells = <5>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 678 IRQ_TYPE_LEVEL_HIGH>;
++
++			status = "disabled";
++		};
++
++		dcp: dcp@30ae00000 {
++			compatible = "apple,t8132-dcp", "apple,dcp";
++			reg = <0x3 0x0ae00000 0x0 0x4000>,
++			      <0x3 0x08000000 0x0 0xc20000>,
++			      <0x3 0x0a240000 0x0 0x10000>,
++			      <0x3 0x0a3a8000 0x0 0x4000>,
++			      <0x3 0x0a800000 0x0 0x800000>;
++			reg-names = "coproc", "disp-0", "disp-1", "disp-2", "disp-3";
++			#address-cells = <2>;
++			#size-cells = <2>;
++			clocks = <&clk_disp0>;
++			iommus = <&dcp_dart 23 0x100 0x0 0x10 0x0>;
++			mboxes = <&dcp_mbox>;
++			mbox-names = "mbox";
++			apple,bw-scratch = <&pmgr_dcp 0 4 0x20000>;
++			/*
++			 * macOS uses surface 2 for video. The hardware composites
++			 * 2 < 0 < 1 < 3 and takes at most three active layers.
++			 */
++			apple,iomfb-surfaces = <1 1 1 1>;
++			apple,iomfb-surface-order = <2 0 1 3>;
++			apple,iomfb-primary-surface = <0>;
++			apple,iomfb-max-layers = <3>;
++
++			status = "disabled";
++
++			disp0_piodma: piodma {
++				iommus = <&disp0_dart 16 0x100 0x0 0x10 0x0>;
++			};
++		};
++
++		dcp_mbox: mbox@30ae08000 {
++			compatible = "apple,t8132-asc-mailbox", "apple,asc-mailbox-v4";
++			reg = <0x3 0x0ae08000 0x0 0x4000>;
++			#mbox-cells = <0>;
++			interrupt-parent = <&aic>;
++			interrupts = <AIC_IRQ 653 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 654 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 655 IRQ_TYPE_LEVEL_HIGH>,
++				     <AIC_IRQ 656 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "send-empty", "send-not-empty",
++					  "recv-empty", "recv-not-empty";
++
++			status = "disabled";
++		};
++
+ 		pmp_dart: iommu@380300000 {
+ 			compatible = "apple,t8132-dart", "apple,t8110-dart";
+ 			reg = <0x3 0x80300000 0x0 0xc000>;
+@@ -619,6 +697,12 @@ p-core-pmu-affinity {
+ 			};
+ 		};
+ 
++		pmgr_dcp: power-management@382800000 {
++			reg = <0x3 0x82800000 0x0 0xbc000>;
++			reg-names = "dcp-fw-pmgr";
++			#apple,bw-scratch-cells = <3>;
++		};
++
+ 		pinctrl_nub: pinctrl@3881f0000 {
+ 			compatible = "apple,t8132-pinctrl", "apple,t8103-pinctrl";
+ 			reg = <0x3 0x881f0000 0x0 0x4000>;
+@@ -942,6 +1026,18 @@ pcie_pins: pcie-pins {
+ 			};
+ 		};
+ 
++		dptxphy: phy@39a700000 {
++			compatible = "apple,t8122-dptx-phy", "apple,dptx-phy";
++			reg = <0x3 0x9a700000 0x0 0x4000>,
++			      <0x3 0x9a740000 0x0 0x10000>;
++			reg-names = "core", "dptx";
++			#phy-cells = <0>;
++			#reset-cells = <0>;
++			power-domains = <&ps_dptx_phy>;
++
++			status = "disabled";
++		};
++
+ 		i2c0: i2c@3ad010000 {
+ 			compatible = "apple,t8132-i2c", "apple,t8103-i2c";
+ 			reg = <0x3 0xad010000 0x0 0x4000>;
