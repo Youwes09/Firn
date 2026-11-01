@@ -7,11 +7,14 @@ Assisted-by: Codex:gpt-5.6-sol
 Signed-off-by: Niklas Sheth <hi@niklassheth.com>
 (split from commit 877c574dfa4f31434129b05da6d907abfb21bbef: dcp changes only)
 [Niklas: v7.3 renamed the atomic_check argument to "commit"]
+[Youwes09: without the scanout buffers' direct map removal and the no-map
+ scanout pool; T8132 DMA is coherent and no devicetree describes the pool]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/gpu/drm/apple/Makefile          |   1 +
  drivers/gpu/drm/apple/afk.c             | 716 ++++++++++++++++++++++-
  drivers/gpu/drm/apple/afk.h             |  49 +-
- drivers/gpu/drm/apple/apple_drv.c       | 387 ++++++++++++-
+ drivers/gpu/drm/apple/apple_drv.c       |  81 ++-
  drivers/gpu/drm/apple/av.c              |   1 +
  drivers/gpu/drm/apple/connector.c       | 136 +++++
  drivers/gpu/drm/apple/dcp-internal.h    |  38 ++
@@ -31,7 +34,7 @@ Signed-off-by: Niklas Sheth <hi@niklassheth.com>
  drivers/gpu/drm/apple/parser.c          |  21 +-
  drivers/gpu/drm/apple/parser.h          |   2 +
  drivers/gpu/drm/apple/plane.c           |   3 +
- 23 files changed, 3070 insertions(+), 183 deletions(-)
+ 23 files changed, 2767 insertions(+), 180 deletions(-)
  create mode 100644 drivers/gpu/drm/apple/iomfb_v26_6.c
  create mode 100644 drivers/gpu/drm/apple/iomfb_v26_6.h
 
@@ -1085,301 +1088,10 @@ index a339c00a2a01..4582513dd66e 100644
 +			    unsigned long timeout);
  #endif
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index d8386f3e1f54..028c45201169 100644
+index d8386f3e1f54..630ba467868b 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
-@@ -10,13 +10,21 @@
- #include <linux/aperture.h>
- #include <linux/component.h>
- #include <linux/delay.h>
-+#include <linux/dma-direct.h>
- #include <linux/dma-mapping.h>
- #include <linux/jiffies.h>
-+#include <linux/mm.h>
- #include <linux/module.h>
- #include <linux/of_address.h>
- #include <linux/of_device.h>
- #include <linux/of_graph.h>
- #include <linux/of_platform.h>
-+#include <linux/of_reserved_mem.h>
-+#include <linux/set_memory.h>
-+#include <linux/scatterlist.h>
-+
-+#include <asm/cacheflush.h>
-+#include <asm/tlbflush.h>
- 
- #include <drm/drm_atomic.h>
- #include <drm/drm_atomic_helper.h>
-@@ -34,6 +42,7 @@
- #include <drm/drm_modeset_helper.h>
- #include <drm/drm_module.h>
- #include <drm/drm_of.h>
-+#include <drm/drm_print.h>
- #include <drm/drm_probe_helper.h>
- #include <drm/drm_vblank.h>
- #include <drm/drm_fixed.h>
-@@ -48,25 +57,258 @@
- 
- struct apple_drm_private {
- 	struct drm_device drm;
-+	struct resource scanout_pool;
-+	bool scanout_pool_attached;
-+};
-+
-+struct apple_drm_gem_object {
-+	struct drm_gem_dma_object dma;
-+	struct sg_table *scanout_sgt;
-+	dma_addr_t pool_dma_addr;
-+	bool pool_fixed_iova;
- };
- 
-+static void apple_drm_gem_restore_direct_map(struct apple_drm_gem_object *obj)
-+{
-+	struct scatterlist *sg;
-+	unsigned int i;
-+
-+	if (!obj->scanout_sgt)
-+		return;
-+
-+	for_each_sg(obj->scanout_sgt->sgl, sg,
-+		    obj->scanout_sgt->orig_nents, i) {
-+		struct page *page = sg_page(sg);
-+		unsigned int nr_pages = PAGE_ALIGN(sg->offset + sg->length) >> PAGE_SHIFT;
-+		unsigned int j;
-+
-+		for (j = 0; j < nr_pages; j++)
-+			set_direct_map_default_noflush(page + j);
-+	}
-+
-+	flush_tlb_all();
-+	sg_free_table(obj->scanout_sgt);
-+	kfree(obj->scanout_sgt);
-+	obj->scanout_sgt = NULL;
-+}
-+
-+static void apple_drm_gem_free(struct drm_gem_object *gem_obj)
-+{
-+	struct apple_drm_gem_object *obj =
-+		container_of(to_drm_gem_dma_obj(gem_obj),
-+			     struct apple_drm_gem_object, dma);
-+
-+	if (obj->pool_fixed_iova) {
-+		obj->dma.dma_addr = obj->pool_dma_addr;
-+		obj->pool_fixed_iova = false;
-+	}
-+
-+	apple_drm_gem_restore_direct_map(obj);
-+	drm_gem_dma_free(&obj->dma);
-+}
-+
-+static void apple_drm_gem_print_info(struct drm_printer *p,
-+				     unsigned int indent,
-+				     const struct drm_gem_object *gem_obj)
-+{
-+	const struct apple_drm_gem_object *obj =
-+		container_of(to_drm_gem_dma_obj(gem_obj),
-+			     struct apple_drm_gem_object, dma);
-+	phys_addr_t run_start = 0, run_end = 0;
-+	struct scatterlist *sg;
-+	unsigned int i;
-+
-+	drm_gem_dma_object_print_info(p, indent, gem_obj);
-+	if (!obj->scanout_sgt)
-+		return;
-+
-+	drm_printf_indent(p, indent, "scanout physical backing:\n");
-+	for_each_sg(obj->scanout_sgt->sgl, sg,
-+		    obj->scanout_sgt->orig_nents, i) {
-+		phys_addr_t start = sg_phys(sg);
-+		phys_addr_t end = start + sg->length;
-+
-+		if (!run_end) {
-+			run_start = start;
-+			run_end = end;
-+			continue;
-+		}
-+		if (start == run_end) {
-+			run_end = end;
-+			continue;
-+		}
-+
-+		drm_printf_indent(p, indent + 1, "%pa..%pa (%pa bytes)\n",
-+				  &run_start, &run_end,
-+				  &(phys_addr_t){ run_end - run_start });
-+		run_start = start;
-+		run_end = end;
-+	}
-+	if (run_end)
-+		drm_printf_indent(p, indent + 1, "%pa..%pa (%pa bytes)\n",
-+				  &run_start, &run_end,
-+				  &(phys_addr_t){ run_end - run_start });
-+}
-+
-+static const struct drm_gem_object_funcs apple_drm_gem_funcs = {
-+	.free = apple_drm_gem_free,
-+	.print_info = apple_drm_gem_print_info,
-+	.get_sg_table = drm_gem_dma_object_get_sg_table,
-+	.vmap = drm_gem_dma_object_vmap,
-+	.mmap = drm_gem_dma_object_mmap,
-+	.vm_ops = &drm_gem_dma_vm_ops,
-+};
-+
-+static struct drm_gem_object *
-+apple_drm_gem_create_object(struct drm_device *drm, size_t size)
-+{
-+	struct apple_drm_gem_object *obj;
-+
-+	obj = kzalloc_obj(*obj);
-+	if (!obj)
-+		return ERR_PTR(-ENOMEM);
-+
-+	obj->dma.base.funcs = &apple_drm_gem_funcs;
-+	return &obj->dma.base;
-+}
-+
-+static int apple_drm_gem_remove_direct_map(struct drm_gem_dma_object *dma_obj)
-+{
-+	struct apple_drm_gem_object *obj =
-+		container_of(dma_obj, struct apple_drm_gem_object, dma);
-+	struct scatterlist *sg;
-+	unsigned int i;
-+	int ret = 0;
-+
-+	if (!can_set_direct_map())
-+		return -EOPNOTSUPP;
-+
-+	obj->scanout_sgt = drm_gem_dma_get_sg_table(dma_obj);
-+	if (IS_ERR(obj->scanout_sgt)) {
-+		ret = PTR_ERR(obj->scanout_sgt);
-+		obj->scanout_sgt = NULL;
-+		return ret;
-+	}
-+
-+	for_each_sg(obj->scanout_sgt->sgl, sg,
-+		    obj->scanout_sgt->orig_nents, i) {
-+		struct page *page = sg_page(sg);
-+		unsigned int nr_pages = PAGE_ALIGN(sg->offset + sg->length) >> PAGE_SHIFT;
-+		unsigned int j;
-+
-+		for (j = 0; j < nr_pages; j++) {
-+			unsigned long start = (unsigned long)page_address(page + j);
-+
-+			/* dma_alloc_wc() cleans the allocator's WB alias, but a clean
-+			 * can leave an AMCC cache-directory entry behind.  DCP scanout
-+			 * is realtime, so retire the entry before removing that alias. */
-+			dcache_clean_inval_poc(start, start + PAGE_SIZE);
-+			ret = set_direct_map_invalid_noflush(page + j);
-+			if (ret)
-+				goto err_restore;
-+		}
-+	}
-+
-+	flush_tlb_all();
-+	return 0;
-+
-+err_restore:
-+	apple_drm_gem_restore_direct_map(obj);
-+	return ret;
-+}
-+
-+static int apple_drm_gem_map_nomap_pool(struct drm_gem_dma_object *dma_obj)
-+{
-+	struct apple_drm_gem_object *obj =
-+		container_of(dma_obj, struct apple_drm_gem_object, dma);
-+	struct apple_drm_private *apple =
-+		container_of(dma_obj->base.dev, struct apple_drm_private, drm);
-+	struct device *dev = dma_obj->base.dev->dev;
-+	dma_addr_t pool_dma = dma_obj->dma_addr;
-+	phys_addr_t phys = dma_to_phys(dev, pool_dma);
-+	dma_addr_t iova;
-+	u64 iova_base;
-+	resource_size_t size = dma_obj->base.size;
-+
-+	if (!apple->scanout_pool_attached ||
-+	    phys < apple->scanout_pool.start ||
-+	    size > resource_size(&apple->scanout_pool) ||
-+	    phys - apple->scanout_pool.start >
-+		resource_size(&apple->scanout_pool) - size) {
-+		dev_err(dev,
-+			"scanout allocation %pa+%pa is outside no-map pool %pr\n",
-+			&phys, &size, &apple->scanout_pool);
-+		return -ERANGE;
-+	}
-+
-+	if (of_property_read_u64(dev->of_node, "apple,scanout-iova-base",
-+				 &iova_base))
-+		return -EINVAL;
-+
-+	/* m1n1 installs this entire mapping before Linux and leaves the locked
-+	 * realtime DART hierarchy untouched. Selecting a buffer is therefore an
-+	 * offset calculation, not a Linux page-table update. */
-+	iova = iova_base + (phys - apple->scanout_pool.start);
-+
-+	obj->pool_dma_addr = pool_dma;
-+	obj->pool_fixed_iova = true;
-+	dma_obj->dma_addr = iova;
-+	dev_info(dev, "pre-mapped no-map scanout buffer: phys %pa -> iova %pad (%zu bytes)\n",
-+		 &phys, &iova, dma_obj->base.size);
-+	return 0;
-+}
-+
- DEFINE_DRM_GEM_DMA_FOPS(apple_fops);
- 
- #define DART_PAGE_SIZE 16384
- 
-+static struct drm_gem_dma_object *
-+apple_drm_gem_create_scanout(struct drm_device *drm, size_t size)
-+{
-+	struct drm_gem_dma_object *dma_obj;
-+	int ret;
-+
-+	dma_obj = drm_gem_dma_create(drm, round_up(size, DART_PAGE_SIZE));
-+	if (IS_ERR(dma_obj))
-+		return dma_obj;
-+
-+	if (of_property_read_bool(drm->dev->of_node,
-+				  "apple,scanout-memory-is-nomap"))
-+		ret = apple_drm_gem_map_nomap_pool(dma_obj);
-+	else
-+		ret = apple_drm_gem_remove_direct_map(dma_obj);
-+	if (ret) {
-+		drm_gem_object_put(&dma_obj->base);
-+		return ERR_PTR(ret);
-+	}
-+
-+	return dma_obj;
-+}
-+
- static int apple_drm_gem_dumb_create(struct drm_file *file_priv,
-                             struct drm_device *drm,
-                             struct drm_mode_create_dumb *args)
- {
-+	struct drm_gem_dma_object *dma_obj;
-+	int ret;
-+
-         args->pitch = ALIGN(DIV_ROUND_UP(args->width * args->bpp, 8), 64);
-         args->size = round_up(args->pitch * args->height, DART_PAGE_SIZE);
- 
--	return drm_gem_dma_dumb_create_internal(file_priv, drm, args);
-+	dma_obj = apple_drm_gem_create_scanout(drm, args->size);
-+	if (IS_ERR(dma_obj))
-+		return PTR_ERR(dma_obj);
-+
-+	ret = drm_gem_handle_create(file_priv, &dma_obj->base, &args->handle);
-+
-+	drm_gem_object_put(&dma_obj->base);
-+	return ret;
- }
- 
- static const struct drm_driver apple_drm_driver = {
--	DRM_GEM_DMA_DRIVER_OPS_WITH_DUMB_CREATE(apple_drm_gem_dumb_create),
-+	DRM_GEM_DMA_DRIVER_OPS_VMAP_WITH_DUMB_CREATE(apple_drm_gem_dumb_create),
- 	DRM_FBDEV_DMA_DRIVER_OPS,
-+	.gem_create_object	= apple_drm_gem_create_object,
- 	.name			= DRIVER_NAME,
- 	.desc			= DRIVER_DESC,
- 	.major			= 1,
-@@ -272,36 +514,79 @@ static int apple_probe_per_dcp(struct device *dev,
+@@ -272,36 +272,79 @@ static int apple_probe_per_dcp(struct device *dev,
  	struct apple_crtc *crtc;
  	struct apple_connector *connector;
  	struct apple_encoder *enc;
@@ -1471,43 +1183,7 @@ index d8386f3e1f54..028c45201169 100644
  					&apple_crtc_funcs, NULL);
  	if (ret)
  		return ret;
-@@ -373,6 +658,35 @@ static int apple_get_fb_resource(struct device *dev, const char *name,
- 	return ret;
- }
- 
-+static int apple_get_scanout_pool_resource(struct device *dev,
-+					    struct resource *pool_r)
-+{
-+	struct device_node *node;
-+	int idx, ret = -ENODEV;
-+
-+	idx = of_property_match_string(dev->of_node, "memory-region-names",
-+				       "scanout-pool");
-+	if (idx < 0)
-+		return idx;
-+
-+	node = of_parse_phandle(dev->of_node, "memory-region", idx);
-+	if (!node)
-+		return -ENODEV;
-+
-+	if (!of_device_is_available(node) ||
-+	    !of_device_is_compatible(node, "shared-dma-pool") ||
-+	    !of_property_read_bool(node, "no-map")) {
-+		dev_err(dev, "scanout-pool must be an available no-map shared-dma-pool\n");
-+		goto out_put;
-+	}
-+
-+	ret = of_address_to_resource(node, 0, pool_r);
-+
-+out_put:
-+	of_node_put(node);
-+	return ret;
-+}
-+
- static const struct of_device_id apple_dcp_id_tbl[] = {
- 	{ .compatible = "apple,dcp" },
- 	{ .compatible = "apple,dcpext" },
-@@ -408,11 +722,14 @@ static int apple_drm_init_dcp(struct device *dev)
+@@ -408,11 +451,14 @@ static int apple_drm_init_dcp(struct device *dev)
  		if (ret)
  			continue;
  
@@ -1525,44 +1201,7 @@ index d8386f3e1f54..028c45201169 100644
  	}
  
  	if (num_dcp < 1)
-@@ -447,6 +764,7 @@ static int apple_drm_init(struct device *dev)
- 	struct apple_drm_private *apple;
- 	struct resource fb_r;
- 	resource_size_t fb_size;
-+	bool use_nomap_pool;
- 	int ret;
- 
- 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(42));
-@@ -463,19 +781,35 @@ static int apple_drm_init(struct device *dev)
- 		return PTR_ERR(apple);
- 
- 	dev_set_drvdata(dev, apple);
-+	use_nomap_pool = of_property_read_bool(dev->of_node,
-+					       "apple,scanout-memory-is-nomap");
-+	if (use_nomap_pool) {
-+		ret = apple_get_scanout_pool_resource(dev, &apple->scanout_pool);
-+		if (ret) {
-+			dev_err(dev, "invalid scanout-pool reserved memory: %d\n", ret);
-+			return ret;
-+		}
-+
-+		ret = of_reserved_mem_device_init_by_name(dev, dev->of_node,
-+							  "scanout-pool");
-+		if (ret) {
-+			dev_err(dev, "failed to attach scanout-pool: %d\n", ret);
-+			return ret;
-+		}
-+		apple->scanout_pool_attached = true;
-+		dev_info(dev, "using no-map scanout pool %pr\n",
-+			 &apple->scanout_pool);
-+	}
- 
- 	ret = component_bind_all(dev, apple);
- 	if (ret)
--		return ret;
-+		goto err_release_rmem;
- 
- 	ret = drmm_mode_config_init(&apple->drm);
+@@ -472,10 +518,7 @@ static int apple_drm_init(struct device *dev)
  	if (ret)
  		goto err_unbind;
  
@@ -1574,29 +1213,6 @@ index d8386f3e1f54..028c45201169 100644
  	apple->drm.mode_config.min_width = 32;
  	apple->drm.mode_config.min_height = 32;
  
-@@ -516,6 +850,11 @@ static int apple_drm_init(struct device *dev)
- 
- err_unbind:
- 	component_unbind_all(dev, NULL);
-+err_release_rmem:
-+	if (apple->scanout_pool_attached) {
-+		of_reserved_mem_device_release(dev);
-+		apple->scanout_pool_attached = false;
-+	}
- 	return ret;
- }
- 
-@@ -527,6 +866,10 @@ static void apple_drm_uninit(struct device *dev)
- 	drm_atomic_helper_shutdown(&apple->drm);
- 
- 	component_unbind_all(dev, NULL);
-+	if (apple->scanout_pool_attached) {
-+		of_reserved_mem_device_release(dev);
-+		apple->scanout_pool_attached = false;
-+	}
- 
- 	dev_set_drvdata(dev, NULL);
- }
 diff --git a/drivers/gpu/drm/apple/av.c b/drivers/gpu/drm/apple/av.c
 index 0d3c752f62d5..0a0e59872dee 100644
 --- a/drivers/gpu/drm/apple/av.c

@@ -26,8 +26,6 @@ in [ISSUES.md](ISSUES.md).
 - [ ] PMC is kept always-on for PMP; the driver whose firmware touches PMC
       should claim it as a power domain.
 - [ ] brcmfmac's flat 30 s escan timer: scale it with the channel count.
-- [ ] DCP scanout buffers leave the direct map, which forces
-      `DRM_APPLE=y`; test without it now that DMA is coherent.
 - [ ] The page flip timestamp HACK in the DCP driver, which moves
       completion up to 1 ms earlier for external displays.
 - [ ] `nvme_apple.flush_interval=0`, kept from an Omarchy-M4-Native report.

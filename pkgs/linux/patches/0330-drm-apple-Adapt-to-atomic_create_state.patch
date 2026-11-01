@@ -1,12 +1,10 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 22:13:23 -0500
-Subject: [PATCH] drm/apple: Adapt to atomic_create_state and the direct map
- API
+Subject: [PATCH] drm/apple: Adapt to atomic_create_state
 
 Mainline replaced the plane and CRTC reset hooks with
-atomic_create_state, moved the fbdev helpers into the client library,
-and gave set_direct_map_{invalid,default}_noflush() a page count.
+atomic_create_state and moved the fbdev helpers into the client library.
 
 The driver was written for older kernels and builds against this one
 only from here, so its Kconfig entry is added here rather than with the
@@ -15,9 +13,9 @@ driver.
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  drivers/gpu/drm/Kconfig           |  1 +
- drivers/gpu/drm/apple/apple_drv.c |  7 +++----
+ drivers/gpu/drm/apple/apple_drv.c |  3 +--
  drivers/gpu/drm/apple/plane.c     | 24 ++++++++++++------------
- 3 files changed, 16 insertions(+), 16 deletions(-)
+ 3 files changed, 14 insertions(+), 14 deletions(-)
 
 diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
 index 61111d50b1c6..fe16c6f3d2ee 100644
@@ -32,10 +30,10 @@ index 61111d50b1c6..fe16c6f3d2ee 100644
  source "drivers/gpu/drm/armada/Kconfig"
  source "drivers/gpu/drm/aspeed/Kconfig"
 diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
-index 028c45201169..acc03f111150 100644
+index 630ba467868b..befb3b8114fd 100644
 --- a/drivers/gpu/drm/apple/apple_drv.c
 +++ b/drivers/gpu/drm/apple/apple_drv.c
-@@ -32,7 +32,6 @@
+@@ -24,7 +24,6 @@
  #include <drm/clients/drm_client_setup.h>
  #include <drm/drm_crtc.h>
  #include <drm/drm_drv.h>
@@ -43,25 +41,7 @@ index 028c45201169..acc03f111150 100644
  #include <drm/drm_fbdev_dma.h>
  #include <drm/drm_fb_dma_helper.h>
  #include <drm/drm_gem_dma_helper.h>
-@@ -83,7 +82,7 @@ static void apple_drm_gem_restore_direct_map(struct apple_drm_gem_object *obj)
- 		unsigned int j;
- 
- 		for (j = 0; j < nr_pages; j++)
--			set_direct_map_default_noflush(page + j);
-+			set_direct_map_default_noflush(page + j, 1);
- 	}
- 
- 	flush_tlb_all();
-@@ -203,7 +202,7 @@ static int apple_drm_gem_remove_direct_map(struct drm_gem_dma_object *dma_obj)
- 			 * can leave an AMCC cache-directory entry behind.  DCP scanout
- 			 * is realtime, so retire the entry before removing that alias. */
- 			dcache_clean_inval_poc(start, start + PAGE_SIZE);
--			ret = set_direct_map_invalid_noflush(page + j);
-+			ret = set_direct_map_invalid_noflush(page + j, 1);
- 			if (ret)
- 				goto err_restore;
- 		}
-@@ -457,7 +456,7 @@ static const struct drm_crtc_funcs apple_crtc_funcs = {
+@@ -215,7 +214,7 @@ static const struct drm_crtc_funcs apple_crtc_funcs = {
  	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
  	.destroy		= apple_crtc_cleanup,
  	.page_flip		= drm_atomic_helper_page_flip,
