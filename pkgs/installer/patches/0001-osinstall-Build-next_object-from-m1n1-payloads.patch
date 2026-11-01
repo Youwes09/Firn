@@ -29,6 +29,8 @@ chainloads.
 The approach and the part checks follow the Gravity Linux installer (MIT)
 as shipped by Omarchy-M4-Native, which writes a fixed path; this writes
 the template's next_object.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/osinstall.py | 35 ++++++++++++++++++++++-
  src/payloads.py  | 74 ++++++++++++++++++++++++++++++++++++++++++++++++

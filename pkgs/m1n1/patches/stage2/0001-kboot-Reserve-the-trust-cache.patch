@@ -10,6 +10,8 @@ allocate from and write to it.
 Add a /memreserve/ entry for it, so the kernel keeps it mapped but never
 allocates from it. Where the trust cache is outside the usable range the
 entry has no effect.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/kboot.c | 9 +++++++++
  1 file changed, 9 insertions(+)

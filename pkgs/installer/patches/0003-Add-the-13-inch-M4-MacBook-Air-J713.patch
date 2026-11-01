@@ -10,6 +10,8 @@ collects every module's firmware by board name, for the kernel to pick
 the matching one, instead of the J773g's single-module profile. Its
 radio calibration reaches Linux through the ADT, and like the J773g it
 has no camera or ambient light sensor support yet.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  gravity_firmware/open_firmware.py |  1 +
  src/install.sh                    |  2 +-

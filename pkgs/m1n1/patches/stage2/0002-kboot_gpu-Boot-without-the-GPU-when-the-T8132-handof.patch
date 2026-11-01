@@ -9,6 +9,8 @@ and left m1n1 in the proxy.
 
 The handoff enables the GPU node last, so on failure it is still
 disabled. Log the failure and boot without the GPU instead.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/kboot_gpu.c | 8 ++++++--
  1 file changed, 6 insertions(+), 2 deletions(-)

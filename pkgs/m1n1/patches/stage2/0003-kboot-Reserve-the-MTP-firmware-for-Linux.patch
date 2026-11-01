@@ -7,6 +7,8 @@ iBoot leaves the MTP's DART unlocked, so Linux resets it at probe and
 the MTP can no longer reach its firmware: RTKit times out waiting for
 the endpoint map. Pass the ADT's segment ranges through the mtp alias
 as reserved memory with IOMMU addresses, as is done for the ISP.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/kboot.c | 6 ++++++
  1 file changed, 6 insertions(+)

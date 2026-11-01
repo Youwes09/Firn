@@ -6,6 +6,8 @@ Subject: [PATCH] kboot: Merge contiguous ASC firmware segments
 Rounding each segment up to 16k made the MTP's __TEXT overlap its
 __DATA, which Linux reports as overlapping reserved memory. Reserve
 segments contiguous in both physical and IOVA space as one region.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  src/kboot.c | 17 +++++++++++++----
  1 file changed, 13 insertions(+), 4 deletions(-)

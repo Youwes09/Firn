@@ -12,6 +12,8 @@ hash list and would assert on the F files.
 
 Skip files whose names are not firmware names, and log and skip files
 with properties that have no Linux name.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  gravity_firmware/wifi.py  | 15 +++++++++++----
  tests/test_m4_firmware.py | 11 +++++++++++
