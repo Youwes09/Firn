@@ -211,7 +211,7 @@ stay well below that.
 ### Stage E: update Firn once
 
 ```sh
-git clone https://YOUR-COPY-OF/firn ~/firn    # or copy it over USB
+git clone https://github.com/Youwes09/firn ~/firn
 cd ~/firn
 # make a harmless change, e.g. add a package in examples/minimal/configuration.nix
 sudo nixos-rebuild boot --flake .#minimal
