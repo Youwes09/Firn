@@ -2,18 +2,13 @@
   config,
   lib,
   pkgs,
+  firnCrossPkgs,
   ...
 }:
 let
   cfg = config.hardware.firn;
   firn-boot = pkgs.callPackage ../pkgs/firn-boot { };
-  m1n1 =
-    (import pkgs.path {
-      localSystem = cfg.buildSystem;
-      crossSystem = pkgs.stdenv.hostPlatform.system;
-    }).callPackage
-      ../pkgs/m1n1
-      { };
+  m1n1 = firnCrossPkgs.callPackage ../pkgs/m1n1 { };
   # firn-boot needs the room on the 500 MB partition; Firn reads neither.
   esp-tidy = pkgs.writeShellScript "firn-esp-tidy" ''
     set -eu

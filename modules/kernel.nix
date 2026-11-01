@@ -2,16 +2,13 @@
   config,
   lib,
   pkgs,
+  firnCrossPkgs,
   ...
 }:
 let
   cfg = config.hardware.firn;
 
-  kernelPkgs = import pkgs.path {
-    localSystem = cfg.buildSystem;
-    crossSystem = pkgs.stdenv.hostPlatform.system;
-  };
-  kernel = kernelPkgs.callPackage ../pkgs/linux {
+  kernel = firnCrossPkgs.callPackage ../pkgs/linux {
     kernelPatches = [ ];
     useCcache = cfg.kernelCcache;
     configfile = cfg.kernelConfig;
@@ -28,7 +25,8 @@ in
 
     boot.kernelPackages = pkgs.linuxPackagesFor kernel;
     boot.kernelParams = [
-      # firn-boot refuses a generation without idle and nowfxt.
+      # firn-boot refuses a generation without these two. A plain wfi loses the
+      # core's registers on T8132, so only cpuidle may idle the cores.
       "idle=nop"
       # WFIT in __delay() stops the M4 at EL2.
       "arm64.nowfxt"

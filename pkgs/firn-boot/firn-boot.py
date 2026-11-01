@@ -19,9 +19,10 @@ import struct
 import sys
 import zlib
 
-# WFIT in __delay() stops the M4 at EL2.
 REQUIRED_ARGS = (
+    # A plain wfi loses the core's registers on T8132; only cpuidle may idle.
     'idle=nop',
+    # WFIT in __delay() stops the M4 at EL2.
     'arm64.nowfxt',
 )
 BOARD = b'apple,j713'

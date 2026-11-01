@@ -1,4 +1,9 @@
-{ lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 {
   imports = [
     ./kernel.nix
@@ -51,5 +56,11 @@
       internal = true;
       description = "Kernel configuration; the VM boot test swaps in j713-vm.config.";
     };
+  };
+
+  # Packages built on buildSystem for the Air: the kernel and m1n1.
+  config._module.args.firnCrossPkgs = import pkgs.path {
+    localSystem = config.hardware.firn.buildSystem;
+    crossSystem = pkgs.stdenv.hostPlatform.system;
   };
 }
