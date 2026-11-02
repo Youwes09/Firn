@@ -19,12 +19,6 @@ import struct
 import sys
 import zlib
 
-REQUIRED_ARGS = (
-    # A plain wfi loses the core's registers on T8132; only cpuidle may idle.
-    'idle=nop',
-    # WFIT in __delay() stops the M4 at EL2.
-    'arm64.nowfxt',
-)
 BOARD = b'apple,j713'
 BOOTARGS = b'chosen.bootargs='
 GZIP = b'\x1f\x8b\x08'
@@ -168,8 +162,6 @@ def check_firmware(firmware):
 
 def bootargs_line(args, init):
     require(not any(arg.startswith('init=') for arg in args), 'Kernel parameters already set init=')
-    missing = [arg for arg in REQUIRED_ARGS if arg not in args]
-    require(not missing, "Kernel parameters lack the kernel's hardware switches: " + ' '.join(missing))
     unique = list(dict.fromkeys(args))
     line = BOOTARGS + ' '.join(unique + ['init=' + init]).encode() + b'\n'
     require(len(line) - len(BOOTARGS) - 1 <= MAX_BOOTARGS,

@@ -15,17 +15,13 @@ in [ISSUES.md](ISSUES.md).
       Gravity Linux treats `hdr->pad >> 8` as -EIO; the driver calls bytes
       6 and 7 opaque.
 - [ ] The NVMe write crash (ISSUES.md 1) on the mainline series.
+- [ ] firn-link: the build machine's access point drops the Air after
+      about ten idle minutes, and iwd on the Air does not notice.
 
 ## Workarounds to replace
 
 - [ ] `firn-cpu-cap`: SMC thermal zones and cpufreq cooling instead.
 - [ ] Sleep, which needs every co-processor's power states understood.
-- [ ] `idle=nop` and `arm64.nowfxt`: every wfi powers an M4 core down,
-      and WFIT most likely stops it for the same reason (not yet tested).
-      cpuidle no longer uses `cpu_do_idle()`, but the idle path before it
-      loads does. An arm64 erratum for the M4 cores could wait with wfe
-      there (safe, measured) and drop WFxT, retiring both parameters; it
-      needs the M4 part numbers queued in mainline.
 - [ ] AIC's skipped EL2 FIQ masks: find why the writes hang.
 - [ ] PMC is kept always-on for PMP; the driver whose firmware touches PMC
       should claim it as a power domain.
@@ -56,6 +52,10 @@ in [ISSUES.md](ISSUES.md).
       once the J713's firmware is seen to send them.
 - [ ] Sasha Finkelstein's PMP driver numbers T6000 SetIOReg entries from 1
       but looks them up from 0; check against a T6000 trace.
+- [ ] The M4 wfi erratum's KVM part (always trap a guest's wfi) is only
+      compile-tested; Firn's kernel has no KVM.
+- [ ] CPU0 keeps its registers through wfi, so its power-down state may
+      never power it down; measure its idle power alone.
 
 ## Upstreaming
 

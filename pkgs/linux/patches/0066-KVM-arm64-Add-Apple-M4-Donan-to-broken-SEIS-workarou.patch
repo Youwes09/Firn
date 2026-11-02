@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 22 Aug 2026 20:34:34 -0400
+Subject: [PATCH] KVM: arm64: Add Apple M4 Donan to broken SEIS workaround
+
+Apple M4 Donan efficiency and performance cores use MIDR part numbers 0x052 and 0x053 respectively. Define both CPU models and allow the GICv3 capability probe to discover ICH_HCR_EL2.TDIR on these systems.
+
+Donan also exhibits the broken locally generated SEI routing covered by the existing Apple workaround. Add both core types to broken_seis so KVM traps the affected CPU-interface operations instead of allowing an SEI to escape the guest context.
+
+Assisted-By: OpenAI Codex (GPT-5.6 Sol)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+[Niklas: ported to v7.3, where the broken-SEIS check moved to the
+ ARM64_WORKAROUND_GICv3_BROKEN_SEIS erratum: the M4 cores get their own list
+ there, so the IMPDEF PMUv3 trap workaround sharing apple_cpus is unchanged]
+(cherry picked from commit 5964a02f144628ae1840a083ce683e4cc2926854)
+---
+ arch/arm64/include/asm/cputype.h |  4 ++++
+ arch/arm64/kernel/cpu_errata.c   | 10 +++++++++-
+ arch/arm64/kernel/cpufeature.c   |  2 ++
+ 3 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/cputype.h b/arch/arm64/include/asm/cputype.h
+index 6002d1d5f55f..a64a6e33bef1 100644
+--- a/arch/arm64/include/asm/cputype.h
++++ b/arch/arm64/include/asm/cputype.h
+@@ -156,6 +156,8 @@
+ #define APPLE_CPU_PART_M2_AVALANCHE_PRO	0x035
+ #define APPLE_CPU_PART_M2_BLIZZARD_MAX	0x038
+ #define APPLE_CPU_PART_M2_AVALANCHE_MAX	0x039
++#define APPLE_CPU_PART_M4_DONAN_ECORE	0x052
++#define APPLE_CPU_PART_M4_DONAN_PCORE	0x053
+ 
+ #define AMPERE_CPU_PART_AMPERE1		0xAC3
+ #define AMPERE_CPU_PART_AMPERE1A	0xAC4
+@@ -252,6 +254,8 @@
+ #define MIDR_APPLE_M2_AVALANCHE_PRO MIDR_CPU_MODEL(ARM_CPU_IMP_APPLE, APPLE_CPU_PART_M2_AVALANCHE_PRO)
+ #define MIDR_APPLE_M2_BLIZZARD_MAX MIDR_CPU_MODEL(ARM_CPU_IMP_APPLE, APPLE_CPU_PART_M2_BLIZZARD_MAX)
+ #define MIDR_APPLE_M2_AVALANCHE_MAX MIDR_CPU_MODEL(ARM_CPU_IMP_APPLE, APPLE_CPU_PART_M2_AVALANCHE_MAX)
++#define MIDR_APPLE_M4_DONAN_ECORE MIDR_CPU_MODEL(ARM_CPU_IMP_APPLE, APPLE_CPU_PART_M4_DONAN_ECORE)
++#define MIDR_APPLE_M4_DONAN_PCORE MIDR_CPU_MODEL(ARM_CPU_IMP_APPLE, APPLE_CPU_PART_M4_DONAN_PCORE)
+ #define MIDR_AMPERE1 MIDR_CPU_MODEL(ARM_CPU_IMP_AMPERE, AMPERE_CPU_PART_AMPERE1)
+ #define MIDR_AMPERE1A MIDR_CPU_MODEL(ARM_CPU_IMP_AMPERE, AMPERE_CPU_PART_AMPERE1A)
+ #define MIDR_MICROSOFT_AZURE_COBALT_100 MIDR_CPU_MODEL(ARM_CPU_IMP_MICROSOFT, MICROSOFT_CPU_PART_AZURE_COBALT_100)
+diff --git a/arch/arm64/kernel/cpu_errata.c b/arch/arm64/kernel/cpu_errata.c
+index 38abd123c740..5895edb37089 100644
+--- a/arch/arm64/kernel/cpu_errata.c
++++ b/arch/arm64/kernel/cpu_errata.c
+@@ -336,10 +336,18 @@ static bool has_impdef_pmuv3(const struct arm64_cpu_capabilities *entry, int sco
+ 	return is_midr_in_range_list(apple_cpus);
+ }
+ 
++/* Later Apple cores with the same broken SEIS but no IMPDEF PMUv3 traps */
++static const struct midr_range apple_broken_seis_cpus[] = {
++	MIDR_ALL_VERSIONS(MIDR_APPLE_M4_DONAN_ECORE),
++	MIDR_ALL_VERSIONS(MIDR_APPLE_M4_DONAN_PCORE),
++	{},
++};
++
+ static bool has_broken_gic_v3_seis(const struct arm64_cpu_capabilities *entry, int scope)
+ {
+ 	return (is_kernel_in_hyp_mode() &&
+-		is_midr_in_range_list(apple_cpus) &&
++		(is_midr_in_range_list(apple_cpus) ||
++		 is_midr_in_range_list(apple_broken_seis_cpus)) &&
+ 		(read_sysreg_s(SYS_ICH_VTR_EL2) & ICH_VTR_EL2_SEIS));
+ }
+ 
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 34c5c03c0c9b..cf73900e666c 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -2207,6 +2207,8 @@ static bool can_trap_icv_dir_el1(const struct arm64_cpu_capabilities *entry,
+ 		MIDR_ALL_VERSIONS(MIDR_APPLE_M2_AVALANCHE_PRO),
+ 		MIDR_ALL_VERSIONS(MIDR_APPLE_M2_BLIZZARD_MAX),
+ 		MIDR_ALL_VERSIONS(MIDR_APPLE_M2_AVALANCHE_MAX),
++		MIDR_ALL_VERSIONS(MIDR_APPLE_M4_DONAN_ECORE),
++		MIDR_ALL_VERSIONS(MIDR_APPLE_M4_DONAN_PCORE),
+ 		{},
+ 	};
+ 	struct arm_smccc_res res = {};

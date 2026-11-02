@@ -7,8 +7,8 @@ iBoot locks the T8132 power-down control on: every wfi powers the core
 down and loses its general registers, and writing the control raises an
 SError. There is no clock-gated WFI state, so the deep state is a wfi that
 saves the callee-saved registers and leaves the control alone, and the
-shallow state waits in wfe with interrupts unmasked, which keeps its
-registers and wakes as soon as an interrupt is pending.
+shallow state is cpu_do_idle(), which the M4 erratum turns into a wfe
+that keeps the registers and wakes as soon as an interrupt is pending.
 
 On the J713 the idle CPU rail drops from 1314 mW to 13 mW. With a timer
 firing on each core, the CPU rail draws:
@@ -22,11 +22,11 @@ with 9 us of average wake-up latency against 5 us when spinning.
 Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
- drivers/cpuidle/cpuidle-apple.c | 102 +++++++++++++++++++++++++++++++-
- 1 file changed, 100 insertions(+), 2 deletions(-)
+ drivers/cpuidle/cpuidle-apple.c | 90 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 88 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/cpuidle/cpuidle-apple.c b/drivers/cpuidle/cpuidle-apple.c
-index 3d2b804df8a2..8b6dc27b6c94 100644
+index 3d2b804df8a2..cbf0dd0bb113 100644
 --- a/drivers/cpuidle/cpuidle-apple.c
 +++ b/drivers/cpuidle/cpuidle-apple.c
 @@ -57,7 +57,43 @@ asm(
@@ -73,25 +73,10 @@ index 3d2b804df8a2..8b6dc27b6c94 100644
  
  static __cpuidle int apple_enter_wfi(struct cpuidle_device *dev, struct cpuidle_driver *drv, int index)
  {
-@@ -122,9 +158,69 @@ static struct cpuidle_driver apple_idle_driver = {
+@@ -122,9 +158,57 @@ static struct cpuidle_driver apple_idle_driver = {
  	.state_count = STATE_COUNT,
  };
  
-+/*
-+ * wfe with interrupts unmasked wakes as soon as one is pending, and the
-+ * exception return of one taken just before it sets the event register.
-+ */
-+static __cpuidle int apple_enter_t8132_wfe(struct cpuidle_device *dev,
-+					   struct cpuidle_driver *drv, int index)
-+{
-+	raw_local_irq_enable();
-+	dsb(sy);
-+	wfe();
-+	raw_local_irq_disable();
-+
-+	return index;
-+}
-+
 +static __cpuidle int apple_enter_t8132(struct cpuidle_device *dev,
 +				       struct cpuidle_driver *drv, int index)
 +{
@@ -108,13 +93,16 @@ index 3d2b804df8a2..8b6dc27b6c94 100644
 +	return index;
 +}
 +
-+/* Every wfi powers the core down, so the shallow state waits in wfe. */
++/*
++ * Every wfi powers the core down, so cpu_do_idle() waits in wfe instead,
++ * with interrupts unmasked; that rules it out for s2idle.
++ */
 +static struct cpuidle_driver apple_t8132_idle_driver = {
 +	.name = "apple_idle",
 +	.owner = THIS_MODULE,
 +	.states = {
 +		{
-+			.enter			= apple_enter_t8132_wfe,
++			.enter			= apple_enter_wfi,
 +			.exit_latency		= 1,
 +			.target_residency	= 1,
 +			.power_usage		= UINT_MAX,
@@ -144,7 +132,7 @@ index 3d2b804df8a2..8b6dc27b6c94 100644
  }
  
  static struct platform_driver apple_cpuidle_driver = {
-@@ -146,7 +242,9 @@ static int __init apple_cpuidle_init(void)
+@@ -146,7 +230,9 @@ static int __init apple_cpuidle_init(void)
  	if (!of_machine_is_compatible("apple,arm-platform"))
  		return 0;
  

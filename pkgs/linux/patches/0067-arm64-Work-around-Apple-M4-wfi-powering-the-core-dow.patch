@@ -1,0 +1,121 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Sun, 1 Nov 2026 15:34:11 -0600
+Subject: [PATCH] arm64: Work around Apple M4 wfi powering the core down
+
+iBoot locks the M4 cores' power-down control on, and writing it raises
+an SError. Every wfi then powers the core down and loses its general
+registers, and so does WFIT; wfe and WFET keep them. Until now this
+took idle=nop, which spins, and arm64.nowfxt, which drops WFET too.
+
+Add an erratum for the M4 cores. The default idle waits in wfe with
+interrupts unmasked, so a pending interrupt wakes it at once; __delay()
+skips WFIT and waits in WFET; KVM always traps a guest's wfi and WFIT.
+
+On the J713, a probe with markers in x2-x17 and x19-x28 found all of
+them lost after wfi and WFIT on every CPU but the boot CPU, and all of
+them kept after WFET.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/kernel/cpu_errata.c |  9 +++++++++
+ arch/arm64/kernel/idle.c       | 16 ++++++++++++++++
+ arch/arm64/kvm/arm.c           |  3 +++
+ arch/arm64/lib/delay.c         |  8 +++++---
+ arch/arm64/tools/cpucaps       |  1 +
+ 5 files changed, 34 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/kernel/cpu_errata.c b/arch/arm64/kernel/cpu_errata.c
+index 5895edb37089..5cb6107da4f7 100644
+--- a/arch/arm64/kernel/cpu_errata.c
++++ b/arch/arm64/kernel/cpu_errata.c
+@@ -1082,6 +1082,15 @@ const struct arm64_cpu_capabilities arm64_errata[] = {
+ 		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
+ 		.matches = has_broken_gic_v3_seis,
+ 	},
++	{
++		.desc = "Apple wfi and WFIT power the core down",
++		.capability = ARM64_WORKAROUND_APPLE_DEEP_WFI,
++		ERRATA_MIDR_RANGE_LIST(((const struct midr_range[]) {
++					MIDR_ALL_VERSIONS(MIDR_APPLE_M4_DONAN_ECORE),
++					MIDR_ALL_VERSIONS(MIDR_APPLE_M4_DONAN_PCORE),
++					{}
++				})),
++	},
+ #ifdef CONFIG_NXP_IMX8QM_ERRATUM_ERR050104
+ 	{
+ 		.desc = "NXP erratum ERR050104",
+diff --git a/arch/arm64/kernel/idle.c b/arch/arm64/kernel/idle.c
+index 42c5543f9589..197fb5039e0e 100644
+--- a/arch/arm64/kernel/idle.c
++++ b/arch/arm64/kernel/idle.c
+@@ -47,6 +47,22 @@ void __cpuidle cpu_do_idle(void)
+ {
+ 	struct arm_cpuidle_irq_context context;
+ 
++	/*
++	 * On some Apple cores wfi powers the core down and loses the general
++	 * registers. wfe keeps them and, with interrupts unmasked, wakes as
++	 * soon as one is pending; the exception return of one taken just
++	 * before the wfe sets the event register. The boot CPU detects the
++	 * erratum before any CPU idles, but alternatives are patched later.
++	 */
++	if (likely(idle == ARM64_IDLE_WFI) &&
++	    cpus_have_cap(ARM64_WORKAROUND_APPLE_DEEP_WFI)) {
++		raw_local_irq_enable();
++		dsb(sy);
++		wfe();
++		raw_local_irq_disable();
++		return;
++	}
++
+ 	arm_cpuidle_save_irq_context(&context);
+ 
+ 	if (likely(idle == ARM64_IDLE_WFI)) {
+diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
+index d30378a50c53..1720b341da6b 100644
+--- a/arch/arm64/kvm/arm.c
++++ b/arch/arm64/kvm/arm.c
+@@ -672,6 +672,9 @@ static void vcpu_set_pauth_traps(struct kvm_vcpu *vcpu)
+ 
+ static bool kvm_vcpu_should_clear_twi(struct kvm_vcpu *vcpu)
+ {
++	if (cpus_have_final_cap(ARM64_WORKAROUND_APPLE_DEEP_WFI))
++		return false;
++
+ 	if (unlikely(kvm_wfi_trap_policy != KVM_WFX_NOTRAP_SINGLE_TASK))
+ 		return kvm_wfi_trap_policy == KVM_WFX_NOTRAP;
+ 
+diff --git a/arch/arm64/lib/delay.c b/arch/arm64/lib/delay.c
+index e278e060e78a..d7dbc182fa57 100644
+--- a/arch/arm64/lib/delay.c
++++ b/arch/arm64/lib/delay.c
+@@ -46,10 +46,12 @@ void __delay(unsigned long cycles)
+ 		u64 end = start + cycles;
+ 
+ 		/*
+-		 * Start with WFIT. If an interrupt makes us resume
+-		 * early, use a WFET loop to complete the delay.
++		 * Start with WFIT, unless it powers the core down. If an
++		 * interrupt makes us resume early, use a WFET loop to
++		 * complete the delay.
+ 		 */
+-		wfit(end);
++		if (!alternative_has_cap_unlikely(ARM64_WORKAROUND_APPLE_DEEP_WFI))
++			wfit(end);
+ 		while ((__delay_cycles() - start) < cycles)
+ 			wfet(end);
+ 	} else 	if (arch_timer_evtstrm_available()) {
+diff --git a/arch/arm64/tools/cpucaps b/arch/arm64/tools/cpucaps
+index 20cc185649f9..f68907be212e 100644
+--- a/arch/arm64/tools/cpucaps
++++ b/arch/arm64/tools/cpucaps
+@@ -111,6 +111,7 @@ WORKAROUND_4193714
+ WORKAROUND_4311569
+ WORKAROUND_AMPERE_AC03_CPU_38
+ WORKAROUND_AMPERE_AC04_CPU_23
++WORKAROUND_APPLE_DEEP_WFI
+ WORKAROUND_TRBE_OVERWRITE_FILL_MODE
+ WORKAROUND_TSB_FLUSH_FAILURE
+ WORKAROUND_TRBE_WRITE_OUT_OF_RANGE

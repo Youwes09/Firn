@@ -112,9 +112,6 @@ Each stands in for a fix that is not done yet ([TODO.md](TODO.md)).
 - **Capped CPU clocks.** Nothing throttles the CPUs yet, so `firn-cpu-cap`
   holds the P cores at 1.8 GHz and the E cores at 2.17 GHz, about 74 C under
   load.
-- **`idle=nop`.** A plain wfi loses the core's registers on T8132, so the
-  default idle path must not run; cpuidle idles the cores.
-- **`arm64.nowfxt`.** WFIT in `__delay()` stops the M4 at EL2.
 - **No KVM guest timers.** AIC skips the EL2 guest timer FIQ enables and
   `ICH_HCR_EL2` on T8132, as writing them hangs the boot. m1n1 reports the
   Apple system registers as locked on M4, which may be the cause.

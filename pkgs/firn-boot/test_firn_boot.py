@@ -59,7 +59,7 @@ FIRMWARE = cpio([('vendorfw', 0o40755, b''),
                  ('vendorfw/brcm/fw.bin', 0o100644, b'\x01\x02\x03')])
 INITRD = gzip.compress(cpio([('init', 0o100755, b'#!/bin/sh\n')]), mtime=0)
 NEW_INITRD = gzip.compress(cpio([('init', 0o100755, b'nixos stage 1\n')]), mtime=0)
-PARAMS = 'idle=nop arm64.nowfxt panic=0 console=tty0 loglevel=4'
+PARAMS = 'panic=0 console=tty0 loglevel=4'
 NIXOS_ARGS = PARAMS.split() + ['root=fstab', 'loglevel=4']
 INSTALLED_ARGS = PARAMS + ' root=fstab init=/nix/store/a-nixos-system/init'
 
@@ -122,11 +122,6 @@ class Compose(unittest.TestCase):
         line = boot.parse(data)['bootargs'].decode()
         self.assertEqual(line, 'chosen.bootargs=' + PARAMS +
                          ' root=fstab init=/nix/store/x-nixos-system/init\n')
-
-    def test_missing_hardware_switch_refused(self):
-        args = [arg for arg in NIXOS_ARGS if arg != 'arm64.nowfxt']
-        with self.assertRaisesRegex(boot.Refused, 'arm64.nowfxt'):
-            compose(args=args)
 
     def test_init_in_params_refused(self):
         with self.assertRaisesRegex(boot.Refused, 'init='):

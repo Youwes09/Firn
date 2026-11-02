@@ -48,9 +48,8 @@ The installer registers m1n1 stage 1 in a small macOS stub, which loads
 and an initrd with the Apple firmware the installer collected. Every
 `nixos-rebuild boot|switch` runs [`firn-boot`](pkgs/firn-boot/firn-boot.py),
 which writes the generation's m1n1, kernel, devicetree, initrd and parameters
-in the same layout and keeps the firmware. It refuses parameters without
-`idle=nop arm64.nowfxt`, and any board but J713. The installer's
-file is kept as `boot.bin.original`, the last one as `boot.bin.previous`.
+in the same layout and keeps the firmware. It refuses any board but J713.
+The installer's file is kept as `boot.bin.original`, the last one as `boot.bin.previous`.
 The installer's other files on that partition move to
 `/var/lib/firn/installer/`, to leave room for them.
 

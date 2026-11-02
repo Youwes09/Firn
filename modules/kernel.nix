@@ -25,11 +25,6 @@ in
 
     boot.kernelPackages = pkgs.linuxPackagesFor kernel;
     boot.kernelParams = [
-      # firn-boot refuses a generation without these two. A plain wfi loses the
-      # core's registers on T8132, so only cpuidle may idle the cores.
-      "idle=nop"
-      # WFIT in __delay() stops the M4 at EL2.
-      "arm64.nowfxt"
       "panic=0"
       "console=tty0"
       "fbcon=nodefer"

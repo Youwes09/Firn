@@ -77,10 +77,6 @@ in
         for m in snd_soc_tas2764 snd_soc_tas2770 snd_soc_apple_mca snd_soc_cs42l84; do
           ! modinfo "$m" >/dev/null 2>&1 || exit 1
         done'
-      check "the hardware switches are on the kernel command line" '
-        for p in idle=nop arm64.nowfxt; do
-          grep -qw "$p" /proc/cmdline || exit 1
-        done'
 
       if [ "$fail" = 0 ]; then echo "FIRN-SELFTEST DONE result=PASS"; else echo "FIRN-SELFTEST DONE result=FAIL"; fi
       systemctl --no-block poweroff

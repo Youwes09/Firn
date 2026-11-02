@@ -28,14 +28,8 @@ let
     "no out-of-tree modules" = cfg.boot.extraModulePackages == [ ];
     "no kernel patches from the configuration" = cfg.boot.kernelPatches == [ ];
     "no devicetree overlays" = cfg.hardware.deviceTree.overlays == [ ];
-    "kernel parameters keep the hardware switches" = lib.all (p: lib.elem p params) [
-      "idle=nop"
-      "arm64.nowfxt"
-    ];
     "nvme-apple's delayed flush is off (#167)" = lib.elem "nvme_apple.flush_interval=0" params;
-    "kernel parameters do not set init= or idle= twice" =
-      !(lib.any (lib.hasPrefix "init=") params)
-      && lib.length (lib.filter (lib.hasPrefix "idle=") params) == 1;
+    "kernel parameters do not set init=" = !(lib.any (lib.hasPrefix "init=") params);
     "suspend and hibernate are off" =
       sleep.AllowSuspend == "no"
       && sleep.AllowHibernation == "no"
