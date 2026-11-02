@@ -26,10 +26,10 @@ Signed-off-by: James Calligeros <jcalligeros99@gmail.com>
  create mode 100644 drivers/input/misc/macsmc-input.c
 
 diff --git a/MAINTAINERS b/MAINTAINERS
-index 7a162e9bcab1..b57dec75388d 100644
+index 93abbb315065..9000e439bab9 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -2730,6 +2730,7 @@ F:	drivers/hwmon/macsmc-hwmon.c
+@@ -2748,6 +2748,7 @@ F:	drivers/hwmon/macsmc-hwmon.c
  F:	drivers/pmdomain/apple/
  F:	drivers/i2c/busses/i2c-pasemi-core.c
  F:	drivers/i2c/busses/i2c-pasemi-platform.c

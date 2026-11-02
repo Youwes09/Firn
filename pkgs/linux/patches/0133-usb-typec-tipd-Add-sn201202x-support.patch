@@ -24,10 +24,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  create mode 100644 drivers/usb/typec/tipd/spmi.c
 
 diff --git a/MAINTAINERS b/MAINTAINERS
-index 20560b53bbdd..ac2d775a6a33 100644
+index 4c7f26a4e100..c9fd32dcec66 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -2750,6 +2750,7 @@ F:	drivers/soc/apple/*
+@@ -2768,6 +2768,7 @@ F:	drivers/soc/apple/*
  F:	drivers/spi/spi-apple.c
  F:	drivers/spmi/spmi-apple-controller.c
  F:	drivers/usb/dwc3/dwc3-apple.c

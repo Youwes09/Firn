@@ -6,7 +6,7 @@ set -euo pipefail
 
 src=$1
 branch=${2:-firn/next}
-base=${3:-d89e1d186ec92}
+base=${3:-v7.4-rc1}
 out=$(dirname "$(realpath "$0")")/patches
 
 rm -rf "$out"

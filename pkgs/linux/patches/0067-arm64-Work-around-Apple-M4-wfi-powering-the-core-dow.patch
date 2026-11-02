@@ -74,10 +74,10 @@ index 42c5543f9589..197fb5039e0e 100644
  
  	if (likely(idle == ARM64_IDLE_WFI)) {
 diff --git a/arch/arm64/kvm/arm.c b/arch/arm64/kvm/arm.c
-index d30378a50c53..1720b341da6b 100644
+index 157bf4b81202..b0ba8394cc9c 100644
 --- a/arch/arm64/kvm/arm.c
 +++ b/arch/arm64/kvm/arm.c
-@@ -672,6 +672,9 @@ static void vcpu_set_pauth_traps(struct kvm_vcpu *vcpu)
+@@ -673,6 +673,9 @@ static void vcpu_set_pauth_traps(struct kvm_vcpu *vcpu)
  
  static bool kvm_vcpu_should_clear_twi(struct kvm_vcpu *vcpu)
  {

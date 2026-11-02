@@ -134,10 +134,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  create mode 100644 drivers/gpu/drm/apple/trace.h
 
 diff --git a/MAINTAINERS b/MAINTAINERS
-index ac2d775a6a33..575b6ecc91eb 100644
+index c9fd32dcec66..fe84191985e4 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
-@@ -2111,6 +2111,13 @@ L:	linux-input@vger.kernel.org
+@@ -2129,6 +2129,13 @@ L:	linux-input@vger.kernel.org
  S:	Odd fixes
  F:	drivers/input/mouse/bcm5974.c
  

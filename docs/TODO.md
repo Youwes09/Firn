@@ -35,7 +35,6 @@ in [ISSUES.md](ISSUES.md).
 
 ## Kernel
 
-- [ ] Move the series to v7.4-rc1 once it is tagged.
 - [ ] Audio: MCA, ADMAC, SIO, then the codecs with speaker protection.
 - [ ] GPU, as its own series ([GPU.md](GPU.md)).
 - [ ] DisplayPort alt mode and external displays.
