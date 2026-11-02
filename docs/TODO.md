@@ -26,7 +26,11 @@ in [ISSUES.md](ISSUES.md).
 - [ ] brcmfmac on a busy public network: `GET STA INFO failed, -52` and
       `escan_handler: Buffer is too small: ignoring`, not seen at home.
 - [ ] The page flip timestamp HACK in the DCP driver, which moves
-      completion up to 1 ms earlier for external displays.
+      completion up to 1 ms earlier. There is nothing to replace it with
+      yet: on 26.6 the swap complete callback carries no timestamp (only
+      two frame counters, at 0x3f0 and 0x700, change between frames), and
+      none of the nine ADT `disp0` interrupts reaches the AP during 60 Hz
+      flips. The callback arrives 16.05 to 16.11 ms after each swap.
 - [ ] `nvme_apple.flush_interval=0`, kept from an Omarchy-M4-Native report.
 
 ## Kernel
