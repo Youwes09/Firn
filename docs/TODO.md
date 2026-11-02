@@ -23,9 +23,6 @@ in [ISSUES.md](ISSUES.md).
 - [ ] `firn-cpu-cap`: SMC thermal zones and cpufreq cooling instead.
 - [ ] Sleep, which needs every co-processor's power states understood.
 - [ ] AIC's skipped EL2 FIQ masks: find why the writes hang.
-- [ ] PMC is kept always-on for PMP; the driver whose firmware touches PMC
-      should claim it as a power domain.
-- [ ] brcmfmac's flat 30 s escan timer: scale it with the channel count.
 - [ ] brcmfmac on a busy public network: `GET STA INFO failed, -52` and
       `escan_handler: Buffer is too small: ignoring`, not seen at home.
 - [ ] The page flip timestamp HACK in the DCP driver, which moves

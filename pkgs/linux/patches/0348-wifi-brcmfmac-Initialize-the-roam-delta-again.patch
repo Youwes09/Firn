@@ -15,10 +15,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 2 insertions(+)
 
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
-index 029d2407f184..97e0cbf093ce 100644
+index bd97021c8aa9..ebd16d316ed8 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
 +++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
-@@ -6958,6 +6958,8 @@ static s32 brcmf_dongle_roam(struct brcmf_if *ifp)
+@@ -6968,6 +6968,8 @@ static s32 brcmf_dongle_roam(struct brcmf_if *ifp)
  	if (err)
  		bphy_err(drvr, "WLC_SET_ROAM_TRIGGER error (%d)\n", err);
  

@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 29 Oct 2026 09:35:17 -0500
+Subject: [PATCH] wifi: brcmfmac: Scale the escan timeout with the channel
+ count
+
+The escan timer allows a flat 10 seconds, but the firmware dwells up to
+BRCMF_SCAN_PASSIVE_TIME on each channel it may only listen on. The
+BCM4388 has 100 channels, and all 60 of its 6 GHz channels are passive:
+on the J713 a passive scan of all of them takes 14.9 seconds, and iwd's
+scans of 5 and 6 GHz while disconnected took 10.7, so the timer aborted
+them and the station could not find its network.
+
+Allow 2 seconds plus 280 ms per channel, twice the passive dwell and a
+channel switch: 30 seconds for all 100 channels, 2.3 seconds for one.
+P2P scans, which dwell up to 200 ms, fit within it too.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../wireless/broadcom/brcm80211/brcmfmac/cfg80211.c  | 12 +++++++++++-
+ .../wireless/broadcom/brcm80211/brcmfmac/cfg80211.h  |  1 -
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index 029d2407f184..bd97021c8aa9 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -85,6 +85,14 @@
+ #define BRCMF_SCAN_UNASSOC_TIME		40
+ #define BRCMF_SCAN_PASSIVE_TIME		120
+ 
++/*
++ * E-Scan timeout. Per channel, the firmware dwells for up to
++ * BRCMF_SCAN_PASSIVE_TIME (P2P scans up to 200 ms) and, while associated,
++ * also returns to its own channel; allow twice the passive dwell.
++ */
++#define BRCMF_ESCAN_TIMEOUT_BASE_MS	2000
++#define BRCMF_ESCAN_TIMEOUT_CHANNEL_MS	(2 * BRCMF_SCAN_PASSIVE_TIME + 40)
++
+ #define BRCMF_ND_INFO_TIMEOUT		msecs_to_jiffies(2000)
+ 
+ #define BRCMF_PS_MAX_TIMEOUT_MS		2000
+@@ -1231,7 +1239,9 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
+ 
+ 	/* Arm scan timeout timer */
+ 	mod_timer(&cfg->escan_timeout,
+-		  jiffies + msecs_to_jiffies(BRCMF_ESCAN_TIMER_INTERVAL_MS));
++		  jiffies + msecs_to_jiffies(BRCMF_ESCAN_TIMEOUT_BASE_MS +
++					     request->n_channels *
++					     BRCMF_ESCAN_TIMEOUT_CHANNEL_MS));
+ 
+ 	return 0;
+ 
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
+index 7cb42b61c83e..92bda966e93e 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.h
+@@ -47,7 +47,6 @@
+  * problematic on some systems and should be avoided.
+  */
+ #define BRCMF_ESCAN_BUF_SIZE		65000
+-#define BRCMF_ESCAN_TIMER_INTERVAL_MS	10000	/* E-Scan timeout */
+ 
+ #define WL_ESCAN_ACTION_START		1
+ #define WL_ESCAN_ACTION_CONTINUE	2

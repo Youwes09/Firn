@@ -5,10 +5,13 @@ Subject: [PATCH] arm64: dts: apple: t8132: Keep the PMC power state on
 
 PMP's firmware crashes as it starts when the PMC power state is off,
 with an asynchronous abort on its first access to the display firmware's
-PMGR. Nothing in Linux claims PMC, so genpd turns it off once the PMGR's
-consumers have probed.
+PMGR. The ADT gives PMC no parent, no children and no device that uses
+it, and sets pmc = 1 on the PMGR node: it is part of the PMGR, not a
+device's power state, so nothing in Linux claims it and genpd turns it
+off once the PMGR's consumers have probed.
 
-Keep it on, as for the PMP and PMS SRAM states.
+Keep it on, as for the PMP and PMS SRAM states, which the ADT marks
+critical.
 
 Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
@@ -17,14 +20,14 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 2 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-pmgr.dtsi b/arch/arm64/boot/dts/apple/t8132-pmgr.dtsi
-index 6fbf09e8f981..5a14000dd604 100644
+index 6fbf09e8f981..69a4422190cb 100644
 --- a/arch/arm64/boot/dts/apple/t8132-pmgr.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132-pmgr.dtsi
 @@ -45,6 +45,8 @@ ps_pmc: power-controller@138 {
  		#power-domain-cells = <0>;
  		#reset-cells = <0>;
  		label = "pmc";
-+		/* PMP's firmware uses it; no Linux device claims it. */
++		/* Part of the PMGR itself: no device owns it, and PMP needs it on. */
 +		apple,always-on;
  	};
  
