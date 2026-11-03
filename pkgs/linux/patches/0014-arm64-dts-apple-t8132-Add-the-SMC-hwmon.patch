@@ -15,7 +15,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 5 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 3ed92d61b9f4..33ae343442a2 100644
+index e633fbe3557b..57a2d6a88c82 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -328,6 +328,10 @@ smc_gpio: gpio {

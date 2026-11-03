@@ -74,7 +74,7 @@ index 9882ea3f85e6..61b5a0e45b67 100644
 +	};
 +};
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 5d787d4496e0..ea0829b60aa3 100644
+index 5d787d4496e0..ef56c62fe23e 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -5,6 +5,7 @@
@@ -145,8 +145,8 @@ index 5d787d4496e0..ea0829b60aa3 100644
 +		};
 +
 +		pcie0: pcie@1cb0000000 {
-+			device_type = "pci";
 +			compatible = "apple,t8132-pcie", "apple,t6020-pcie";
++			device_type = "pci";
 +			reg = <0x1c 0xb0000000 0x0 0x1000000>,	/* config */
 +			      <0x4 0x94000000 0x0 0x4000>,	/* rc */
 +			      <0x4 0x90028000 0x0 0x4000>,	/* port0 */
@@ -178,8 +178,8 @@ index 5d787d4496e0..ea0829b60aa3 100644
 +			power-domains = <&ps_apcie_phy_sw>;
 +
 +			port00: pci@0,0 {
-+				device_type = "pci";
 +				compatible = "pciclass,0604";
++				device_type = "pci";
 +				reg = <0x0 0x0 0x0 0x0 0x0>;
 +				ranges;
 +				#address-cells = <3>;
@@ -195,8 +195,8 @@ index 5d787d4496e0..ea0829b60aa3 100644
 +			};
 +
 +			port01: pci@1,0 {
-+				device_type = "pci";
 +				compatible = "pciclass,0604";
++				device_type = "pci";
 +				reg = <0x800 0x0 0x0 0x0 0x0>;
 +				ranges;
 +				#address-cells = <3>;
@@ -214,8 +214,8 @@ index 5d787d4496e0..ea0829b60aa3 100644
 +			};
 +
 +			port02: pci@2,0 {
-+				device_type = "pci";
 +				compatible = "pciclass,0604";
++				device_type = "pci";
 +				reg = <0x1000 0x0 0x0 0x0 0x0>;
 +				ranges;
 +				#address-cells = <3>;

@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 09:44:06 -0600
+Subject: [PATCH] drivers/perf: apple_m1: Keep the format attribute named
+ "event"
+
+PMU_FORMAT_ATTR() names the sysfs file after its first argument, so the
+per-size attributes showed up as format/event_8b rather than
+format/event. perf then no longer accepts event=, which also breaks the
+events/cycles and events/instructions aliases on every Apple PMU. The
+16-bit table also pointed at the 8-bit attribute, so M3, M4 and A18
+advertised only config:0-7.
+
+Name both attributes "event" and use the 16-bit one in the 16-bit table.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/perf/apple_m1_cpu_pmu.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/perf/apple_m1_cpu_pmu.c b/drivers/perf/apple_m1_cpu_pmu.c
+index 814a8faabec1..edac4b20cd4d 100644
+--- a/drivers/perf/apple_m1_cpu_pmu.c
++++ b/drivers/perf/apple_m1_cpu_pmu.c
+@@ -545,8 +545,14 @@ static const struct attribute_group m4_pmu_events_attr_group = {
+ 	.attrs = m4_pmu_event_attrs,
+ };
+ 
+-PMU_FORMAT_ATTR(event_8b, "config:0-7");
+-PMU_FORMAT_ATTR(event_16b, "config:0-15");
++PMU_FORMAT_ATTR_SHOW(event_8b, "config:0-7");
++PMU_FORMAT_ATTR_SHOW(event_16b, "config:0-15");
++
++/* Both are named "event", which is what perf and the events/ aliases use. */
++static struct device_attribute format_attr_event_8b =
++	__ATTR(event, 0444, event_8b_show, NULL);
++static struct device_attribute format_attr_event_16b =
++	__ATTR(event, 0444, event_16b_show, NULL);
+ 
+ static struct attribute *apple_pmu_format_attrs_8[] = {
+ 	&format_attr_event_8b.attr,
+@@ -554,7 +560,7 @@ static struct attribute *apple_pmu_format_attrs_8[] = {
+ };
+ 
+ static struct attribute *apple_pmu_format_attrs_16[] = {
+-	&format_attr_event_8b.attr,
++	&format_attr_event_16b.attr,
+ 	NULL,
+ };
+ 

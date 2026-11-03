@@ -14,7 +14,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 34 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index ea0829b60aa3..914131d801ab 100644
+index ef56c62fe23e..67168293fec9 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -489,6 +489,26 @@ serial0: serial@3ad200000 {
@@ -63,5 +63,5 @@ index ea0829b60aa3..914131d801ab 100644
 +		};
 +
  		pcie0: pcie@1cb0000000 {
- 			device_type = "pci";
  			compatible = "apple,t8132-pcie", "apple,t6020-pcie";
+ 			device_type = "pci";

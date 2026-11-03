@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 10:46:28 -0600
+Subject: [PATCH] drivers/perf: apple_m1: Drop the unused init_pmceid aliases
+
+APPLE_PMU_INIT() calls apple_pmu_init_pmceid() for every implementation,
+so m2_pmu_init_pmceid and a18_pmu_init_pmceid are never used, and they
+name functions that do not exist.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/perf/apple_m1_cpu_pmu.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/drivers/perf/apple_m1_cpu_pmu.c b/drivers/perf/apple_m1_cpu_pmu.c
+index a67a364a931c..30106c825c46 100644
+--- a/drivers/perf/apple_m1_cpu_pmu.c
++++ b/drivers/perf/apple_m1_cpu_pmu.c
+@@ -1127,7 +1127,6 @@ static int gen ## _pmu_ ## family ## _init(struct arm_pmu *cpu_pmu)				\
+ #define m2_pmu_get_event_idx		m1_pmu_get_event_idx
+ #define m2_pmu_set_event_filter		m1_pmu_set_event_filter
+ #define m2_pmu_map_pmuv3_event		m1_pmu_map_pmuv3_event
+-#define m2_pmu_init_pmceid		m1_pmu_init_pmceid
+ #define m2_pmu_events_attr_group	m1_pmu_events_attr_group
+ #define m2_pmu_format_attr_group	m1_pmu_format_attr_group
+ 
+@@ -1140,7 +1139,6 @@ static int gen ## _pmu_ ## family ## _init(struct arm_pmu *cpu_pmu)				\
+ #define a18_pmu_get_event_idx		m4_pmu_get_event_idx
+ #define a18_pmu_set_event_filter	m4_pmu_set_event_filter
+ #define a18_pmu_map_pmuv3_event		m4_pmu_map_pmuv3_event
+-#define a18_pmu_init_pmceid		m4_pmu_init_pmceid
+ #define a18_pmu_events_attr_group	m4_pmu_events_attr_group
+ #define a18_pmu_format_attr_group	m4_pmu_format_attr_group
+ 

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 10:47:52 -0600
+Subject: [PATCH] arm64: dts: apple: t8132: Say why dtc's two warnings stay
+
+dtc warns about the disp0_piodma alias name and about the DCP node's
+cell counts. m1n1 finds piodma through that alias, and the kernel sizes
+the iommu-addresses m1n1 adds for it from the DCP node's cells.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-jxxx.dtsi | 1 +
+ arch/arm64/boot/dts/apple/t8132.dtsi      | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi b/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
+index a0f33b57fb9f..a38e932209bd 100644
+--- a/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132-jxxx.dtsi
+@@ -18,6 +18,7 @@ aliases {
+ 		bluetooth0 = &bluetooth0;
+ 		dcp = &dcp;
+ 		disp0 = &display;
++		/* m1n1 looks this up by name; dtc dislikes the underscore. */
+ 		disp0_piodma = &disp0_piodma;
+ 		serial0 = &serial0;
+ 		wifi0 = &wifi0;
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index c436c3e75ebf..8351a2430f44 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -442,6 +442,7 @@ dcp: dcp@30ae00000 {
+ 			      <0x3 0x0a3a8000 0x0 0x4000>,
+ 			      <0x3 0x0a800000 0x0 0x800000>;
+ 			reg-names = "coproc", "disp-0", "disp-1", "disp-2", "disp-3";
++			/* For the iommu-addresses m1n1 points at piodma. */
+ 			#address-cells = <2>;
+ 			#size-cells = <2>;
+ 			clocks = <&clk_disp0>;

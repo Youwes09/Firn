@@ -16,7 +16,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 28 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 7cf2cb8f26d3..3ed92d61b9f4 100644
+index 91571b37f832..e633fbe3557b 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -291,6 +291,26 @@ pm_setting: pm-setting@2001 {

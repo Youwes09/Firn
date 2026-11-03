@@ -15,7 +15,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 202 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index a96497758aea..9ca8de206d4a 100644
+index 95fbbaade8b1..7761d2e4933a 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -386,6 +386,192 @@ cpufreq_p: cpufreq@211e20000 {

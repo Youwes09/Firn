@@ -16,7 +16,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 73 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 5dc916d50553..7a3d2ad01f5e 100644
+index cfae2d7b97ba..df2ac404e766 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -587,6 +587,79 @@ pinctrl_aop: pinctrl@390824000 {

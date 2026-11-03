@@ -37,7 +37,7 @@ let
     /soc/fifo@394b14000: failed to match any schema with compatible: ['apple,t8132-dockchannel', 'apple,dockchannel']
     /soc/fifo@394b14000/input@0: failed to match any schema with compatible: ['apple,t8132-dockchannel-hid', 'apple,dockchannel-hid']
     /soc/mtp@394600000: failed to match any schema with compatible: ['apple,t8132-mtp', 'apple,t8132-rtk-helper-asc4', 'apple,mtp', 'apple,rtk-helper-asc4']
-    /soc/phy@39a700000: failed to match any schema with compatible: ['apple,t8122-dptx-phy', 'apple,dptx-phy']
+    /soc/phy@39a700000: failed to match any schema with compatible: ['apple,t8132-dptx-phy', 'apple,dptx-phy']
   '';
 in
 pkgs.runCommandCC "firn-devicetree-schema"

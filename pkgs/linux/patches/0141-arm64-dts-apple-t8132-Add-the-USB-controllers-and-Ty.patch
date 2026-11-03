@@ -215,7 +215,7 @@ index 61b5a0e45b67..d32e1d5b181c 100644
 +	};
 +};
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 9ca8de206d4a..606acc8aa1c4 100644
+index 7761d2e4933a..00f21b505077 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -8,6 +8,7 @@

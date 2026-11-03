@@ -11,8 +11,8 @@ Assisted-by: Codex:gpt-5.6-sol
 Signed-off-by: Niklas Sheth <hi@niklassheth.com>
 [Youwes09: devicetree part of niklassheth/linux 877c574dfa4f, internal
  display only; the DMA window in the five-cell DART specifier; T8132
- mailbox compatible; no dma-noncoherent, as CLIDR_EL1.LoC == 0 makes
- all DMA coherent; address order and style]
+ mailbox and DP TX PHY compatibles; no dma-noncoherent, as
+ CLIDR_EL1.LoC == 0 makes all DMA coherent; address order and style]
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
  arch/arm64/boot/dts/apple/t8132-jxxx.dtsi |  3 +
@@ -34,7 +34,7 @@ index d32e1d5b181c..a0f33b57fb9f 100644
  		wifi0 = &wifi0;
  	};
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 606acc8aa1c4..ec2ff1f0dc62 100644
+index 00f21b505077..4be0a1116275 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -358,6 +358,13 @@ opp20 {
@@ -154,7 +154,7 @@ index 606acc8aa1c4..ec2ff1f0dc62 100644
  		};
  
 +		dptxphy: phy@39a700000 {
-+			compatible = "apple,t8122-dptx-phy", "apple,dptx-phy";
++			compatible = "apple,t8132-dptx-phy", "apple,dptx-phy";
 +			reg = <0x3 0x9a700000 0x0 0x4000>,
 +			      <0x3 0x9a740000 0x0 0x10000>;
 +			reg-names = "core", "dptx";

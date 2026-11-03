@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 10:48:22 -0600
+Subject: [PATCH] drivers/perf: apple_m1: Fix a typo in a comment
+
+"mimick" should be "mimic", and the sentence lacked its full stop.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/perf/apple_m1_cpu_pmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/perf/apple_m1_cpu_pmu.c b/drivers/perf/apple_m1_cpu_pmu.c
+index edac4b20cd4d..a67a364a931c 100644
+--- a/drivers/perf/apple_m1_cpu_pmu.c
++++ b/drivers/perf/apple_m1_cpu_pmu.c
+@@ -967,7 +967,7 @@ static int apple_pmu_map_event(struct perf_event *event,
+  * 64 bits wide, depending on the SoC. However, the MSB is
+  * what triggers an overflow interrupt, so we advertise the
+  * counters as being 1-bit smaller than hardware allows to
+- * mimick ARM PMU behaviour
++ * mimic ARM PMU behaviour.
+  */
+ static int m1_pmu_map_event(struct perf_event *event)
+ {

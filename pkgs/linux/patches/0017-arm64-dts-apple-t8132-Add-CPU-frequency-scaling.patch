@@ -16,7 +16,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 185 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
-index 33ae343442a2..5dc916d50553 100644
+index 57a2d6a88c82..cfae2d7b97ba 100644
 --- a/arch/arm64/boot/dts/apple/t8132.dtsi
 +++ b/arch/arm64/boot/dts/apple/t8132.dtsi
 @@ -68,6 +68,8 @@ cpu_e0: cpu@0 {

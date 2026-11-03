@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Myria Sarvay <myrialsarvay@gmail.com>
+Date: Tue, 6 Oct 2026 15:25:19 +1100
+Subject: [PATCH] drivers/perf: apple_m1: Remove unused variables
+
+These variables are calculated elsewhere as well, remove the extra dead
+code.
+
+Signed-off-by: Myria Sarvay <myrialsarvay@gmail.com>
+Fixes: a639027a1be1 ("drivers/perf: Add Apple icestorm/firestorm CPU PMU driver")
+---
+ drivers/perf/apple_m1_cpu_pmu.c | 7 -------
+ 1 file changed, 7 deletions(-)
+
+diff --git a/drivers/perf/apple_m1_cpu_pmu.c b/drivers/perf/apple_m1_cpu_pmu.c
+index 1f73c8a77462..de4026c63afd 100644
+--- a/drivers/perf/apple_m1_cpu_pmu.c
++++ b/drivers/perf/apple_m1_cpu_pmu.c
+@@ -421,13 +421,6 @@ static void m1_pmu_configure_counter(unsigned int index, unsigned long config_ba
+ /* arm_pmu backend */
+ static void m1_pmu_enable_event(struct perf_event *event)
+ {
+-	bool user, kernel;
+-	u8 evt;
+-
+-	evt = event->hw.config_base & M1_PMU_CFG_EVENT;
+-	user = event->hw.config_base & M1_PMU_CFG_COUNT_USER;
+-	kernel = event->hw.config_base & M1_PMU_CFG_COUNT_KERNEL;
+-
+ 	m1_pmu_configure_counter(event->hw.idx, event->hw.config_base);
+ 	m1_pmu_enable_counter(event->hw.idx);
+ 	m1_pmu_enable_counter_interrupt(event->hw.idx);

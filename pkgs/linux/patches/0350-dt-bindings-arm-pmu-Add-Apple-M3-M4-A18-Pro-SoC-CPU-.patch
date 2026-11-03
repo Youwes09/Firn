@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Myria Sarvay <myrialsarvay@gmail.com>
+Date: Tue, 29 Sep 2026 04:53:53 +1000
+Subject: [PATCH] dt-bindings: arm: pmu: Add Apple M3/M4/A18 Pro SoC CPU PMU
+ compatibles
+
+Document the compatibles for all current M3, M4 and A18 Pro SoC PMU
+variants. Note that the M4+ are split out by chip codenames, instead of
+name for the types of cores, as they no longer have individual names for
+the performance and efficiency cores.
+
+Signed-off-by: Myria Sarvay <myrialsarvay@gmail.com>
+---
+ Documentation/devicetree/bindings/arm/pmu.yaml | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/arm/pmu.yaml b/Documentation/devicetree/bindings/arm/pmu.yaml
+index f47baaefcdac..c27f06e82de1 100644
+--- a/Documentation/devicetree/bindings/arm/pmu.yaml
++++ b/Documentation/devicetree/bindings/arm/pmu.yaml
+@@ -22,8 +22,16 @@ properties:
+           - apm,potenza-pmu
+           - apple,avalanche-pmu
+           - apple,blizzard-pmu
++          - apple,brava-e-pmu
++          - apple,brava-p-pmu
++          - apple,donan-e-pmu
++          - apple,donan-p-pmu
++          - apple,everest-pmu
+           - apple,firestorm-pmu
+           - apple,icestorm-pmu
++          - apple,sawtooth-pmu
++          - apple,tahiti-e-pmu
++          - apple,tahiti-p-pmu
+           - arm,armv8-pmuv3 # Only for s/w models
+           - arm,arm1136-pmu
+           - arm,arm1176-pmu
