@@ -109,9 +109,10 @@ Each stands in for a fix that is not done yet ([TODO.md](TODO.md)).
 
 - **No sleep.** Suspend and hibernate are refused, and closing the lid
   powers the Air off.
-- **Capped CPU clocks.** Nothing throttles the CPUs yet, so `firn-cpu-cap`
-  holds the P cores at 1.8 GHz and the E cores at 2.17 GHz, about 74 C under
-  load.
+- **Capped P-cluster clock.** The CPU thermal zone holds sustained load at
+  90 C, but its sensor updates once a second and an all-core step heats the
+  hot spot within 0.1 s, so `firn-cpu-cap` holds the P cores at 2.868 GHz,
+  where a step from a warm package peaks near 90 C.
 - **No KVM guest timers.** AIC skips the EL2 guest timer FIQ enables and
   `ICH_HCR_EL2` on T8132, as writing them hangs the boot. m1n1 reports the
   Apple system registers as locked on M4, which may be the cause.

@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 20:52:41 -0600
+Subject: [PATCH] arm64: dts: apple: t8132: Make the CPUs cooling devices
+
+Add #cooling-cells to the CPU nodes, so thermal zones can cap the
+clusters through cpufreq.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 77ac0f0d56c5..7f76b9a71323 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -75,6 +75,7 @@ cpu_e0: cpu@0 {
+ 			operating-points-v2 = <&ecluster_opp>;
+ 			capacity-dmips-mhz = <677>;
+ 			performance-domains = <&cpufreq_e>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_e1: cpu@1 {
+@@ -89,6 +90,7 @@ cpu_e1: cpu@1 {
+ 			operating-points-v2 = <&ecluster_opp>;
+ 			capacity-dmips-mhz = <677>;
+ 			performance-domains = <&cpufreq_e>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_e2: cpu@2 {
+@@ -103,6 +105,7 @@ cpu_e2: cpu@2 {
+ 			operating-points-v2 = <&ecluster_opp>;
+ 			capacity-dmips-mhz = <677>;
+ 			performance-domains = <&cpufreq_e>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_e3: cpu@3 {
+@@ -117,6 +120,7 @@ cpu_e3: cpu@3 {
+ 			operating-points-v2 = <&ecluster_opp>;
+ 			capacity-dmips-mhz = <677>;
+ 			performance-domains = <&cpufreq_e>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_e4: cpu@4 {
+@@ -131,6 +135,7 @@ cpu_e4: cpu@4 {
+ 			operating-points-v2 = <&ecluster_opp>;
+ 			capacity-dmips-mhz = <677>;
+ 			performance-domains = <&cpufreq_e>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_e5: cpu@5 {
+@@ -145,6 +150,7 @@ cpu_e5: cpu@5 {
+ 			operating-points-v2 = <&ecluster_opp>;
+ 			capacity-dmips-mhz = <677>;
+ 			performance-domains = <&cpufreq_e>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_p0: cpu@10100 {
+@@ -159,6 +165,7 @@ cpu_p0: cpu@10100 {
+ 			operating-points-v2 = <&pcluster_opp>;
+ 			capacity-dmips-mhz = <1024>;
+ 			performance-domains = <&cpufreq_p>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_p1: cpu@10101 {
+@@ -173,6 +180,7 @@ cpu_p1: cpu@10101 {
+ 			operating-points-v2 = <&pcluster_opp>;
+ 			capacity-dmips-mhz = <1024>;
+ 			performance-domains = <&cpufreq_p>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_p2: cpu@10102 {
+@@ -187,6 +195,7 @@ cpu_p2: cpu@10102 {
+ 			operating-points-v2 = <&pcluster_opp>;
+ 			capacity-dmips-mhz = <1024>;
+ 			performance-domains = <&cpufreq_p>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu_p3: cpu@10103 {
+@@ -201,6 +210,7 @@ cpu_p3: cpu@10103 {
+ 			operating-points-v2 = <&pcluster_opp>;
+ 			capacity-dmips-mhz = <1024>;
+ 			performance-domains = <&cpufreq_p>;
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		l2_cache_0: l2-cache-0 {

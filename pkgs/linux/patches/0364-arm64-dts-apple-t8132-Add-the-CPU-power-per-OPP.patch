@@ -1,0 +1,200 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 18:46:24 -0600
+Subject: [PATCH] arm64: dts: apple: t8132: Add the CPU power per OPP
+
+Give every CPU OPP its active power, so the kernel can build an energy
+model for both clusters.
+
+The values are measured on the J713. At each pinned OPP, the SMC's P or
+E cluster rail power with every core of the cluster running a busy loop,
+divided by the number of cores, gives the power per core, including its
+share of the cluster's own power at that clock. a f + b f^3 fitted to
+those points gives the values here, within 9% of the measurements. Four
+P cores never run above 3.936 GHz, so from 3.756 GHz two P cores ran and
+the four-core power is twice theirs less the idle cluster; the P OPPs
+above 3.936 GHz and the E cluster's 2.892 GHz take the fitted curve.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index d1c11bbe41a9..77ac0f0d56c5 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -225,41 +225,49 @@ ecluster_opp: opp-table-0 {
+ 		opp01 {
+ 			opp-hz = /bits/ 64 <900000000>;
+ 			opp-level = <1>;
++			opp-microwatt = <65405>;
+ 		};
+ 
+ 		opp02 {
+ 			opp-hz = /bits/ 64 <1080000000>;
+ 			opp-level = <2>;
++			opp-microwatt = <85052>;
+ 		};
+ 
+ 		opp03 {
+ 			opp-hz = /bits/ 64 <1476000000>;
+ 			opp-level = <3>;
++			opp-microwatt = <141720>;
+ 		};
+ 
+ 		opp04 {
+ 			opp-hz = /bits/ 64 <1860000000>;
+ 			opp-level = <4>;
++			opp-microwatt = <219231>;
+ 		};
+ 
+ 		opp05 {
+ 			opp-hz = /bits/ 64 <2172000000>;
+ 			opp-level = <5>;
++			opp-microwatt = <302610>;
+ 		};
+ 
+ 		opp06 {
+ 			opp-hz = /bits/ 64 <2496000000>;
+ 			opp-level = <6>;
++			opp-microwatt = <412140>;
+ 		};
+ 
+ 		opp07 {
+ 			opp-hz = /bits/ 64 <2808000000>;
+ 			opp-level = <7>;
++			opp-microwatt = <542917>;
+ 		};
+ 
+ 		opp08 {
+ 			opp-hz = /bits/ 64 <2892000000>;
+ 			opp-level = <8>;
++			opp-microwatt = <582776>;
+ 			turbo-mode;
+ 		};
+ 	};
+@@ -271,102 +279,122 @@ pcluster_opp: opp-table-1 {
+ 		opp01 {
+ 			opp-hz = /bits/ 64 <912000000>;
+ 			opp-level = <1>;
++			opp-microwatt = <294629>;
+ 		};
+ 
+ 		opp02 {
+ 			opp-hz = /bits/ 64 <1260000000>;
+ 			opp-level = <2>;
++			opp-microwatt = <457307>;
+ 		};
+ 
+ 		opp03 {
+ 			opp-hz = /bits/ 64 <1512000000>;
+ 			opp-level = <3>;
++			opp-microwatt = <604500>;
+ 		};
+ 
+ 		opp04 {
+ 			opp-hz = /bits/ 64 <1800000000>;
+ 			opp-level = <4>;
++			opp-microwatt = <810240>;
+ 		};
+ 
+ 		opp05 {
+ 			opp-hz = /bits/ 64 <2088000000>;
+ 			opp-level = <5>;
++			opp-microwatt = <1063248>;
+ 		};
+ 
+ 		opp06 {
+ 			opp-hz = /bits/ 64 <2352000000>;
+ 			opp-level = <6>;
++			opp-microwatt = <1343155>;
+ 		};
+ 
+ 		opp07 {
+ 			opp-hz = /bits/ 64 <2616000000>;
+ 			opp-level = <7>;
++			opp-microwatt = <1674960>;
+ 		};
+ 
+ 		opp08 {
+ 			opp-hz = /bits/ 64 <2868000000>;
+ 			opp-level = <8>;
++			opp-microwatt = <2045448>;
+ 		};
+ 
+ 		opp09 {
+ 			opp-hz = /bits/ 64 <3096000000>;
+ 			opp-level = <9>;
++			opp-microwatt = <2430199>;
+ 		};
+ 
+ 		opp10 {
+ 			opp-hz = /bits/ 64 <3300000000>;
+ 			opp-level = <10>;
++			opp-microwatt = <2817530>;
+ 		};
+ 
+ 		opp11 {
+ 			opp-hz = /bits/ 64 <3468000000>;
+ 			opp-level = <11>;
++			opp-microwatt = <3169036>;
+ 		};
+ 
+ 		opp12 {
+ 			opp-hz = /bits/ 64 <3624000000>;
+ 			opp-level = <12>;
++			opp-microwatt = <3523151>;
+ 		};
+ 
+ 		opp13 {
+ 			opp-hz = /bits/ 64 <3756000000>;
+ 			opp-level = <13>;
++			opp-microwatt = <3844547>;
+ 		};
+ 
+ 		opp14 {
+ 			opp-hz = /bits/ 64 <3876000000>;
+ 			opp-level = <14>;
++			opp-microwatt = <4154686>;
+ 		};
+ 
+ 		opp15 {
+ 			opp-hz = /bits/ 64 <3936000000>;
+ 			opp-level = <15>;
++			opp-microwatt = <4316348>;
+ 		};
+ 
+ 		opp16 {
+ 			opp-hz = /bits/ 64 <3984000000>;
+ 			opp-level = <16>;
++			opp-microwatt = <4448904>;
+ 		};
+ 
+ 		opp17 {
+ 			opp-hz = /bits/ 64 <4044000000>;
+ 			opp-level = <17>;
++			opp-microwatt = <4618690>;
+ 		};
+ 
+ 		opp18 {
+ 			opp-hz = /bits/ 64 <4104000000>;
+ 			opp-level = <18>;
++			opp-microwatt = <4793086>;
+ 		};
+ 
+ 		opp19 {
+ 			opp-hz = /bits/ 64 <4416000000>;
+ 			opp-level = <19>;
++			opp-microwatt = <5776890>;
+ 			turbo-mode;
+ 		};
+ 
+ 		opp20 {
+ 			opp-hz = /bits/ 64 <4464000000>;
+ 			opp-level = <20>;
++			opp-microwatt = <5940083>;
+ 			turbo-mode;
+ 		};
+ 	};

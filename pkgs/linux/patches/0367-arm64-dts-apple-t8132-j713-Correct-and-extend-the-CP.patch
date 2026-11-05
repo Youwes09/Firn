@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 20:54:40 -0600
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Correct and extend the CPU
+ sensors
+
+The IP0b, PP0b and VP0b rail is the P cluster's alone: PP0b stays at
+idle with only the E cores loaded, and VP0b times IP0b equals PP0b.
+Label it so, and add the E cluster's rail power, PPbb, and TCMz, the
+hottest of the CPU sensors.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index bdc4755fea5d..685ed36bd6e1 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -35,6 +35,7 @@ led-0 {
+ 			max-brightness = <255>;
+ 		};
+ 	};
++
+ };
+ 
+ &wifi0 {
+@@ -282,22 +283,33 @@ &ps_nub_spi0 {
+ 
+ &smc_hwmon {
+ 	current-IP0b {
+-		label = "CPU Rail Current";
++		label = "P-cluster Rail Current";
+ 		apple,key-id = "IP0b";
+ 	};
+ 
+ 	power-PP0b {
+-		label = "CPU Rail Power";
++		label = "P-cluster Rail Power";
+ 		apple,key-id = "PP0b";
+ 	};
+ 
++	power-PPbb {
++		label = "E-cluster Rail Power";
++		apple,key-id = "PPbb";
++	};
++
++	/* The hottest of the P and E cluster sensors. */
++	temperature-TCMz {
++		label = "CPU Hot Spot";
++		apple,key-id = "TCMz";
++	};
++
+ 	temperature-Tp0f {
+ 		label = "CPU Temperature";
+ 		apple,key-id = "Tp0f";
+ 	};
+ 
+ 	voltage-VP0b {
+-		label = "CPU Rail Voltage";
++		label = "P-cluster Rail Voltage";
+ 		apple,key-id = "VP0b";
+ 	};
+ };

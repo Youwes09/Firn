@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 20:51:56 -0600
+Subject: [PATCH] dt-bindings: hwmon: apple,smc-hwmon: Allow
+ #thermal-sensor-cells
+
+The hwmon core registers a thermal zone for each temperature sensor
+that a thermal-zones node points at, but the binding has no property
+for the sensor index such a reference needs, #thermal-sensor-cells,
+so that devicetree fails validation.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../devicetree/bindings/hwmon/apple,smc-hwmon.yaml          | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml b/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml
+index 64149ef4cc59..0377ae435609 100644
+--- a/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml
++++ b/Documentation/devicetree/bindings/hwmon/apple,smc-hwmon.yaml
+@@ -40,6 +40,12 @@ properties:
+   compatible:
+     const: apple,smc-hwmon
+ 
++  "#thermal-sensor-cells":
++    const: 1
++    description:
++      The cell is the index of a temperature sensor, counting the
++      temperature-* nodes in order from 0.
++
+ patternProperties:
+   "^current-[A-Za-z0-9]{4}$":
+     $ref: "#/$defs/sensor"
