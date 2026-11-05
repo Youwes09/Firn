@@ -1,0 +1,56 @@
+From 54e53803f4dcff9cd44152cbb45b10a9bb915cc8 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 09:26:47 -0600
+Subject: [PATCH] soc: apple: tunable: Apply nothing for a missing tunable
+
+The M3 and M4 Type-C PHYs have no DisplayPort lane tunables, so the
+driver leaves them NULL, but USB3 mode still applies the DP tunable to
+the second lane. Connecting a USB3 device then oopses:
+
+  Unable to handle kernel NULL pointer dereference at virtual address 0000000000000000
+  pc : apple_tunable_apply+0x0/0x7c
+  lr : atcphy_configure+0x484/0x1144
+  Call trace:
+   apple_tunable_apply+0x0/0x7c (P)
+   atcphy_mux_set+0xdc/0x160
+   typec_mux_set+0x5c/0x84
+   cd321x_update_work+0x3a4/0x478
+
+Treat a NULL tunable as empty.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/soc/apple/tunable.c       | 3 +++
+ include/linux/soc/apple/tunable.h | 2 +-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/soc/apple/tunable.c b/drivers/soc/apple/tunable.c
+index 659323839171..af0e0ec88289 100644
+--- a/drivers/soc/apple/tunable.c
++++ b/drivers/soc/apple/tunable.c
+@@ -63,6 +63,9 @@ void apple_tunable_apply(void __iomem *regs, struct apple_tunable *tunable)
+ {
+ 	size_t i;
+ 
++	if (!tunable)
++		return;
++
+ 	for (i = 0; i < tunable->sz; ++i) {
+ 		u32 val, old_val;
+ 
+diff --git a/include/linux/soc/apple/tunable.h b/include/linux/soc/apple/tunable.h
+index 531ca814cd02..2a5bbdb5a2e2 100644
+--- a/include/linux/soc/apple/tunable.h
++++ b/include/linux/soc/apple/tunable.h
+@@ -55,7 +55,7 @@ struct apple_tunable *devm_apple_tunable_parse(struct device *dev,
+  * Apply a previously loaded hardware tunable.
+  *
+  * @param regs: MMIO to which the tunable will be applied.
+- * @param tunable: Pointer to the tunable.
++ * @param tunable: Pointer to the tunable, or NULL to apply nothing.
+  */
+ void apple_tunable_apply(void __iomem *regs, struct apple_tunable *tunable);
+ 
+-- 
+2.54.0
+
