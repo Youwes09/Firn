@@ -103,7 +103,15 @@ superblock's last write as in the future, until NTP set the clock. Nothing
 reads the RTC early. Harmless so far; it will matter for anything that checks
 certificates or timestamps before the network is up.
 
-## 3. Workarounds in effect
+## 3. No display driver or GPU on 27.2 firmware
+
+Firn boots from a macOS 27.2 stub. The DCP driver speaks only the 26.6.2
+interface and refuses to start (`DCP requires firmware 26.6.2 (FW: 27.2.0)`),
+so the screen is m1n1's framebuffer through simpledrm: no brightness or
+modesetting. The GPU handoff was built for 26.6.x, so there is no GPU. Both
+are being ported.
+
+## 4. Workarounds in effect
 
 Each stands in for a fix that is not done yet ([TODO.md](TODO.md)).
 

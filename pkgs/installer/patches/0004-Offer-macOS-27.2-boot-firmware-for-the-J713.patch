@@ -1,0 +1,77 @@
+From b30681ed87670a734ec236b464279c0a4d0e7d45 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 4 Nov 2026 15:42:50 -0600
+Subject: [PATCH] Offer macOS 27.2 boot firmware for the J713
+
+Add the 27.2 (26B123) restore image and qualify its BaseSystem recovery
+image. Firn moves the J713 to this firmware while its drivers are ported
+to it.
+
+27.2's bootcaches.plist has no RestoreBundlePath either, and an installed
+27.2 keeps its restore assets in <volume-group>/restore like 26.6.2, so
+use the same fallback.
+
+The recovery key is Apple's public release key, resolved with ipsw
+v3.1.672 and checked by decrypting the archive to the pinned digest.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ src/main.py     | 3 +++
+ src/recovery.py | 6 ++++++
+ src/stub.py     | 8 ++++----
+ 3 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/src/main.py b/src/main.py
+index 52c2d3e..f377f51 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -45,6 +45,9 @@ IPSW_VERSIONS = [
+     # Keep this entry current with an Apple-signed restore image for Mac16,10 and Mac16,12.
+     IPSW("26.6.2", "26.5", "0", "0", False, ["j713ap", "j773gap"],
+          "https://updates.cdn-apple.com/2026SummerFCS/fullrestores/140-75212/A2A24B94-1FC1-45A3-93F7-C51B02AF1F4D/UniversalMac_26.6.2_25G83_Restore.ipsw"),
++    # Firn's drivers are still being ported to this firmware.
++    IPSW("27.2", "27.2", "0", "0", False, ["j713ap"],
++         "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw"),
+ ]
+ 
+ class InstallerMain:
+diff --git a/src/recovery.py b/src/recovery.py
+index fe8062d..c654e13 100644
+--- a/src/recovery.py
++++ b/src/recovery.py
+@@ -23,6 +23,12 @@ QUALIFIED_IMAGES = {
+         "decoded_sha256": "eeda386b1fb66a313cadef26e3e7ee06643d4d5ea8b3330a411a118ac7d14ed3",
+         "key": "base64:WYNVRNc/IXaQQi1cN2hGFNsELwlDuMHjSRi97lyIQJo=",
+     },
++    # Resolved with ipsw v3.1.672 (fw aea --key) and checked by decrypting it.
++    ("27.2", "022-22150-174.dmg.aea"): {
++        "encrypted_sha256": "724af34ae5e58ad3a45ea4fcf33ad99c8090f9481887e6362ff66b12183e8a01",
++        "decoded_sha256": "b4af6b56d60a9466931310a1fcd8503527ffe4263451abab136d3edc97e4e6e6",
++        "key": "base64:Pvt5QgdmJfCpEVXjlfLbBbYKyfqQWKwgvXwnOrIuri4=",
++    },
+ }
+ 
+ 
+diff --git a/src/stub.py b/src/stub.py
+index a0d554a..6c3c687 100644
+--- a/src/stub.py
++++ b/src/stub.py
+@@ -300,10 +300,10 @@ class StubInstaller(PackageInstaller):
+         bless2 = self.bootcaches["bless2"]
+         if "RestoreBundlePath" in bless2:
+             return bless2["RestoreBundlePath"]
+-        # 26.6.2 omits this key. Its installed Preboot layout still places
+-        # restore assets in <volume-group>/restore. Limit this compatibility
+-        # fallback to the firmware layout we have actually inspected.
+-        if self.install_version == "26.6.2":
++        # 26.6.2 and 27.2 omit this key. Their installed Preboot layout still
++        # places restore assets in <volume-group>/restore. Limit this
++        # compatibility fallback to the firmware layouts we have inspected.
++        if self.install_version in ("26.6.2", "27.2"):
+             return "restore"
+         raise ValueError(f"Missing RestoreBundlePath for macOS {self.install_version}")
+ 
+-- 
+2.54.0
+

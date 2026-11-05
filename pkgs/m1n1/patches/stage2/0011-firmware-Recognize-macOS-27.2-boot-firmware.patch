@@ -1,0 +1,42 @@
+From 9e4f47ccfd9577714661338f3144d356b7d69701 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 4 Nov 2026 15:42:35 -0600
+Subject: [PATCH] firmware: Recognize macOS 27.2 boot firmware
+
+The 27.2 stub's iBoot reports mBoot-20457.41.3. Without an entry m1n1
+reports the firmware as unknown to the kernel.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ src/firmware.c | 1 +
+ src/firmware.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/src/firmware.c b/src/firmware.c
+index 18465c8..92966a5 100644
+--- a/src/firmware.c
++++ b/src/firmware.c
+@@ -203,6 +203,7 @@ const struct fw_version_info fw_versions[NUM_FW_VERSIONS] = {
+     [V26_4]      = {V26_4,      "26.4",        {26, 4, 0},     3, "mBoot-18000.101.7"},
+     [V26_6]      = {V26_6,      "26.6",        {26, 6, 0},     3, "mBoot-18000.160.17"},
+     [V26_6_2]    = {V26_6_2,    "26.6.2",      {26, 6, 2},     3, "mBoot-18000.161.10"},
++    [V27_2]      = {V27_2,      "27.2",        {27, 2, 0},     3, "mBoot-20457.41.3"},
+     // clang-format on
+ };
+ 
+diff --git a/src/firmware.h b/src/firmware.h
+index 80955ef..be7b64e 100644
+--- a/src/firmware.h
++++ b/src/firmware.h
+@@ -186,6 +186,7 @@ enum fw_version {
+     V26_4,
+     V26_6,
+     V26_6_2,
++    V27_2,
+     NUM_FW_VERSIONS,
+ };
+ 
+-- 
+2.54.0
+

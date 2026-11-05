@@ -13,8 +13,9 @@ makes sure none is built.
 
 ## What a driver needs on the J713
 
-- **Firmware `mBoot-18000.161.10`** (macOS 26.6.x). The installer puts a
-  macOS 26.6.2 stub beside macOS, which provides it.
+- **Firmware `mBoot-18000.161.10`** (macOS 26.6.x). Firn now installs a
+  macOS 27.2 stub (`mBoot-20457.41.3`), so the handoff has to be ported to
+  that firmware first.
 - **Ten performance states.** Gravity Linux's `asahi_m4` driver, in its
   `gravity-m4` kernel, reads exactly eleven.
 - **m1n1's GPU handoff**, in Gravity Linux's bootloader: the memory regions,

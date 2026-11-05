@@ -11,7 +11,7 @@ Linux, Asahi Linux or Apple.
 Before installing:
 
 1. Make a full, tested backup of the Mac.
-2. Have macOS 26.5 or newer. The installer puts a macOS 26.6.2 stub
+2. Have macOS 26.5 or newer. The installer puts a macOS 27.2 stub
    beside it, which the Air needs to boot Linux.
 3. Read GUIDE.md in this folder, on another device, before you start.
 
