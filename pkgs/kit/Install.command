@@ -23,5 +23,5 @@ cp "$kit/installer_data.json" "$work/"
 echo "Installer files: $work"
 echo 'The installer runs as root; enter your password if asked.'
 exec /usr/bin/caffeinate -dis /usr/bin/sudo /usr/bin/env \
-  REPO_BASE="$kit" DISTRO=Firn DISTRO_DOCS='GUIDE.md in the installer kit' \
+  REPO_BASE="$kit" DISTRO=Firn DISTRO_DOCS='GUIDE.md in the installer kit' ${EXPERT:+EXPERT="$EXPERT"} \
   "$work/install.sh"

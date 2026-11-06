@@ -1,0 +1,29 @@
+From 6b75dfe1e88f8db461f3724f7a6e959471a6c746 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 13:33:10 -0600
+Subject: [PATCH] main: Define the expert-mode minimum macOS version
+
+Expert mode looked up MIN_MACOS_VERSION_EXPERT, which was never
+defined, so the installer crashed before showing the OS list. Expert
+mode needs the same macOS as a normal install.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ src/main.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/main.py b/src/main.py
+index f377f51..2af29fd 100644
+--- a/src/main.py
++++ b/src/main.py
+@@ -19,6 +19,7 @@ MIN_FREE = psize("1GB")
+ MIN_INSTALL_FREE = psize("10GB")
+ 
+ MIN_MACOS_VERSION = "26.5"
++MIN_MACOS_VERSION_EXPERT = MIN_MACOS_VERSION
+ 
+ @dataclass
+ class IPSW:
+-- 
+2.54.0
+

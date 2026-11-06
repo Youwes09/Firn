@@ -91,6 +91,17 @@ def main():
             name: {'file': file, 'sha256': sha(path)} for name, (file, path) in parts.items()}},
     }
 
+    # Hypervisor development: a bare m1n1 proxy leaves ANS as iBoot set it up,
+    # and Gravity's hypervisor needs iBoot to have loaded this firmware.
+    tethered = {
+        'name': 'm1n1 proxy only (tethered, for development)',
+        'default_os_name': 'm1n1 proxy',
+        'expert': True,
+        'boot_object': 'm1n1.bin',
+        'supported_fw': [STUB_FIRMWARE],
+        'partitions': [],
+    }
+
     (out / 'os').mkdir()
     package = out / 'os' / PACKAGE
     # ZIP dates start at 1980.
@@ -125,7 +136,7 @@ def main():
         shutil.copyfile(source, out / name)
         os.chmod(out / name, mode)
     (out / 'installer_data.json').write_text(
-        json.dumps({'os_list': [entry]}, indent=2, sort_keys=True) + '\n')
+        json.dumps({'os_list': [entry, tethered]}, indent=2, sort_keys=True) + '\n')
 
     report = json.dumps({'bootargs': bootargs, 'bootargs_length': len(bootargs), 'root_bytes': root_bytes,
                          'package_sha256': sha(package),
