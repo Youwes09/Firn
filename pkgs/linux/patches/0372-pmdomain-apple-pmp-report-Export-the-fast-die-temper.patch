@@ -1,0 +1,153 @@
+From bdda6515505450cce853ce2f8019d421562af816 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 19:07:40 -0600
+Subject: [PATCH 372/375] pmdomain: apple: pmp-report: Export the fast
+ die-temperature effort
+
+PMP runs a control loop on its own die-temperature sensors and
+publishes for each CPU cluster an 8-bit effort, 0 below the loop's
+target and rising towards 255 while the die stays above it. On T8132
+it is the low two bytes of PTD FAST-DIE-CE (entry 0x1d1, from the ADT's
+ptd-range), E lane first; on a J713 under load the P lane rose from 0
+to 255 within 0.7 s once the SMC hot spot passed 109.5 C. Let cpufreq
+read it.
+
+Based on Ryan Murray's T8140 export in Aurora Silicon's tree
+(7a9913ea25e2).
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/pmdomain/apple/pmp-report.c  | 48 ++++++++++++++++++++++++++++
+ include/linux/soc/apple/pmp-report.h | 25 +++++++++++++++
+ 2 files changed, 73 insertions(+)
+ create mode 100644 include/linux/soc/apple/pmp-report.h
+
+diff --git a/drivers/pmdomain/apple/pmp-report.c b/drivers/pmdomain/apple/pmp-report.c
+index 3894a17cd1d7..3df59c8e84bd 100644
+--- a/drivers/pmdomain/apple/pmp-report.c
++++ b/drivers/pmdomain/apple/pmp-report.c
+@@ -12,6 +12,8 @@
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
++#include <linux/rcupdate.h>
++#include <linux/soc/apple/pmp-report.h>
+ #include <linux/workqueue.h>
+ 
+ #define PMP_REPORT_READY 0x1
+@@ -22,6 +24,9 @@ struct apple_pmp_report_offsets {
+ 	u32 tgt_write;
+ 	u32 actual;
+ 	u32 status;
++	/* Fast die-temperature effort, one byte per CPU cluster */
++	u32 fast_die;
++	u32 fast_die_lanes;
+ 	/* Has an event-config region and a sequence to run once PMP is up */
+ 	bool post_ready;
+ };
+@@ -36,6 +41,39 @@ struct apple_pmp_report {
+ 	unsigned long ready_deadline;
+ };
+ 
++static struct apple_pmp_report __rcu *apple_pmp_fast_die_report;
++
++/**
++ * apple_pmp_report_fast_die_effort() - read PMP's fast die-temperature effort
++ * @np: PMP report node
++ * @lane: CPU cluster lane
++ * @effort: 0 for no limit, up to 255
++ *
++ * Return: 0 on success, -EPROBE_DEFER if @np is not bound, -EINVAL if @lane is
++ * out of range, or -EAGAIN if PMP is not running.
++ */
++int apple_pmp_report_fast_die_effort(const struct device_node *np,
++				     unsigned int lane, u8 *effort)
++{
++	struct apple_pmp_report *rep;
++	int ret = 0;
++
++	rcu_read_lock();
++	rep = rcu_dereference(apple_pmp_fast_die_report);
++	if (!rep || rep->dev->of_node != np)
++		ret = -EPROBE_DEFER;
++	else if (lane >= rep->offsets->fast_die_lanes)
++		ret = -EINVAL;
++	else if (!(readq(rep->base + rep->offsets->status) & PMP_REPORT_READY))
++		ret = -EAGAIN;
++	else
++		*effort = readl(rep->base + rep->offsets->fast_die) >> (lane * 8);
++	rcu_read_unlock();
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(apple_pmp_report_fast_die_effort);
++
+ static int apple_pmp_report_vote(struct apple_pmp_report *rep, u64 bit,
+ 				 bool enable)
+ {
+@@ -127,6 +165,9 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
+ 		schedule_delayed_work(&rep->post_ready_work, 0);
+ 	}
+ 
++	if (rep->offsets->fast_die)
++		rcu_assign_pointer(apple_pmp_fast_die_report, rep);
++
+ 	return 0;
+ }
+ 
+@@ -134,6 +175,10 @@ static void apple_pmp_report_remove(struct platform_device *pdev)
+ {
+ 	struct apple_pmp_report *rep = platform_get_drvdata(pdev);
+ 
++	if (rcu_access_pointer(apple_pmp_fast_die_report) == rep) {
++		RCU_INIT_POINTER(apple_pmp_fast_die_report, NULL);
++		synchronize_rcu();
++	}
+ 	if (rep->offsets->post_ready)
+ 		cancel_delayed_work_sync(&rep->post_ready_work);
+ 	of_platform_depopulate(&pdev->dev);
+@@ -165,6 +210,9 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t8132 = {
+ 	.tgt_write = 0x10c40,
+ 	.actual = 0x1900,
+ 	.status = 0x10,
++	/* PTD FAST-DIE-CE */
++	.fast_die = 0x1d10,
++	.fast_die_lanes = 2,
+ 	.post_ready = true,
+ };
+ 
+diff --git a/include/linux/soc/apple/pmp-report.h b/include/linux/soc/apple/pmp-report.h
+new file mode 100644
+index 000000000000..937d1f8c5db2
+--- /dev/null
++++ b/include/linux/soc/apple/pmp-report.h
+@@ -0,0 +1,25 @@
++/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
++/*
++ * Apple SoC PMP report
++ */
++
++#ifndef _LINUX_SOC_APPLE_PMP_REPORT_H_
++#define _LINUX_SOC_APPLE_PMP_REPORT_H_
++
++#include <linux/errno.h>
++#include <linux/types.h>
++
++struct device_node;
++
++#if IS_ENABLED(CONFIG_APPLE_PMP_REPORT)
++int apple_pmp_report_fast_die_effort(const struct device_node *np,
++				     unsigned int lane, u8 *effort);
++#else
++static inline int apple_pmp_report_fast_die_effort(const struct device_node *np,
++						   unsigned int lane, u8 *effort)
++{
++	return -ENODEV;
++}
++#endif
++
++#endif /* _LINUX_SOC_APPLE_PMP_REPORT_H_ */
+-- 
+2.54.0
+

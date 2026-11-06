@@ -1,0 +1,42 @@
+From 8667600158791ec243a737837d5439c412ed2050 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 19:07:40 -0600
+Subject: [PATCH 371/375] dt-bindings: cpufreq: apple,cluster-cpufreq: Add
+ apple,fast-die-effort
+
+PMP publishes, per CPU cluster, how hard the host should limit the
+cluster to hold the die at its temperature target. Name the PMP report
+and the cluster's lane in it.
+
+Based on Ryan Murray's binding in Aurora Silicon's tree (dd6da23a31d7).
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../bindings/cpufreq/apple,cluster-cpufreq.yaml        | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/cpufreq/apple,cluster-cpufreq.yaml b/Documentation/devicetree/bindings/cpufreq/apple,cluster-cpufreq.yaml
+index 32105bcc164f..211964efcc49 100644
+--- a/Documentation/devicetree/bindings/cpufreq/apple,cluster-cpufreq.yaml
++++ b/Documentation/devicetree/bindings/cpufreq/apple,cluster-cpufreq.yaml
+@@ -47,6 +47,16 @@ properties:
+   '#performance-domain-cells':
+     const: 0
+ 
++  apple,fast-die-effort:
++    $ref: /schemas/types.yaml#/definitions/phandle-array
++    description: |
++      PMP report publishing the fast die-temperature effort, and this
++      cluster's lane in it. The effort limits the cluster's maximum frequency.
++    items:
++      - items:
++          - description: PMP report
++          - description: Cluster lane (0 for E, 1 for P on T8132)
++
+ required:
+   - compatible
+   - reg
+-- 
+2.54.0
+

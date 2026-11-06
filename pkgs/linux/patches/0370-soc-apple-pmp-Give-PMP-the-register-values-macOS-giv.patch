@@ -1,0 +1,108 @@
+From 4d9693bd8510e43232fea87a6268b8da9be96854 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 18:46:21 -0600
+Subject: [PATCH 370/375] soc: apple: pmp: Give PMP the register values macOS
+ gives it
+
+PMP asks the host for the initial value of about fifty 4-byte registers
+that the ADT does not carry. Only the four display monitors were set;
+the rest got whatever the shared value buffer last held, which leaves
+the CPU cluster, memory controller and fabric monitors disabled. Answer
+them with the values macOS 26.6.2 gives on T8132, read from a
+hypervisor trace of its PMP endpoint.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/soc/apple/pmp.rs | 64 ++++++++++++++++++++++++++++++++++------
+ 1 file changed, 55 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/soc/apple/pmp.rs b/drivers/soc/apple/pmp.rs
+index ec7dc26761c8..b49361acf961 100644
+--- a/drivers/soc/apple/pmp.rs
++++ b/drivers/soc/apple/pmp.rs
+@@ -47,12 +47,58 @@
+ const MSG_IOVA_MASK: u64 = 0xFFFFFFFFFFFF;
+ const SET_IOREG_INDEX_MASK: u64 = 0xFFFF;
+ 
+-/// Registers that take their initial value from the value buffer.
+-const DISPLAY_MONITORS: [&CStr; 4] = [
+-    c"dcs-monitor",
+-    c"disp-monitor",
+-    c"dispext0-monitor",
+-    c"dispext1-monitor",
++/// Initial values of the 4-byte registers PMP asks for, as macOS 26.6.2 gives
++/// them on T8132. PMP silently disables a monitor left at zero.
++const IOREG_VALUES: &[(&CStr, u32)] = &[
++    (c"agx-monitor", 1),
++    (c"amcc-monitor", 1),
++    (c"ane0-monitor", 1),
++    (c"dcs-monitor", 1),
++    (c"disp-monitor", 1),
++    (c"dispext0-monitor", 1),
++    (c"dispext1-monitor", 1),
++    (c"eacc0-monitor", 1),
++    (c"isp-monitor", 1),
++    (c"pacc0-monitor", 1),
++    (c"soc-aon-monitor", 1),
++    (c"soc-ni0-monitor", 1),
++    (c"soc-ni1-monitor", 1),
++    (c"soc-ni2-monitor", 1),
++    (c"soc-ni3-monitor", 1),
++    (c"soc-ni4-monitor", 1),
++    (c"soc-ni5-monitor", 1),
++    (c"soc-rest-monitor", 1),
++    (c"eacc0-push-thr", 0),
++    (c"soc-ni0-push-thr", 0x6f5),
++    (c"soc-ni1-push-thr", 0x6f5),
++    (c"soc-ni2-push-thr", 0x6f5),
++    (c"soc-ni3-push-thr", 0x6f5),
++    (c"soc-ni4-push-thr", 0x6f5),
++    (c"soc-ni5-push-thr", 0x6f5),
++    (c"pmc-voter-ceil-override-mask", 0xffffffff),
++    (c"dvfs_constraint_disable", 0),
++    (c"agx-p0-min-dcs-state", 0),
++    (c"agx-p1-min-dcs-state", 0),
++    (c"agx-p2-min-dcs-state", 0),
++    (c"agx-p3-min-dcs-state", 0),
++    (c"agx-p4-min-dcs-state", 1),
++    (c"agx-p5-min-dcs-state", 2),
++    (c"agx-p6-min-dcs-state", 3),
++    (c"agx-p7-min-dcs-state", 3),
++    (c"agx-p8-min-dcs-state", 4),
++    (c"agx-p9-min-dcs-state", 5),
++    (c"agx-p10-min-dcs-state", 5),
++    (c"agx-p0-min-soc-state", 0),
++    (c"agx-p1-min-soc-state", 0),
++    (c"agx-p2-min-soc-state", 0),
++    (c"agx-p3-min-soc-state", 0),
++    (c"agx-p4-min-soc-state", 0),
++    (c"agx-p5-min-soc-state", 1),
++    (c"agx-p6-min-soc-state", 1),
++    (c"agx-p7-min-soc-state", 1),
++    (c"agx-p8-min-soc-state", 2),
++    (c"agx-p9-min-soc-state", 2),
++    (c"agx-p10-min-soc-state", 2),
+ ];
+ 
+ struct PmpHwConfig {
+@@ -205,13 +251,13 @@ fn register_ioreg(&self, addr: u64) -> Result<u64> {
+             None
+         };
+ 
+-        if size == 4 && DISPLAY_MONITORS.contains(&name) {
+-            // Left at zero, PMP silently disables the monitor's policy.
++        let initial = IOREG_VALUES.iter().find(|(n, _)| *n == name);
++        if let (4, Some(&(_, value))) = (size, initial) {
+             let buf = state
+                 .value_buf
+                 .and_then(|addr| state.get_buf(addr))
+                 .ok_or(EIO)?;
+-            io_project!(buf, [try: 0..4]).copy_from_slice(&1u32.to_le_bytes());
++            io_project!(buf, [try: 0..4]).copy_from_slice(&value.to_le_bytes());
+         } else if size == 0 {
+             size = self.load_tunable(&state, name)?;
+         }
+-- 
+2.54.0
+

@@ -1,0 +1,32 @@
+From fd45764132817a7a851ccfcb582f850c7fd4dc16 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 19:22:52 -0600
+Subject: [PATCH 375/375] arm64: dts: apple: t8132-j713: Raise the CPU critical
+ trip above PMP's limit
+
+PMP now caps the CPUs once the die reaches 110 C. A step load on the P
+cluster overshoots that to about 114 C before the cap settles, so a
+critical trip at 105 C shuts the machine down before PMP gets the
+chance. Move it to 118 C.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index b4e4d150ee84..5f74d6c28a1f 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -57,7 +57,7 @@ cpu_control: cpu-control {
+ 				};
+ 
+ 				cpu-critical {
+-					temperature = <105000>;
++					temperature = <118000>;
+ 					hysteresis = <0>;
+ 					type = "critical";
+ 				};
+-- 
+2.54.0
+
