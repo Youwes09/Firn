@@ -11,8 +11,8 @@ import sys
 import zipfile
 
 PACKAGE = 'firn-j713.zip'
-# Display (DCP) and GPU drivers are still being ported from 26.6.2 to this firmware.
-STUB_FIRMWARE = '27.2'
+# The display driver supports this firmware's DCP interface.
+STUB_FIRMWARE = '26.6.2'
 
 
 def sha(path):
