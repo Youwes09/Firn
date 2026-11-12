@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Mon, 2 Nov 2026 20:54:40 -0600
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the E cluster rail and CPU
+ hot spot sensors
+
+Add PPbb, the E cluster's rail power, and TCMz, the hottest of the P
+and E cluster sensors.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 40b46d5a34a3..0ac2de464c0c 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -291,6 +291,17 @@ power-PP0b {
+ 		apple,key-id = "PP0b";
+ 	};
+ 
++	power-PPbb {
++		label = "E-cluster Rail Power";
++		apple,key-id = "PPbb";
++	};
++
++	/* The hottest of the P and E cluster sensors. */
++	temperature-TCMz {
++		label = "CPU Hot Spot";
++		apple,key-id = "TCMz";
++	};
++
+ 	temperature-Tp0f {
+ 		label = "CPU Temperature";
+ 		apple,key-id = "Tp0f";

@@ -15,7 +15,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 9 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index cd00a8a59c16..4060f47274cb 100644
+index 13bae68ebfab..e2cabbab4a7a 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -270,6 +270,15 @@ &ps_atc3_usb {

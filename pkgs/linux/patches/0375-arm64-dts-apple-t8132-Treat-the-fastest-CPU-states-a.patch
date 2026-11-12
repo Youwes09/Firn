@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 23:46:27 -0600
+Subject: [PATCH] arm64: dts: apple: t8132: Treat the fastest CPU states as
+ normal states
+
+The P cluster's 4416 and 4464 MHz and the E cluster's 2892 MHz were
+turbo states, but schedutil caps its requests at the frequency each
+policy had when it was created, before boost can be enabled, so it never
+asked for them. They need no boost: the cluster clamps any request to
+what its busy cores allow, 3936 MHz with four P cores busy. With one
+busy P core and 4464 MHz requested, a J713 averages 4168 MHz.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132.dtsi | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132.dtsi b/arch/arm64/boot/dts/apple/t8132.dtsi
+index 5420c354edb7..156f8796f888 100644
+--- a/arch/arm64/boot/dts/apple/t8132.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132.dtsi
+@@ -278,7 +278,6 @@ opp08 {
+ 			opp-hz = /bits/ 64 <2892000000>;
+ 			opp-level = <8>;
+ 			opp-microwatt = <582776>;
+-			turbo-mode;
+ 		};
+ 	};
+ 
+@@ -398,14 +397,12 @@ opp19 {
+ 			opp-hz = /bits/ 64 <4416000000>;
+ 			opp-level = <19>;
+ 			opp-microwatt = <5776890>;
+-			turbo-mode;
+ 		};
+ 
+ 		opp20 {
+ 			opp-hz = /bits/ 64 <4464000000>;
+ 			opp-level = <20>;
+ 			opp-microwatt = <5940083>;
+-			turbo-mode;
+ 		};
+ 	};
+ 

@@ -16,7 +16,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 41 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index 158a9f516999..cd00a8a59c16 100644
+index 0a527bac4b6a..13bae68ebfab 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -46,6 +46,47 @@ &bluetooth0 {

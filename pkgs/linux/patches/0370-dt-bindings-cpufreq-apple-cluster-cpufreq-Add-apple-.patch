@@ -1,7 +1,7 @@
-From 8667600158791ec243a737837d5439c412ed2050 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 5 Nov 2026 19:07:40 -0600
-Subject: [PATCH 371/375] dt-bindings: cpufreq: apple,cluster-cpufreq: Add
+Subject: [PATCH] dt-bindings: cpufreq: apple,cluster-cpufreq: Add
  apple,fast-die-effort
 
 PMP publishes, per CPU cluster, how hard the host should limit the
@@ -37,6 +37,3 @@ index 32105bcc164f..211964efcc49 100644
  required:
    - compatible
    - reg
--- 
-2.54.0
-

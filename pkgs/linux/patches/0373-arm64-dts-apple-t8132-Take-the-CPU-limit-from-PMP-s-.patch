@@ -1,8 +1,12 @@
-From 4b5ea433a3db910d5e8f5e93df639171f7a13e82 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 5 Nov 2026 19:07:42 -0600
-Subject: [PATCH 374/375] arm64: dts: apple: t8132: Take the CPU limit from
- PMP's fast die loop
+Subject: [PATCH] arm64: dts: apple: t8132: Take the CPU limit from PMP's fast
+ die loop
+
+PMP publishes the E cluster's effort in lane 0 of FAST-DIE-CE and the P
+cluster's in lane 1. Point each cluster at its lane so cpufreq applies
+the limit.
 
 Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
@@ -29,6 +33,3 @@ index 7f76b9a71323..5420c354edb7 100644
  		};
  
  		disp0_dart: iommu@30a300000 {
--- 
-2.54.0
-

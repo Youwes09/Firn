@@ -8,22 +8,23 @@ desired power states of devices that PMP manages.
 
 Signed-off-by: Sasha Finkelstein <fnkl.kernel@gmail.com>
 ---
- drivers/pmdomain/apple/Kconfig      |   6 +
+ drivers/pmdomain/apple/Kconfig      |   7 +
  drivers/pmdomain/apple/Makefile     |   1 +
  drivers/pmdomain/apple/pmp-report.c | 239 ++++++++++++++++++++++++++++
- 3 files changed, 246 insertions(+)
+ 3 files changed, 247 insertions(+)
  create mode 100644 drivers/pmdomain/apple/pmp-report.c
 
 diff --git a/drivers/pmdomain/apple/Kconfig b/drivers/pmdomain/apple/Kconfig
-index a8973f8057fb..6e9deb9de073 100644
+index a8973f8057fb..f1bff6b29d97 100644
 --- a/drivers/pmdomain/apple/Kconfig
 +++ b/drivers/pmdomain/apple/Kconfig
-@@ -14,4 +14,10 @@ config APPLE_PMGR_PWRSTATE
+@@ -14,4 +14,11 @@ config APPLE_PMGR_PWRSTATE
  	  controls for SoC devices. This driver manages them through the
  	  generic power domain framework, and also provides reset support.
  
 +config APPLE_PMP_REPORT
 +	bool "Apple PMP report control"
++	depends on 64BIT
 +	depends on OF
 +	depends on PM
 +	select PM_GENERIC_DOMAINS

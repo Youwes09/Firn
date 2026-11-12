@@ -1,8 +1,8 @@
-From bdda6515505450cce853ce2f8019d421562af816 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 5 Nov 2026 19:07:40 -0600
-Subject: [PATCH 372/375] pmdomain: apple: pmp-report: Export the fast
- die-temperature effort
+Subject: [PATCH] pmdomain: apple: pmp-report: Export the fast die-temperature
+ effort
 
 PMP runs a control loop on its own die-temperature sensors and
 publishes for each CPU cluster an 8-bit effort, 0 below the loop's
@@ -148,6 +148,3 @@ index 000000000000..937d1f8c5db2
 +#endif
 +
 +#endif /* _LINUX_SOC_APPLE_PMP_REPORT_H_ */
--- 
-2.54.0
-

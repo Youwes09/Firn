@@ -1,8 +1,7 @@
-From 4d9693bd8510e43232fea87a6268b8da9be96854 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 5 Nov 2026 18:46:21 -0600
-Subject: [PATCH 370/375] soc: apple: pmp: Give PMP the register values macOS
- gives it
+Subject: [PATCH] soc: apple: pmp: Give PMP the register values macOS gives it
 
 PMP asks the host for the initial value of about fifty 4-byte registers
 that the ADT does not carry. Only the four display monitors were set;
@@ -103,6 +102,3 @@ index ec7dc26761c8..b49361acf961 100644
          } else if size == 0 {
              size = self.load_tunable(&state, name)?;
          }
--- 
-2.54.0
-

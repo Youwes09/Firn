@@ -7,7 +7,7 @@ The application processor tells PMP which SoC blocks are in use by
 voting in a shared register region. Each vote is a power domain. T8132
 adds an event-config region.
 
-Based on Cody Ho's binding in Gravity Linux.
+Based on Cody Ho's binding in Gravity Linux bf3e5368a49f.
 
 Assisted-by: Claude:claude-opus-5-5
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>

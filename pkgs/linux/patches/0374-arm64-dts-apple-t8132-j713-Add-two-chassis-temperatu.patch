@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 5 Nov 2026 23:15:41 -0600
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Add two chassis temperature
+ sensors
+
+TVS0 and TVS1 rise about 8 C over three minutes of all-core load and
+keep most of it a minute after, unlike the CPU sensors, which follow
+the load within a second. Expose them for a control loop on the
+chassis.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 0ac2de464c0c..472a05969bcb 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -307,6 +307,17 @@ temperature-Tp0f {
+ 		apple,key-id = "Tp0f";
+ 	};
+ 
++	/* These follow CPU load over minutes, as the chassis does. */
++	temperature-TVS0 {
++		label = "Chassis Temperature 0";
++		apple,key-id = "TVS0";
++	};
++
++	temperature-TVS1 {
++		label = "Chassis Temperature 1";
++		apple,key-id = "TVS1";
++	};
++
+ 	voltage-VP0b {
+ 		label = "P-cluster Rail Voltage";
+ 		apple,key-id = "VP0b";

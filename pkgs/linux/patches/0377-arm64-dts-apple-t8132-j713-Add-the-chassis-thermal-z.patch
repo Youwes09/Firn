@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 11 Nov 2026 19:21:33 -0600
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the chassis thermal zone
+
+Replayed on this machine, the clocks macOS picks under sustained
+all-core load brought the TVS1 chassis sensor to 45 C within seven
+minutes and held it there while CPU power fell to about 7.8 W. Add a
+zone that holds TVS1 at that target. Replayed clocks cannot follow the
+room: on a day about 4 C warmer they took TVS1 to 49 C, while the zone
+held 45 C.
+
+The E cores get twice the P cores' weight. Near 7.8 W an E core does
+1.6 times the work per watt of a P core, and with equal weights the
+split stays wherever the load started it, which starves the E cores.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 51 ++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 1067dc1ab9db..0679d87ad7e9 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -81,6 +81,57 @@ map0 {
+ 				};
+ 			};
+ 		};
++
++		/*
++		 * Under sustained all-core load macOS lets TVS1 reach 45 C, then
++		 * holds it there at about 7.8 W. Near that power an E core does 1.6
++		 * times the work per watt of a P core, so the E cores get the larger
++		 * share.
++		 */
++		chassis-thermal {
++			polling-delay-passive = <1000>;
++			polling-delay = <1000>;
++			thermal-sensors = <&smc_hwmon 7>;
++			sustainable-power = <7850>;
++
++			trips {
++				chassis-switch-on {
++					temperature = <42000>;
++					hysteresis = <0>;
++					type = "passive";
++				};
++
++				chassis_control: chassis-control {
++					temperature = <45000>;
++					hysteresis = <0>;
++					type = "passive";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&chassis_control>;
++					cooling-device =
++						<&cpu_e0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_e1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_e2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_e3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_e4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_e5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++					contribution = <2048>;
++				};
++
++				map1 {
++					trip = <&chassis_control>;
++					cooling-device =
++						<&cpu_p0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_p1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_p2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_p3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++					contribution = <1024>;
++				};
++			};
++		};
+ 	};
+ };
+ 

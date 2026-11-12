@@ -9,8 +9,8 @@ announces, and the AFE reset on SMC GPIO 28. m1n1 fills in the
 keyboard layout and maps the MTP firmware through the keyboard and mtp
 aliases.
 
-Based on Josh Rodd's J715 enablement and Firn's AFE reset, as carried
-in Gravity Linux.
+Based on Josh Rodd's J715 enablement, 10480d4c0dd6 in Niklas Sheth's
+tree.
 
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
@@ -18,7 +18,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 49 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index ee6458d56622..f95aff4902ad 100644
+index ec49d88ca313..c495dc64235f 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -17,6 +17,12 @@ / {

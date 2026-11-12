@@ -14,7 +14,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 1 deletion(-)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index 4060f47274cb..bdc4755fea5d 100644
+index e2cabbab4a7a..40b46d5a34a3 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -33,7 +33,6 @@ led-0 {

@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 11 Nov 2026 20:26:34 -0600
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the CPU thermal zone
+
+PMP's fast die loop catches load steps, but under sustained all-core
+load the hot spot still creeps past its limit by about 0.1 C a second.
+Add a power_allocator zone on TCMz, the hottest of the CPU sensors, and
+aim it at 105 C: replayed on this machine, the clocks macOS picks keep
+the hot spot between 100 and 107 C.
+
+Only the P cores push the hot spot that far. At full clock the E
+cluster draws about 3.6 W and stays below 80 C, so leave it out.
+
+With integral_cutoff at 0 the integral only ever winds down, so add a
+switch-on trip at 65 C. Below it power_allocator resets, which drops
+the throttle an earlier load left behind once the CPUs have gone idle.
+A sustainable power of 17 W lets a new load start at full clock and
+leaves the first seconds to PMP's loop.
+
+A step load on the P cluster overshoots PMP's 110 C to about 114 C
+before the cap settles, so the critical trip sits at 118 C.
+
+The gains power_allocator estimates for this range limit-cycle between
+95 and 115 C, so tuned gains are expected from userspace.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 49 ++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 472a05969bcb..1067dc1ab9db 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -12,6 +12,7 @@
+ #include "t8132.dtsi"
+ #include "t8132-jxxx.dtsi"
+ #include <dt-bindings/leds/common.h>
++#include <dt-bindings/thermal/thermal.h>
+ 
+ / {
+ 	compatible = "apple,j713", "apple,t8132", "apple,arm-platform";
+@@ -35,6 +36,52 @@ led-0 {
+ 			max-brightness = <255>;
+ 		};
+ 	};
++
++	thermal-zones {
++		/*
++		 * PMP's fast die loop catches load steps, but under sustained
++		 * all-core load the hot spot keeps creeping up past it by about
++		 * 0.1 C a second. Hold it at 105 C, where macOS holds it, and
++		 * reset the controller once the CPUs have gone idle.
++		 */
++		cpu-thermal {
++			polling-delay-passive = <500>;
++			polling-delay = <500>;
++			thermal-sensors = <&smc_hwmon 4>;
++			sustainable-power = <17000>;
++
++			trips {
++				cpu-switch-on {
++					temperature = <65000>;
++					hysteresis = <0>;
++					type = "passive";
++				};
++
++				cpu_control: cpu-control {
++					temperature = <105000>;
++					hysteresis = <0>;
++					type = "passive";
++				};
++
++				cpu-critical {
++					temperature = <118000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&cpu_control>;
++					cooling-device =
++						<&cpu_p0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_p1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_p2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++						<&cpu_p3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++		};
++	};
+ };
+ 
+ &wifi0 {
+@@ -281,6 +328,8 @@ &ps_nub_spi0 {
+ #include "hwmon-laptop.dtsi"
+ 
+ &smc_hwmon {
++	#thermal-sensor-cells = <1>;
++
+ 	current-IP0b {
+ 		label = "P-cluster Rail Current";
+ 		apple,key-id = "IP0b";

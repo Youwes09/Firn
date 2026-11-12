@@ -1,4 +1,4 @@
-From 54e53803f4dcff9cd44152cbb45b10a9bb915cc8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Thu, 5 Nov 2026 09:26:47 -0600
 Subject: [PATCH] soc: apple: tunable: Apply nothing for a missing tunable
@@ -51,6 +51,3 @@ index 531ca814cd02..2a5bbdb5a2e2 100644
   */
  void apple_tunable_apply(void __iomem *regs, struct apple_tunable *tunable);
  
--- 
-2.54.0
-

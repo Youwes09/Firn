@@ -20,8 +20,6 @@ in [ISSUES.md](ISSUES.md).
 
 ## Workarounds to replace
 
-- [ ] `firn-cpu-cap`: a CPU cap the thermal zone keeps while the CPUs idle, so a
-      new load starts within budget.
 - [ ] Sleep, which needs every co-processor's power states understood.
 - [ ] AIC's skipped EL2 FIQ masks: find why the writes hang.
 - [ ] brcmfmac on a busy public network: `GET STA INFO failed, -52` and

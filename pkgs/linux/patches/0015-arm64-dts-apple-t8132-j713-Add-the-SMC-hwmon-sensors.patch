@@ -3,11 +3,12 @@ From: Youwes09 <yuvi.shen@outlook.com>
 Date: Fri, 30 Oct 2026 14:01:05 -0500
 Subject: [PATCH] arm64: dts: apple: t8132-j713: Add the SMC hwmon sensors
 
-Add the laptop sensors and the CPU temperature and CPU rail sensors
-found on the MacBook Air (13-inch, M4, 2025).
+Add the laptop sensors and the CPU temperature and P cluster rail
+sensors found on the MacBook Air (13-inch, M4, 2025).
 
-Tp0f is among the hottest Tp keys under an all-core load, and the P0b
-rail follows the load with V * I = P.
+Tp0f is among the hottest Tp keys under an all-core load. The IP0b,
+PP0b and VP0b rail is the P cluster's alone: PP0b stays at idle with
+only the E cores loaded, and VP0b times IP0b equals PP0b.
 
 Based on work by Niklas Sheth, as carried in Gravity Linux
 898c9da9c905f.
@@ -18,7 +19,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 24 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index eb9751b14cb9..ee6458d56622 100644
+index eb9751b14cb9..ec49d88ca313 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -41,3 +41,27 @@ &bluetooth0 {
@@ -30,12 +31,12 @@ index eb9751b14cb9..ee6458d56622 100644
 +
 +&smc_hwmon {
 +	current-IP0b {
-+		label = "CPU Rail Current";
++		label = "P-cluster Rail Current";
 +		apple,key-id = "IP0b";
 +	};
 +
 +	power-PP0b {
-+		label = "CPU Rail Power";
++		label = "P-cluster Rail Power";
 +		apple,key-id = "PP0b";
 +	};
 +
@@ -45,7 +46,7 @@ index eb9751b14cb9..ee6458d56622 100644
 +	};
 +
 +	voltage-VP0b {
-+		label = "CPU Rail Voltage";
++		label = "P-cluster Rail Voltage";
 +		apple,key-id = "VP0b";
 +	};
 +};
