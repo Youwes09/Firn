@@ -35,7 +35,15 @@ in [ISSUES.md](ISSUES.md).
 ## Kernel
 
 - [ ] Audio: MCA, ADMAC, SIO, then the codecs with speaker protection.
-- [ ] GPU, as its own series ([GPU.md](GPU.md)).
+- [ ] GPU, as its own series ([GPU.md](GPU.md)):
+  - [x] First boot with m1n1's J713 calibration and `asahi_m4`, at the Air.
+  - [x] Fix the MTR alarm crash with PMP running (GPU.md, "Fix").
+  - [ ] The rest of the macOS init data diff: region C +0x24 (3000), slot
+        36, the HwDataB words, bundle 0x8ec0.
+  - [ ] Let `tests/policy.nix` allow `DRM_ASAHI_M4` once it runs.
+  - [ ] Mesa with G16 support.
+  - [ ] Document `apple,agx-t8132` in `apple,agx.yaml`; the node is not
+        validated today.
 - [ ] DisplayPort alt mode and external displays.
 - [ ] RTKit oslog types 3, 4 and 5: 4 and 5 are the firmware's image ID and
       name; decode 3 before handling them.
@@ -66,6 +74,8 @@ in [ISSUES.md](ISSUES.md).
       PMP devicetree and his two display fixes from Gravity 83fb190f1108;
       KB2UKA's reboot and AIC commits; Janne Grunau's "Warn only once
       about failed calls" and 12.3 flush fix, unsigned in Asahi's tree.
+      On `firn/gpu`: Cody Ho's RTKit early crashlog (1d87a283bc6b) and
+      Niklas Sheth's GPU devicetree (a4092eb5b591).
 - [ ] checkpatch clean-ups in cpuidle-apple, Sasha's M3 ATC PHY and Alba
       Mendez's SPMI commits; a fuller Kconfig help and MAINTAINERS entries
       for the PMP drivers, whose bindings name Sven Peter as maintainer.
