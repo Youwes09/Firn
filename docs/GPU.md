@@ -145,7 +145,8 @@ Tested on the J713: both load orders, and a boot with both drivers
 autoloading. No crash, and the firmware samples its sensors continuously.
 Soaked on 2026-11-17: two hours with the mask, limits and SoC-hot route
 (no crash, about 480 samples a second throughout, 3.65 to 4.0 W for the
-whole system on charge), then again with the identity words added
+whole system on charge), then six hours with the identity words added,
+also without a crash
 (`firn-gpu-runs/soak-20261117.log`).
 
 Left for later:
