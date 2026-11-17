@@ -137,9 +137,9 @@ Also set to macOS's values, from the same comparison:
   revision code (1, 3 or 4 for A0, B0 and B1; the J713 is B1, so 4) and
   10 cores.
 
-Field meanings come from Asahi's open initialization data and from
-third-party interface notes (`~/Universal/M4-Nix/gpu/re-notes/`), written
-from macOS's drivers by someone else and checked here against the J713.
+Field meanings come from Asahi's open initialization data and from Syd
+Garlathy's interface notes (`~/Universal/M4-Nix/gpu/re-notes/`), written
+from macOS's drivers and checked here against the J713.
 
 Tested on the J713: both load orders, and a boot with both drivers
 autoloading. No crash, and the firmware samples its sensors continuously.
