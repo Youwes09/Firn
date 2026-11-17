@@ -80,55 +80,77 @@ Logs: `~/Universal/M4-Nix/gpu/firn-gpu-runs/`.
 - macOS runs the same GPU loop, so on macOS the GPU firmware is set up to
   accept that loop's MTR alarms. The G16 driver builds its firmware data
   from zeroed buffers and fills only the fields it knows, so the setting
-  macOS uses for this was missing. That was the real bug (fixed below).
+  macOS uses for this was missing (fixed below).
 
-### Fix: region C +0x30
+### Fix: the MTR sensor mask
 
 Niklas Sheth sent macOS 26.6.2's initialization data from a J713, read
-with macOS paused after boot (`~/Universal/M4-Nix/gpu/niklas-postinit-20261110/`:
-root, main, the 128 KiB bundle, regions A and C). The driver's `fw_mem`
-debugfs file gave the same objects from our driver after boot, with PMP
-held off (`firn-postinit-20261113/`). The two were diffed word by word
-(`firn-gpu-runs/initdata-diff/`).
+with macOS paused after boot (`~/Universal/M4-Nix/gpu/niklas-postinit-20261110/`).
+It was diffed word by word against our driver's
+(`firn-gpu-runs/initdata-diff/`). A debug patch on `debug/initdata`
+loads a list of values from a file before the firmware starts and keeps
+a copy of what the driver handed over, so value sets can be swapped
+between reboots without rebuilding. Words our own firmware changed after
+boot are its state and were left out; the voltage tables are each chip's
+calibration; everything above bundle 0xd000 is objects macOS builds once
+the GPU has work.
 
-The macOS-only values were applied in groups by a debug module parameter,
-loading the GPU and then PMP with its GPU LTS loop intact:
+**The fix is bundle 0x8ed8, the mask of MTR sensors the firmware reads.**
+Our driver left it zero, so the firmware read no sensors, and when PMP's
+GPU loop raised an alarm the firmware found no sensor to match it. On
+the J713 it is 0x6b79: sensor IDs 0, 3, 4, 5, 6, 8, 9, 11, 13 and 14,
+exactly the IDs `/arm-io/pmgr` `mtr-polynom-fuse-agx` lists. m1n1 passes
+them as `apple,m4-sensor-mask` (stage 2 patch 0018), and the driver writes
+the mask. Setting only this word stops the crash and starts sampling:
+nine records from bundle 0x8498 (0x28 bytes per sensor ID) and a summary
+at 0x8e9c fill in, at about 400 samples a second, around 30 °C at idle.
 
-| macOS values applied | GPU firmware |
-|---|---|
-| none | crashes |
-| second fast-die mask, 125, 1 (bundle 0x8288, Asahi's `fast_die0_sensor_mask64_2`, `unk_e24`, `unk_e28`) | crashes |
-| map slot 36 (GPU + 0xe00000) | crashes |
-| HwDataB words 0xea4-0xfc0 | crashes |
-| tables at 0x2544-0x32c4 | crashes |
-| power floats | crashes |
-| bundle header words | crashes |
-| bundle 0x8ec0 block (92, 108, 0x6b79, 1) | runs |
-| only bundle 0x8ed8 = 0x6b79 | runs |
-| region C words | runs |
-| only region C +0x30 = 1 | runs |
-| all of the above | runs, and the firmware's sensor record fills in |
+An earlier version of the fix set region C +0x30 instead. That is
+automatic idle: it stopped the crash only because the idle GPU powers off
+and disarms its alarms, and sampling stopped with it. Automatic idle stays
+off until waking the GPU for work can be tested; with the GPU loaded it
+costs about 0.15 W at idle (4.40 W against 4.26 W, one minute each).
 
-Region C +0x30 = 1 is the fix (`firn/gpu` 9cd14bdc1678): macOS sets it, and it is a flag rather than
-a measured value. Asahi's region C layouts (13.x) have flags here that are
-1 on newer GPUs (`unk_28`, `unk_2c_0`); which one it matches on G16 is not
-settled, so the driver doesn't name it. 0x6b79 is not in the ADT, and it
-may be state macOS or the firmware writes at run time, so it isn't used.
+Bisect, each run loading the GPU and then PMP with its GPU loop:
 
-With the fix, the GPU firmware and PMP ran for two minutes in both load
-orders (GPU first, PMP first) with no crash. Booted with both drivers
-autoloading (firmware up at 3.5 s, PMP at 4.3 s), the system ran 13 hours
-with no crash. The test system's recipe is in `firn-gpu-runs/deploy-fix/`.
+| macOS values applied | crash | sensors read |
+|---|---|---|
+| none | yes | no |
+| all 208 configuration words | no | yes |
+| header, register-window flags, slot 36, chip words, tables | no | no |
+| power controllers, region C, SoC-hot route, 0xaee4 floats | no | no |
+| bundle 0x8ec0-0x8ee0 (92, 108, 0x6b79, 1) | no | yes |
+| only bundle 0x8ed8 = 0x6b79 | no | yes |
+| only region C +0x30 = 1 (automatic idle) | no | two samples, then off |
 
-With only the fix, the firmware's sensor record (bundle 0x8e9c) keeps its
-placeholder values; with every macOS value applied it reads 31-39 °C. One
-of the other groups turns sensor reading on.
+(Without the mask, "crash: no" in the middle rows comes from region C
++0x30, which those runs still had.)
 
-Left as found: the rest of the diff. Our region C +0x24 is 4096 where
-macOS has 3000 (Asahi's `unk_24_0` is also 3000); macOS also maps slot 36
-and sets the HwDataB words above, which Asahi sets for older GPUs too. The
-core voltages differ by about 5-15 mV, which is the two chips' own
-calibration.
+Also set to macOS's values, from the same comparison:
+
+- Region C 0x88, 0x8c and 0x98, the performance-state limits in hundredths
+  of a state: 900, the top state, where the driver had 1000.
+- Bundle 0x8288, 0x8290 and 0x8294, the SoC-hot alarm route: the fast-die
+  sensors, 125 and 1, as Asahi fills `fast_die0_sensor_mask64_2`,
+  `unk_e24` and `unk_e28` on older GPUs.
+
+Field meanings come from Asahi's open initialization data and from
+third-party interface notes (`~/Universal/M4-Nix/gpu/re-notes/`), written
+from macOS's drivers by someone else and checked here against the J713.
+
+Tested on the J713: both load orders, and a boot with both drivers
+autoloading. No crash, and the firmware samples its sensors continuously.
+
+Left for later:
+
+- Automatic idle (region C +0x30, +0x34 and the idle timings at
+  +0x7c4-0x7e8 and +0x9b8-0x9c0), once work submission can be tested.
+- The watchdog thresholds (region C +0x24 is 3000 on macOS against our
+  4096, and +0x9c8-0x9d0), which only matter with work running.
+- The register-window access flag at +0x20, which macOS sets to 2 on many
+  slots, and slot 36 (performance-state control).
+- The bundle's colour-conversion records and chip words, which made no
+  difference here.
 
 Also worth checking: Firn keeps the GPU power domain on because "PMP reads
 the GPU block while it runs". That is likely the LTS loop reading
