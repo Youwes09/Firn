@@ -133,6 +133,9 @@ Also set to macOS's values, from the same comparison:
 - Bundle 0x8288, 0x8290 and 0x8294, the SoC-hot alarm route: the fast-die
   sensors, 125 and 1, as Asahi fills `fast_die0_sensor_mask64_2`,
   `unk_e24` and `unk_e28` on older GPUs.
+- Bundle 0xfb8, 0xfbc and 0xfc0, the GPU's identity: class 0x1b, a
+  revision code (1, 3 or 4 for A0, B0 and B1; the J713 is B1, so 4) and
+  10 cores.
 
 Field meanings come from Asahi's open initialization data and from
 third-party interface notes (`~/Universal/M4-Nix/gpu/re-notes/`), written
@@ -140,6 +143,10 @@ from macOS's drivers by someone else and checked here against the J713.
 
 Tested on the J713: both load orders, and a boot with both drivers
 autoloading. No crash, and the firmware samples its sensors continuously.
+Soaked on 2026-11-17: two hours with the mask, limits and SoC-hot route
+(no crash, about 480 samples a second throughout, 3.65 to 4.0 W for the
+whole system on charge), then again with the identity words added
+(`firn-gpu-runs/soak-20261117.log`).
 
 Left for later:
 
@@ -149,8 +156,8 @@ Left for later:
   4096, and +0x9c8-0x9d0), which only matter with work running.
 - The register-window access flag at +0x20, which macOS sets to 2 on many
   slots, and slot 36 (performance-state control).
-- The bundle's colour-conversion records and chip words, which made no
-  difference here.
+- The bundle's colour-conversion records and the remaining chip words
+  (0xf4c, 0xf6c), which made no difference here.
 
 Also worth checking: Firn keeps the GPU power domain on because "PMP reads
 the GPU block while it runs". That is likely the LTS loop reading
