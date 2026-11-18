@@ -51,8 +51,12 @@ in [ISSUES.md](ISSUES.md).
         `tests/policy.nix` allow `DRM_ASAHI_M4`; package Mesa and enable
         `hardware.graphics`.
   - [ ] Mesa as a clean series of its own (1,117 commits on upstream).
-  - [ ] Gravity's PMP memory and fabric vote driver and the GPU's hook
-        into it, after review (it writes PMP votes).
+  - [ ] A memory and fabric floor for CPU work. PMP raises memory for
+        GPU load by itself (365 ns to 101 ns pointer-chase latency, 9.9 to
+        44 GB/s copies), but not for CPU load, which stays at its lowest
+        state. Gravity's vote driver votes a fixed F6/VOVD; find what macOS
+        votes first. It writes PMP votes and CPM registers: ask before
+        testing. Its GPU hook is not needed for the GPU's own memory.
   - [ ] Document `apple,agx-t8132` in `apple,agx.yaml`; the node is not
         validated today.
 - [ ] DisplayPort alt mode and external displays.

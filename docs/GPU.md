@@ -273,3 +273,12 @@ the firmware retunes. The driver does not send that message yet.
   temperature now and then (between samples, by the look of it).
 - **Mesa in Firn:** a package and `hardware.graphics` once the kernel series
   takes the driver.
+
+### Memory clock
+
+Measured with a single-core pointer chase and memcpy
+(`tests/membench.c`), nothing written to PMP: idle or CPU-only, 365 ns and
+9.9 GB/s; light GPU load, 135 to 148 ns and 25 to 28 GB/s; heavy GPU load,
+101 ns and 44 GB/s, within 5 s of the load starting and back within 5 s of
+it ending. PMP scales memory with GPU demand by itself, so the GPU does not
+need Gravity's activity hook. CPU work gets no floor at all (TODO).
