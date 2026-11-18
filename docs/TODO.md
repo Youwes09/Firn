@@ -38,11 +38,21 @@ in [ISSUES.md](ISSUES.md).
 - [ ] GPU, as its own series ([GPU.md](GPU.md)):
   - [x] First boot with m1n1's J713 calibration and `asahi_m4`, at the Air.
   - [x] Fix the MTR alarm crash with PMP running (GPU.md, "Fix").
-  - [ ] Automatic idle, once waking the GPU for work can be tested.
-  - [ ] The watchdog thresholds, the register-window access flags and
-        slot 36 (GPU.md, "Left for later").
-  - [ ] Let `tests/policy.nix` allow `DRM_ASAHI_M4` once it runs.
-  - [ ] Mesa with G16 support.
+  - [x] Automatic idle with wake on work, and its timing (GPU.md,
+        "Region C").
+  - [x] The watchdog thresholds, the register-window access flags and
+        slot 36.
+  - [x] Render with Gravity Linux's Mesa (GPU.md, "Rendering").
+  - [ ] A GPU cooling device for the chassis zone.
+  - [ ] The display cadence message (0x22).
+  - [ ] Find the causes behind the safety poll, the A4 wedge and the
+        operand-pool lower bound.
+  - [ ] Bring `firn/gpu-next` into the kernel series; let
+        `tests/policy.nix` allow `DRM_ASAHI_M4`; package Mesa and enable
+        `hardware.graphics`.
+  - [ ] Mesa as a clean series of its own (1,117 commits on upstream).
+  - [ ] Gravity's PMP memory and fabric vote driver and the GPU's hook
+        into it, after review (it writes PMP votes).
   - [ ] Document `apple,agx-t8132` in `apple,agx.yaml`; the node is not
         validated today.
 - [ ] DisplayPort alt mode and external displays.
@@ -76,7 +86,9 @@ in [ISSUES.md](ISSUES.md).
       KB2UKA's reboot and AIC commits; Janne Grunau's "Warn only once
       about failed calls" and 12.3 flush fix, unsigned in Asahi's tree.
       On `firn/gpu`: Cody Ho's RTKit early crashlog (1d87a283bc6b) and
-      Niklas Sheth's GPU devicetree (a4092eb5b591).
+      Niklas Sheth's GPU devicetree (a4092eb5b591). On `firn/gpu-next`:
+      47 of Niklas Sheth's 50 newer G16 commits, and his `show_fdinfo`
+      Rust hook.
 - [ ] checkpatch clean-ups in cpuidle-apple, Sasha's M3 ATC PHY and Alba
       Mendez's SPMI commits; a fuller Kconfig help and MAINTAINERS entries
       for the PMP drivers, whose bindings name Sven Peter as maintainer.

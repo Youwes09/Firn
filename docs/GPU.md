@@ -3,11 +3,12 @@
 Not supported yet. The kernel series has no GPU driver, and the policy check
 makes sure none is built.
 
-The driver is being ported on its own branch, `firn/gpu`: Cody Ho's and
-Niklas Sheth's `asahi_m4` history on Firn's kernel, moved to mainline's
-dma_fence and to an RTKit registration the device owns. It builds, and the
-firmware boots and stays up on the J713 with PMP running (see "First runs"
-below). Nothing has rendered yet: that needs Mesa with G16 support.
+The driver is being ported on its own branch, `firn/gpu-next` (in
+`~/Universal/M4-Nix/src/firn-gpu`): Cody Ho's and Niklas Sheth's `asahi_m4`
+history on Firn's kernel, moved to mainline's dma_fence and to an RTKit
+registration the device owns. With Gravity Linux's Mesa it renders OpenGL ES
+and Vulkan on the J713, on the internal display too, with PMP running (see
+"Rendering" below). `firn/gpu` is the earlier, firmware-only state.
 
 ## Measured on the J713
 
@@ -149,17 +150,126 @@ whole system on charge), then six hours with the identity words added,
 also without a crash
 (`firn-gpu-runs/soak-20261117.log`).
 
-Left for later:
-
-- Automatic idle (region C +0x30, +0x34 and the idle timings at
-  +0x7c4-0x7e8 and +0x9b8-0x9c0), once work submission can be tested.
-- The watchdog thresholds (region C +0x24 is 3000 on macOS against our
-  4096, and +0x9c8-0x9d0), which only matter with work running.
-- The register-window access flag at +0x20, which macOS sets to 2 on many
-  slots, and slot 36 (performance-state control).
-- The bundle's colour-conversion records and the remaining chip words
-  (0xf4c, 0xf6c), which made no difference here.
+Left for later: see "Open" under "Rendering" below.
 
 Also worth checking: Firn keeps the GPU power domain on because "PMP reads
 the GPU block while it runs". That is likely the LTS loop reading
 MTR_TOP_AGX.
+
+## Rendering (2026-11-18)
+
+### The branch
+
+`firn/gpu-next` brings the driver up to Gravity Linux's `bits/210-gpu`
+(9 November) for the base M4, in reviewable commits:
+
+1. Niklas's commits after our first snapshot, from his `bits/210-gpu`
+   (27 October), as he wrote them and in his order. The driver tree then
+   matches his tip byte for byte.
+2. Cody's widening of the native mesh experiment, split out of Gravity's
+   88,000-line squash (`ed2c67a9f6d4`) under his authorship. The rest of that
+   squash is the M4 Pro, Max and M5 drivers, or adapters to Gravity's own Rust
+   APIs, which Firn's port already covers.
+3. Niklas's commits on Gravity after the squash: a lower fast-die limit knob,
+   fdinfo memory accounting (with his Rust `show_fdinfo` hook ported to
+   mainline's `DriverFile`), per-VM compute pools, a smaller render ring,
+   deferred-close reaping and the operand-pool lower bound.
+4. Firn's port commits (RTKit registration, 7.4, mainline dma_fence), redone
+   on the split files, then Firn's fixes on top.
+
+Left out: Niklas's hook that publishes GPU activity to Gravity's PMP memory
+and fabric vote driver (`pmp-cpu-vote.c`). Firn has no such driver, and it
+writes PMP votes, which needs its own review.
+
+The base-M4 files then equal Gravity's tip apart from those adapters. Most
+of Niklas's newer commits carry no `Signed-off-by` (see TODO).
+
+### Mesa
+
+Gravity's Mesa (`GravityLinux/mesa` `f66f380c648`, 11 November), built on the
+Air with four to six cores from `scratchpad/gpudeploy-next/mesa.nix`, an
+override of nixpkgs' Mesa 26.1.8 recipe: asahi, llvmpipe and softpipe, the
+asahi and swrast Vulkan drivers, no rusticl, and Mesa 26.3's clang library
+path. It is installed beside the system, not in it; tests point
+`LD_LIBRARY_PATH`, `__EGL_VENDOR_LIBRARY_FILENAMES` or `VK_ICD_FILENAMES` at
+it. It reports "Apple M4 (G16G B1)", OpenGL ES 3.0 and Vulkan 1.4.359
+(Honeykrisp).
+
+It is 1,117 commits and about 148,000 lines on top of upstream Mesa from
+21 August, almost all Niklas's: the Apple9 compiler, Honeykrisp support and
+their tests. A clean upstream series is its own project.
+
+### Tests on the J713
+
+Scripts in `~/Universal/M4-Nix/gpu/firn-gpu-runs/tests/`, results in
+`runs-next/`.
+
+| Test | Result |
+|---|---|
+| `eglclear`: clear, one triangle, read back, exact compare | 1,000 frames, every pixel right |
+| `vkmark`, headless, default suite | score 3656 before the idle fix, 5498 after |
+| `kmscube -A` on `card1` (DCP) | 600 frames at 59.97 FPS on the panel |
+| `vkmark` at 3840x2160, 10 minutes | no fault, 13.7 W average |
+| heaviest scene held at 4K | the firmware holds the hottest sensor at 109-110 C, trimming 27 W to 23 W |
+
+The GPU powers off when idle and wakes for each submission; idle system
+power stays at 3.2 W. No submission was rejected and the safety poll never
+had to retire work.
+
+### The MTR crash, again
+
+Niklas found the same crash on the Mac mini and fixed it by mapping register
+window slot 36 (the MTR block); he also found the `extra_0` policy object,
+which left zero makes PMP's loop pin the GPU at its lowest state. With all
+three in one tree, the debug branch's switches showed on the J713:
+
+| `extra_0` | slot 36 | sensor mask | result |
+|---|---|---|---|
+| zero | no | no | MTR "no match" crash |
+| zero | yes | no | MTR "no match" crash |
+| zero | no | yes | no crash, sampling |
+| built | no or yes | no | no crash, no sampling |
+
+The zero `extra_0` object is what raises the alarm; the empty mask is what
+makes it fatal. macOS sets all three, and so does the branch.
+
+### Region C
+
+Tested by loading macOS's values over ours with the debug overlay:
+
+- **Automatic idle timing** (+0x34, +0x7c4 to +0x7e8, +0x9b8 to +0x9c0):
+  all zero but one, so the GPU powered off between frames. From the
+  `/arm-io/sgx` properties now, with macOS's J713 values as defaults: 49 %
+  more `vkmark`.
+- **Watchdog thresholds** (+0x24, +0x9c8, +0x9cc, +0x9d0) and the
+  **keepalive thresholds** (+0x7f4, +0x7f8): set as macOS does, no
+  measurable change.
+- Still differing, with no measurable effect: +0x3c, the packed fields at
+  +0x5e to +0x6a, +0x7f0 and +0x998 to +0x9a0. +0x80 and +0x988 to +0x990
+  are runtime state.
+
+The controller words macOS shows at a 16.667 ms cadence (bundle +0x5384,
++0x7f68, +0x7f6c, +0x7d58, +0x7614) are not wrong values: macOS publishes
+the display's frame period (+0x988, +0x990, then control message 0x22) and
+the firmware retunes. The driver does not send that message yet.
+
+### Open
+
+- **The chassis.** Under sustained GPU load the chassis passes the 45 C the
+  chassis zone holds the CPUs to (48 C seen): the zone has only the CPUs as
+  cooling devices. The GPU needs a cooling device that lowers its
+  performance-state limit at runtime; how macOS does that is a question for
+  Syd.
+- **Display cadence** (message 0x22), as above.
+- **Workarounds in the imported driver:** a 50 ms safety poll that retires
+  Work whose completion notification never came (never fired on the J713
+  so far); "A4 wedge" detection, which only reports a render whose fragment
+  stage never starts; operand pools below 8 refused because they hang the
+  GPU. None has a known cause.
+- **The native mesh experiment** stays off by default and advertises itself
+  through a sysfs line, not the UAPI; Mesa treats a missing line as off.
+- **DCP:** `kmscube` without `-A` gets EBUSY on its first legacy page flip.
+- **Region C** words above, and `0x7fffffff` in a sensor's current
+  temperature now and then (between samples, by the look of it).
+- **Mesa in Firn:** a package and `hardware.graphics` once the kernel series
+  takes the driver.
