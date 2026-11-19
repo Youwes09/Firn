@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 11:36:03 -0600
+Subject: [PATCH] dt-bindings: gpu: apple,agx: Add the T8132 GPU
+
+The M4's GPU uses five memory regions where the earlier GPUs use six:
+the MMU's translation tables, page tables and level 2 tables, the VM
+handoff structure and the firmware iBoot loads. It can also act as a
+thermal cooling device.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../devicetree/bindings/gpu/apple,agx.yaml    | 92 +++++++++++++++----
+ 1 file changed, 76 insertions(+), 16 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/gpu/apple,agx.yaml b/Documentation/devicetree/bindings/gpu/apple,agx.yaml
+index 59989d8bd1cb..578c9c8c7b51 100644
+--- a/Documentation/devicetree/bindings/gpu/apple,agx.yaml
++++ b/Documentation/devicetree/bindings/gpu/apple,agx.yaml
+@@ -17,6 +17,7 @@ properties:
+           - apple,agx-g13s
+           - apple,agx-g14g
+           - apple,agx-g14s
++          - apple,agx-t8132
+       - items:
+           - enum:
+               - apple,agx-g13c
+@@ -45,24 +46,15 @@ properties:
+     maxItems: 1
+ 
+   memory-region:
+-    items:
+-      - description: Region containing GPU MMU TTBs
+-      - description: Region containing GPU MMU page tables
+-      - description:
+-          Region containing a shared handoff structure for VM
+-          management coordination
+-      - description: Calibration blob. Mostly power-related configuration
+-      - description: Calibration blob. Mostly GPU-related configuration
+-      - description: Shared global variables with GPU firmware
++    minItems: 5
++    maxItems: 6
+ 
+   memory-region-names:
+-    items:
+-      - const: ttbs
+-      - const: pagetables
+-      - const: handoff
+-      - const: hw-cal-a
+-      - const: hw-cal-b
+-      - const: globals
++    minItems: 5
++    maxItems: 6
++
++  "#cooling-cells":
++    const: 2
+ 
+   apple,firmware-abi:
+     $ref: /schemas/types.yaml#/definitions/uint32-array
+@@ -79,6 +71,52 @@ required:
+   - memory-region
+   - apple,firmware-abi
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: apple,agx-t8132
++    then:
++      properties:
++        memory-region:
++          items:
++            - description: Region containing GPU MMU TTBs
++            - description: Region containing GPU MMU page tables
++            - description: Region containing the GPU MMU's level 2 tables
++            - description:
++                Region containing a shared handoff structure for VM
++                management coordination
++            - description: Region containing the GPU firmware, loaded by iBoot
++        memory-region-names:
++          items:
++            - const: ttbs
++            - const: pagetables
++            - const: l2
++            - const: handoff
++            - const: firmware
++    else:
++      properties:
++        memory-region:
++          items:
++            - description: Region containing GPU MMU TTBs
++            - description: Region containing GPU MMU page tables
++            - description:
++                Region containing a shared handoff structure for VM
++                management coordination
++            - description: Calibration blob. Mostly power-related configuration
++            - description: Calibration blob. Mostly GPU-related configuration
++            - description: Shared global variables with GPU firmware
++        memory-region-names:
++          items:
++            - const: ttbs
++            - const: pagetables
++            - const: handoff
++            - const: hw-cal-a
++            - const: hw-cal-b
++            - const: globals
++        "#cooling-cells": false
++
+ additionalProperties: false
+ 
+ examples:
+@@ -97,4 +135,26 @@ examples:
+ 
+         apple,firmware-abi = <0 0 0>;
+     };
++
++  - |
++    soc {
++        #address-cells = <2>;
++        #size-cells = <2>;
++
++        gpu@302600000 {
++            compatible = "apple,agx-t8132";
++            reg = <0x3 0x02600000 0x0 0x88000>,
++                  <0x3 0x00000000 0x0 0x4000000>;
++            reg-names = "asc", "sgx";
++            mboxes = <&agx_mbox>;
++            power-domains = <&ps_gfx>;
++            memory-region = <&uat_ttbs>, <&uat_pagetables>, <&uat_l2>,
++                            <&uat_handoff>, <&gpu_firmware>;
++            memory-region-names = "ttbs", "pagetables", "l2",
++                                  "handoff", "firmware";
++            #cooling-cells = <2>;
++
++            apple,firmware-abi = <0 0 0>;
++        };
++    };
+ ...

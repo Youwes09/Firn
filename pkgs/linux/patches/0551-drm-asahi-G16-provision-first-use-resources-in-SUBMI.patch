@@ -1,0 +1,663 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 23 Oct 2026 20:18:59 -0400
+Subject: [PATCH] drm/asahi: G16: provision first-use resources in SUBMIT;
+ publish without per-Work allocation
+
+Publication runs in the job worker that signals completion fences. A
+failure there can only fail the queue after SUBMIT has returned, and a
+GFP_KERNEL allocation there can recurse into reclaim that waits on those
+fences. Other drivers allocate and validate in the submit ioctl.
+
+- SUBMIT now creates a queue's firmware rings and a VM root's TVB pool,
+  which its first publication used to create. Their ENOMEM/ENOSPC return
+  from the ioctl with nothing queued and the queue left usable.
+  Publication still finds or creates them, through the same helpers.
+- The TA, fragment and compute Work encodings are scratch buffers
+  allocated once with the runtime instead of per Work; publication is
+  serialized by the runtime lock and copies them into firmware memory.
+- A render's firmware write batch is computed on demand instead of being
+  collected into a vector (or a stack list: the job worker's stack is
+  tight), and update_batch takes its ranges the same way.
+- The retire log gets its full capacity at init, and flights are pushed
+  into the slot reserve_flight reserved.
+- A Work encoding that fails for ioctl-validated parameters is a driver
+  bug: EIO with a message, not EINVAL.
+
+The publish path's deepest frames total about 160 bytes less than before.
+Amortized capacity growth in reserve_flight, Work arena refills, scratch
+leases, client alias page tables and TVB growth still allocate in the
+worker; see the design note.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16.rs                  |   6 +-
+ drivers/gpu/drm/asahi/g16_drm.rs              |  20 ++
+ drivers/gpu/drm/asahi/g16_runtime.rs          | 220 ++++++++++++------
+ drivers/gpu/drm/asahi/g16_vm.rs               |  31 ++-
+ .../drivers/gpu/asahi/test-prep-ioctl.py      |  86 +++++++
+ 5 files changed, 281 insertions(+), 82 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-prep-ioctl.py
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index b6fb794e7e95..25896eec33fd 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -262,6 +262,8 @@ pub(crate) struct Bootstrap {
+     pub(crate) core_mask: u32,
+     pub(crate) maximum_frequency_khz: u32,
+     tvb_pools: KVec<crate::g16_tvb::Tvb>,
++    /// Work encoding scratch, allocated once so publication never allocates.
++    pub(crate) encodings: render_runtime::Encodings,
+     render_publication: u64,
+     diagnostics: KBox<Diagnostics>,
+     next_work_va: u64,
+@@ -770,7 +772,8 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             wedge_signature: 0,
+             wedge_reported: false,
+             render_ring: render_runtime::RenderRing::new(),
+-            retire_log: KVec::new(),
++            // Full capacity now: retirement logs without allocating.
++            retire_log: KVec::with_capacity(render_runtime::RETIRE_LOG, GFP_KERNEL)?,
+             retire_next: 0,
+             handovers: {
+                 let mut v = KVec::new();
+@@ -811,6 +814,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             core_mask: platform.core_mask,
+             maximum_frequency_khz: platform.max_frequency() * 1000,
+             tvb_pools: KVec::new(),
++            encodings: render_runtime::Encodings::new()?,
+             render_publication: crate::module_parameters::fw_counter_start.value(),
+             diagnostics,
+             next_work_va: render_runtime::WORK_BASE,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 940f63b7bd64..f43011963e6d 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -132,6 +132,9 @@ struct Vm {
+     reservation: ARef<Object>,
+     render_support: Option<Arc<crate::g16::Support>>,
+     render_ready: bool,
++    /// The runtime holds this VM root's TVB pool (created by its first render
++    /// submission, released with the VM).
++    tvb_ready: bool,
+     compute_ready: bool,
+     render_broken: bool,
+     /// Closes waiting for their snapshot to complete (see g16_deferred).
+@@ -789,6 +792,7 @@ fn vm_create(
+                 reservation,
+                 render_support: None,
+                 render_ready: false,
++                tvb_ready: false,
+                 compute_ready: false,
+                 render_broken: false,
+                 deferred: KVec::new(),
+@@ -2609,6 +2613,22 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+                 vm.render_broken = false;
+             }
+         }
++        // Provision what this queue's or VM root's first publication would
++        // otherwise allocate in the job worker, so a failure returns here with
++        // nothing queued instead of failing the queue later.
++        let tvb = renders != 0 && !vm.tvb_ready;
++        if tvb || !firmware.lock().provisioned() {
++            let mut runtime = device.runtime.lock();
++            if runtime.render_failed() {
++                return Err(EIO);
++            }
++            runtime.provision_queue(&mut firmware.lock())?;
++            if tvb {
++                let support = vm.render_support.as_deref().ok_or(EIO)?;
++                runtime.provision_tvb(&mut vm.space.lock(), support)?;
++                vm.tvb_ready = true;
++            }
++        }
+         // Every submission retains the VM's mappings until it completes.
+         // Share one copy until the mappings change: CS2-sized address spaces
+         // hold thousands of mappings and submit hundreds of times a frame.
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index ada2aff8e261..923352d8b368 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -98,6 +98,11 @@ fn drop(&mut self) {
+ }
+ 
+ impl FirmwareQueues {
++    /// Whether the queue's firmware rings exist (see `Runtime::provision_queue`).
++    pub(crate) fn provisioned(&self) -> bool {
++        self.lanes.is_some()
++    }
++
+     /// Remember that a published Work on `lane` waited on `dep` (a field-level
+     /// borrow, usable while the queue's lanes are borrowed).
+     fn note_wait(waited: &mut [[Option<Stamp>; 2]; 3], lane: usize, dep: Stamp) {
+@@ -300,6 +305,28 @@ struct LaneBook {
+ /// themselves. Also caches the work channels' transport cursors: the tail
+ /// is written only by this driver, and stale read/done cursors are behind
+ /// the real ones, so a cached view can only under-report ring room.
++/// Encoding scratch for one Work at a time: publication runs under the
++/// runtime lock and copies the encodings into firmware memory before it
++/// returns, so one set allocated with the runtime serves every Work and
++/// publication itself does not allocate. On the heap: two copies of each
++/// encoding on the job worker's stack would overflow it.
++#[derive(Default)]
++pub(crate) struct Encodings {
++    tiling: KVec<u8>,
++    fragment: KVec<u8>,
++    compute: KVec<u8>,
++}
++
++impl Encodings {
++    pub(crate) fn new() -> Result<Self> {
++        let mut encodings = Self::default();
++        encodings.tiling.extend_with(0x940, 0u8, GFP_KERNEL)?;
++        encodings.fragment.extend_with(0xcc0, 0u8, GFP_KERNEL)?;
++        encodings.compute.extend_with(0x8c0, 0u8, GFP_KERNEL)?;
++        Ok(encodings)
++    }
++}
++
+ pub(crate) struct Ledger {
+     lanes: KVec<LaneBook>,
+     /// (lane pointers, ring head) per flight and lane.
+@@ -520,9 +547,6 @@ fn work_space_left(&self, render: bool) -> bool {
+     /// already mapped into; the device alias exists for every reused slot.
+     fn allocate_work(&mut self, render: bool) -> Result<(u64, Option<u64>)> {
+         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
+-        if self.diagnostics.retire_log.capacity() < RETIRE_LOG {
+-            self.diagnostics.retire_log.reserve(RETIRE_LOG, GFP_KERNEL)?;
+-        }
+         let index = usize::from(render);
+         if let Some((va, root)) = self.free_work[index].pop() {
+             return Ok((va, Some(root)));
+@@ -755,7 +779,54 @@ fn init_queues(
+         Ok(lanes)
+     }
+ 
++    /// For the SUBMIT ioctl: allocate the queue's firmware rings now rather
++    /// than at its first publication.
++    pub(crate) fn provision_queue(&mut self, owner: &mut FirmwareQueues) -> Result {
++        if self.render_failed {
++            return Err(EIO);
++        }
++        self.prepare_lanes(owner)
++    }
++
++    /// For the SUBMIT ioctl: create the VM root's TVB pool now rather than
++    /// at its first render publication.
++    pub(crate) fn provision_tvb(&mut self, client: &mut g16_vm::AddressSpace, support: &Support) -> Result {
++        if self.render_failed {
++            return Err(EIO);
++        }
++        self.tvb_pool(client, support).map(|_| ())
++    }
++
++    /// The index of the client root's TVB pool, created on first use. Not
++    /// inlined: its creation path would otherwise enlarge the job worker's frame.
++    #[inline(never)]
++    fn tvb_pool(&mut self, client: &mut g16_vm::AddressSpace, support: &Support) -> Result<usize> {
++        let root = client.roots().low;
++        if let Some(index) = self.tvb_pools.iter().position(|p| p.root == root) {
++            return Ok(index);
++        }
++        self.tvb_pools.reserve(1, GFP_KERNEL)?;
++        let base = self.next_object_va;
++        self.next_object_va = base.checked_add(0x44000).ok_or(ENOSPC)?;
++        let pool = crate::g16_tvb::Tvb::new(
++            self._firmware_space.as_mut().ok_or(EIO)?,
++            client,
++            base,
++            7 + u64::from(support.index),
++        )?;
++        self.tvb_pools.push_within_capacity(pool).map_err(|_| ENOMEM)?;
++        Ok(self.tvb_pools.len() - 1)
++    }
++
+     fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
++        self.prepare_lanes(owner)?;
++        self.prepare_events(owner)
++    }
++
++    /// The queue's firmware rings, allocated once per public queue. Not
++    /// inlined, like `tvb_pool`: it is cold and its frame is large.
++    #[inline(never)]
++    fn prepare_lanes(&mut self, owner: &mut FirmwareQueues) -> Result {
+         if owner.lanes.is_none() {
+             self.recycle_queues()?;
+             let identity = self.next_object_va;
+@@ -794,6 +865,12 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+                 );
+             }
+         }
++        Ok(())
++    }
++
++    /// An event index for each busy period of the queue (released when its
++    /// last Work retires). EBUSY while all are in use: admission retries.
++    fn prepare_events(&mut self, owner: &mut FirmwareQueues) -> Result {
+         if owner.events.is_none() {
+             // Bits 0-31 are the event indices in use; a queue takes the
+             // lowest free one.
+@@ -1461,7 +1538,8 @@ fn service_flights(&mut self) -> Result {
+                 &render.addresses,
+                 &mut render.events,
+             );
+-            self.tvb_pools.push(pool, GFP_KERNEL)?;
++            // Back into the slot swap_remove freed: no allocation.
++            self.tvb_pools.push_within_capacity(pool).map_err(|_| EIO)?;
+             self.flights[index].render = Some(render);
+             result?;
+             if self._firmware_space.as_ref().ok_or(EIO)?.read_u32(STATE)? == cursor {
+@@ -2204,27 +2282,14 @@ fn submit_render_queue(
+     ) -> Result<Receipt> {
+         let mut guard = owner.lock();
+         let client = &mut *guard;
+-        let root = client.roots().low;
+-        let index = match self.tvb_pools.iter().position(|p| p.root == root) {
+-            Some(index) => index,
+-            None => {
+-                self.tvb_pools.reserve(1, GFP_KERNEL)?;
+-                let base = self.next_object_va;
+-                self.next_object_va = base.checked_add(0x44000).ok_or(ENOSPC)?;
+-                let pool = crate::g16_tvb::Tvb::new(
+-                    self._firmware_space.as_mut().ok_or(EIO)?,
+-                    client,
+-                    base,
+-                    7 + u64::from(support.index),
+-                )?;
+-                self.tvb_pools.push(pool, GFP_KERNEL)?;
+-                self.tvb_pools.len() - 1
+-            }
+-        };
++        // The SUBMIT ioctl created the pool (provision_tvb); this finds it.
++        let index = self.tvb_pool(client, support)?;
+         let scene = self.tvb_pools[index].reserve_scene().inspect_err(|_| {
+             self.report_pressure(4, "scenes");
+         })?;
+         let mut pool = self.tvb_pools.swap_remove(index);
++        // Out of `self` while publication also borrows it; always returned.
++        let mut encodings = core::mem::take(&mut self.encodings);
+         let result = self.submit_render_pool(
+             client,
+             params,
+@@ -2232,15 +2297,18 @@ fn submit_render_queue(
+             queue,
+             queues,
+             &mut pool,
++            &mut encodings,
+             owner.clone(),
+             scene,
+             timestamps,
+             dependencies,
+         );
++        self.encodings = encodings;
+         if result.is_err() && !self.render_failed {
+             pool.release_scene(scene);
+         }
+-        self.tvb_pools.push(pool, GFP_KERNEL)?;
++        // Back into the slot swap_remove freed: no allocation.
++        self.tvb_pools.push_within_capacity(pool).map_err(|_| EIO)?;
+         result
+     }
+ 
+@@ -2253,6 +2321,7 @@ fn submit_render_pool(
+         queue: &mut FirmwareQueues,
+         queues: Arc<Mutex<FirmwareQueues>>,
+         pool: &mut crate::g16_tvb::Tvb,
++        encodings: &mut Encodings,
+         owner: Arc<Mutex<g16_vm::AddressSpace>>,
+         scene: u32,
+         timestamps: [u64; 4],
+@@ -2354,14 +2423,15 @@ fn submit_render_pool(
+         a.fragment_user_timestamp_end = timestamps[3];
+         // From here any publication failure quarantines the roots.
+         self.render_failed = true;
+-        // Heap buffers: two copies of each encoding on this frame would
+-        // exceed the kernel stack together with the job worker's own frame.
+-        let mut ta = KVec::new();
+-        ta.extend_with(0x940, 0u8, GFP_KERNEL)?;
+-        let mut frag = KVec::new();
+-        frag.extend_with(0xcc0, 0u8, GFP_KERNEL)?;
+-        params.tiling_work(&a, &mut ta).ok_or(EINVAL)?;
+-        params.fragment_work(&a, &mut frag).ok_or(EINVAL)?;
++        let (ta, frag) = (&mut encodings.tiling, &mut encodings.fragment);
++        ta.fill(0);
++        frag.fill(0);
++        // The ioctl validated the parameters and every address here is the
++        // kernel's own, so a failed encoding is a driver bug, not bad input.
++        if params.tiling_work(&a, ta).is_none() || params.fragment_work(&a, frag).is_none() {
++            pr_err!("G16: render Work encoding failed for ioctl-validated parameters\n");
++            return Err(EIO);
++        }
+         // No per-Work start or tiling-end profiling stamps; fragment end
+         // uses one location shared by the queue, separate from UAPI timestamps.
+         ta[0x8c8..0x8d8].fill(0);
+@@ -2464,7 +2534,7 @@ fn submit_render_pool(
+             }
+         }
+         queue.pending += 1;
+-        self.flights.push(
++        self.flights.push_within_capacity(
+             Flight {
+                 id: va,
+                 owner: queues,
+@@ -2513,8 +2583,8 @@ fn submit_render_pool(
+                     scene,
+                 }),
+             },
+-            GFP_KERNEL,
+-        )?;
++        )
++        .map_err(|_| EIO)?;
+         // Capacity was reserved with the flight in reserve_flight.
+         let flight = self.flights.last().ok_or(EIO)?;
+         self.ledger.add(flight)?;
+@@ -2600,40 +2670,49 @@ fn publish_render(
+             entries[stage][entry_counts[stage]] = work.to_le_bytes();
+             entry_counts[stage] += 1;
+         }
+-        // At most 8 notifier writes and 9 per stage.
+-        let mut writes: KVec<(u64, &[u8])> = KVec::with_capacity(32, GFP_KERNEL)?;
+-        macro_rules! push {
+-            ($va:expr, $bytes:expr) => {
+-                writes.push_within_capacity(($va, $bytes)).map_err(|_| ENOMEM)
+-            };
+-        }
+-        // Shared notifier: count this render's tiling and fragment Works
+-        // into the queue's cumulative total. Firmware counts completions
+-        // at +0xc and writes the lanes' driver stamps as they retire.
+-        push!(a.event_control + 0x24, &context)?;
+-        push!(a.event_count_array, &notified)?;
+-
+-        // The queue lanes persist independently of the physical work channel.
+-        for stage in 0..2 {
+-            let Lane { ring, .. } = lanes[stage];
++        // Write `n` of the batch, in order: the shared notifier's two words
++        // (firmware counts completions at +0xc and writes the lanes' driver
++        // stamps as they retire), then per stage the prelude, Work,
++        // microsequence, dependency items and ring entries (contiguous except
++        // where the ring wraps). Computed on demand: no list on the job
++        // worker's stack, and nothing to allocate.
++        let (ta, frag): (&[u8], &[u8]) = (ta, frag);
++        let (context, notified, preludes) = (&context, &notified, &preludes);
++        let (tiling_micro, fragment_micro) = (&tiling_micro, &fragment_micro);
++        let (items, entries) = (&items, &entries);
++        let rings = [lanes[0].ring, lanes[1].ring];
++        let per_stage = move |stage: usize| 3 + item_counts[stage] + entry_counts[stage];
++        let count = 2 + per_stage(0) + per_stage(1);
++        let write = move |n: usize| {
++            if n < 2 {
++                return if n == 0 {
++                    (a.event_control + 0x24, &context[..])
++                } else {
++                    (a.event_count_array, &notified[..])
++                };
++            }
++            let (stage, k) = if n - 2 < per_stage(0) { (0, n - 2) } else { (1, n - 2 - per_stage(0)) };
+             let (prelude, work, micro) = if stage == 0 {
+                 (a.tiling_prelude, a.tiling_work, a.tiling_microsequence)
+             } else {
+                 (a.fragment_prelude, a.fragment_work, a.fragment_microsequence)
+             };
+-            push!(prelude, &preludes[stage])?;
+-            push!(work, if stage == 0 { ta } else { frag })?;
+-            push!(micro, if stage == 0 { &tiling_micro[..] } else { &fragment_micro[..] })?;
+-            for index in 0..item_counts[stage] {
+-                push!(prelude + 0x40 + index as u64 * 0x40, &items[stage][index])?;
+-            }
+-            // Ring entries are contiguous except where the ring wraps.
+-            for (n, entry) in entries[stage][..entry_counts[stage]].iter().enumerate() {
+-                let pos = (firsts[stage] + n as u32) % 0x500;
+-                push!(ring + u64::from(pos) * 8, entry)?;
++            match k {
++                0 => (prelude, &preludes[stage][..]),
++                1 => (work, if stage == 0 { ta } else { frag }),
++                2 => (micro, if stage == 0 { &tiling_micro[..] } else { &fragment_micro[..] }),
++                k if k - 3 < item_counts[stage] => {
++                    let index = k - 3;
++                    (prelude + 0x40 + index as u64 * 0x40, &items[stage][index][..])
++                }
++                k => {
++                    let index = k - 3 - item_counts[stage];
++                    let pos = (firsts[stage] + index as u32) % 0x500;
++                    (rings[stage] + u64::from(pos) * 8, &entries[stage][index][..])
++                }
+             }
+-        }
+-        self._firmware_space.as_mut().ok_or(EIO)?.write_batch(&writes)?;
++        };
++        self._firmware_space.as_mut().ok_or(EIO)?.write_batch(count, write)?;
+         let mut epochs = [0; 2];
+         for stage in [1usize, 0] {
+             let mut lane = lanes[stage];
+@@ -2830,9 +2909,12 @@ fn submit_compute_queue(
+         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
+         self.note_dependency_events(dependencies, own);
+         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
+-        let mut work = KVec::new();
+-        work.extend_with(0x8c0, 0u8, GFP_KERNEL)?;
+-        params.work(&a, &mut work).ok_or(EINVAL)?;
++        let work = &mut self.encodings.compute;
++        work.fill(0);
++        if params.work(&a, work).is_none() {
++            pr_err!("G16: compute Work encoding failed for ioctl-validated parameters\n");
++            return Err(EIO);
++        }
+         // Timestamp's user destinations must lie in the validated special-
+         // object aperture. Firmware writes nanoseconds directly, as on M1/M2.
+         // Firmware consumes this pointer pair, so it lives in the Work's
+@@ -2846,7 +2928,7 @@ fn submit_compute_queue(
+         let head = (first + 1 + dependencies.iter().flatten().count() as u32) % 0x500;
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         fw.write_live(compute::SHARED_STATE, &count32.to_le_bytes())?;
+-        fw.write_live(a.work, &work)?;
++        fw.write_live(a.work, &self.encodings.compute)?;
+         fw.write_live(a.work + compute::ENTRY_OFFSET, &compute::entry(params.cdm))?;
+         let mut microsequence = params.microsequence(&a);
+         for base in [0x1bc, 0x20c] {
+@@ -2901,7 +2983,7 @@ fn submit_compute_queue(
+             FirmwareQueues::note_wait(&mut queue.waited, 2, *dep);
+         }
+         queue.pending += 1;
+-        self.flights.push(
++        self.flights.push_within_capacity(
+             Flight {
+                 id: a.work,
+                 owner: queues.clone(),
+@@ -2930,8 +3012,8 @@ fn submit_compute_queue(
+                 channels: [(channel, (epoch + 1) & 255), (usize::MAX, 0)],
+                 render: None,
+             },
+-            GFP_KERNEL,
+-        )?;
++        )
++        .map_err(|_| EIO)?;
+         // Capacity was reserved with the flight in reserve_flight.
+         let flight = self.flights.last().ok_or(EIO)?;
+         self.ledger.add(flight)?;
+@@ -3402,7 +3484,7 @@ pub(crate) struct Handover {
+     next: u64,
+ }
+ 
+-const RETIRE_LOG: usize = 256;
++pub(crate) const RETIRE_LOG: usize = 256;
+ 
+ fn micros(later: Instant<Monotonic>, earlier: Instant<Monotonic>) -> i64 {
+     (later - earlier).as_nanos() / 1000
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index c999853b1938..41b1e1f38a3c 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -486,6 +486,7 @@ pub(crate) struct FirmwareSpace {
+     external: KVec<core::ops::Range<u64>>,
+ }
+ 
++
+ impl FirmwareSpace {
+     pub(crate) fn attach(dev: &device::Device) -> Result<Self> {
+         let node = dev.of_node().ok_or(EINVAL)?;
+@@ -711,20 +712,21 @@ fn update_live(
+         size: usize,
+         mut update: impl FnMut(*mut u8, usize, usize),
+     ) -> Result {
+-        self.update_batch(&[(va, size)], |_, ptr, offset, size| update(ptr, offset, size))
++        self.update_batch(1, |_| (va, size), |_, ptr, offset, size| update(ptr, offset, size))
+     }
+ 
+     /// Several host-owned writes with one barrier pair, the region resolved
+     /// again only when a destination leaves the previous one. Nothing in a
+     /// batch is visible to firmware before the queue publication that follows
+     /// it (flush), which has its own barrier.
+-    pub(crate) fn write_batch(&mut self, writes: &[(u64, &[u8])]) -> Result {
+-        let mut ranges = KVec::with_capacity(writes.len(), GFP_KERNEL)?;
+-        for &(va, bytes) in writes {
+-            ranges.push((va, bytes.len()), GFP_KERNEL)?;
+-        }
+-        self.update_batch(&ranges, |which, ptr, offset, size| {
+-            let bytes = writes[which].1;
++    /// `write(n)` is the destination and source of write `n` of `count`.
++    pub(crate) fn write_batch<'a>(&mut self, count: usize, write: impl Fn(usize) -> (u64, &'a [u8])) -> Result {
++        let range = |n| {
++            let (va, bytes) = write(n);
++            (va, bytes.len())
++        };
++        self.update_batch(count, range, |which, ptr, offset, size| {
++            let bytes = write(which).1;
+             // SAFETY: update_batch supplies an exclusively host-owned
+             // destination and a range within this write's source slice.
+             unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), ptr, size) };
+@@ -741,9 +743,11 @@ fn holds(region: &FirmwareRegion, va: u64, size: usize) -> bool {
+ 
+     /// Update host-owned bytes, preserving adjacent firmware-owned cache lines.
+     /// Cache maintenance completes once per batch, not once per page or write.
++    /// `range(n)` is the destination of write `n` of `count`.
+     fn update_batch(
+         &mut self,
+-        ranges: &[(u64, usize)],
++        count: usize,
++        range: impl Fn(usize) -> (u64, usize),
+         mut update: impl FnMut(usize, *mut u8, usize, usize),
+     ) -> Result {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_LIVE);
+@@ -756,7 +760,8 @@ fn update_batch(
+         const NONE: u8 = u8::MAX;
+         let mut found: [Option<&FirmwareRegion>; 4] = [None; 4];
+         let mut owner = [NONE; 32];
+-        for (n, &(va, size)) in ranges.iter().enumerate() {
++        for n in 0..count {
++            let (va, size) = range(n);
+             let region = match found.iter().flatten().position(|r| Self::holds(r, va, size)) {
+                 Some(index) => {
+                     if let Some(slot) = owner.get_mut(n) {
+@@ -778,7 +783,8 @@ fn update_batch(
+             }
+         };
+         if maint {
+-            for (n, &(va, size)) in ranges.iter().enumerate() {
++            for n in 0..count {
++                let (va, size) = range(n);
+                 if size == 0 {
+                     continue;
+                 }
+@@ -803,7 +809,8 @@ fn update_batch(
+             }
+         }
+         crate::mem::sync();
+-        for (which, &(va, size)) in ranges.iter().enumerate() {
++        for which in 0..count {
++            let (va, size) = range(which);
+             if size == 0 {
+                 continue;
+             }
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-prep-ioctl.py b/tools/testing/selftests/drivers/gpu/asahi/test-prep-ioctl.py
+new file mode 100755
+index 000000000000..5aa6e87e29b2
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-prep-ioctl.py
+@@ -0,0 +1,86 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host source checks: G16 publication does not allocate, and the SUBMIT
++ioctl provisions first-use resources before it queues a job.
++
++Publication runs in the job worker, which signals completion fences: a
++GFP_KERNEL allocation there can recurse into reclaim that waits on those
++fences, and a failure there can only fail the queue after SUBMIT returned.
++No device or kernel build is needed.
++"""
++from pathlib import Path
++import re
++
++here = Path(__file__).resolve()
++root = next(p for p in here.parents if (p / 'drivers/gpu/drm/asahi/g16_runtime.rs').exists())
++driver = root / 'drivers/gpu/drm/asahi'
++runtime = (driver / 'g16_runtime.rs').read_text()
++vm = (driver / 'g16_vm.rs').read_text()
++drm = (driver / 'g16_drm.rs').read_text()
++render = (driver / 'g16_render.rs').read_text()
++compute = (driver / 'g16_compute.rs').read_text()
++
++
++def function(source, name):
++    """The body of `fn name`, up to the next item at the same indentation."""
++    m = re.search(r'\n(\s*)(?:pub\(crate\) )?fn ' + name + r'\b', source)
++    assert m, name
++    indent = m.group(1).lstrip('\n')
++    end = re.search(r'\n' + indent + r'}\n', source[m.end():])
++    return source[m.start():m.end() + end.end()]
++
++
++checks = 0
++# Every step of publishing a render or compute Work, and the firmware batch
++# write it uses.
++for source, name in [(runtime, 'submit_render_pool'), (runtime, 'publish_render'),
++                     (runtime, 'submit_compute_queue'), (runtime, 'submit_render'),
++                     (runtime, 'submit_render_queue'), (runtime, 'submit_compute'),
++                     (vm, 'write_batch'), (vm, 'update_batch')]:
++    body = function(source, name)
++    assert 'GFP_KERNEL' not in body, f'{name} allocates'
++    assert not re.search(r'\bKVec::(new|with_capacity)\b', body), f'{name} builds a vector'
++    checks += 1
++
++# The reusable encodings match the builders' required lengths.
++encodings = re.search(r'impl Encodings \{.*?\n\}\n', runtime, re.S).group(0)
++sizes = dict(re.findall(r'encodings\.(\w+)\.extend_with\((0x[0-9a-f]+)', encodings))
++assert sizes == {'tiling': '0x940', 'fragment': '0xcc0', 'compute': '0x8c0'}, sizes
++assert 'out.len() != 0x940' in function(render, 'tiling_work')
++assert 'out.len() != 0xcc0' in function(render, 'fragment_work')
++assert 'out.len() != 0x8c0' in function(compute, 'work')
++checks += 1
++
++# Encodings leave the runtime only around one publication and always return.
++queue = function(runtime, 'submit_render_queue')
++take = queue.index('core::mem::take(&mut self.encodings)')
++pool = queue.index('self.submit_render_pool(', take)
++restore = queue.index('self.encodings = encodings;', pool)
++assert '?' not in queue[take:restore].replace('result', ''), 'an early return loses the encodings'
++checks += 1
++
++# The ioctl provisions the queue's rings and the VM root's TVB pool before it
++# creates the job, so their failures return from SUBMIT with nothing queued.
++submit = function(drm, 'submit')
++provision = submit.index('runtime.provision_queue(')
++tvb = submit.index('runtime.provision_tvb(')
++job = submit.index('.new_job(')
++assert provision < job and tvb < job
++assert 'vm.tvb_ready = true' in submit[tvb:job]
++checks += 1
++
++# Publication finds them: the worker's TVB lookup is the shared helper, and
++# prepare_queues still allocates rings only when they are missing.
++assert 'self.tvb_pool(client, support)?' in queue
++lanes = function(runtime, 'prepare_lanes')
++assert 'if owner.lanes.is_none()' in lanes
++assert 'self.prepare_lanes(owner)' in function(runtime, 'provision_queue')
++checks += 1
++
++# Retirement and the retire log never allocate: capacity is set at init.
++assert 'retire_log.reserve' not in runtime
++assert re.search(r'retire_log: KVec::with_capacity\(render_runtime::RETIRE_LOG, GFP_KERNEL\)',
++                 (driver / 'g16.rs').read_text())
++checks += 1
++
++print(f'test-prep-ioctl: {checks} checks passed')

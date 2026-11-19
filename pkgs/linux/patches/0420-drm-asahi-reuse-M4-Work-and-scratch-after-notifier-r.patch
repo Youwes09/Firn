@@ -1,0 +1,555 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Mon, 14 Sep 2026 09:31:31 +0000
+Subject: [PATCH] drm/asahi: reuse M4 Work and scratch after notifier
+ retirement
+
+(cherry picked from commit f89ed20a24e3234646442ebd1d9c067208b3a54d)
+(cherry picked from commit eb68e9220f87a6208c7581a50f88373973fccf15)
+---
+ drivers/gpu/drm/asahi/g16.rs         |   2 +
+ drivers/gpu/drm/asahi/g16_compute.rs |   1 +
+ drivers/gpu/drm/asahi/g16_drm.rs     |   2 +-
+ drivers/gpu/drm/asahi/g16_render.rs  |   2 +
+ drivers/gpu/drm/asahi/g16_runtime.rs | 125 +++++++++++++++++--------
+ drivers/gpu/drm/asahi/g16_vm.rs      | 132 ++++++++++++++++++++++-----
+ 6 files changed, 204 insertions(+), 60 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 126adcf9345c..a9a4aa4d8c8c 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -202,6 +202,7 @@ pub(crate) struct Bootstrap {
+     render_publication: u64,
+     next_work_va: u64,
+     work_arenas: [core::ops::Range<u64>; 2],
++    free_work: [KVec<u64>; 2],
+     compute_publication: u64,
+     queue_events: Arc<core::sync::atomic::AtomicU64>,
+     render_failed: bool,
+@@ -655,6 +656,7 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+             render_publication: 0,
+             next_work_va: 0xffff_fc22_0000_0000,
+             work_arenas: [0..0, 0..0],
++            free_work: [KVec::new(), KVec::new()],
+             compute_publication: 0,
+             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
+             render_failed: false,
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index 603c80c8e5cb..2fa121d9aa04 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -235,6 +235,7 @@ fn valid(&self) -> bool {
+                 },
+             ),
+             (0x810, a.stamp),
++            (0x81c, 1), // Flush notifier stamps before storage reuse.
+             (0x814, a.event),
+             (0x820, a.identity as u32),
+             (0x828, a.ordinal),
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 2db07ed9e844..a602b1e1e459 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -1076,7 +1076,7 @@ fn run(this: Arc<Self>) {
+                             ),
+                             Parameters::Compute(p) => runtime.submit_compute(
+                                 execution.firmware.clone(),
+-                                &mut execution.space.lock(),
++                                execution.space.clone(),
+                                 p,
+                                 execution.timestamps[job.next],
+                                 &dependencies,
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index 308affd823eb..9add118a80e9 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -658,6 +658,7 @@ impl Parameters {
+         u64_at(&mut out, 0x878, a.tiling_driver_stamp);
+         u64_at(&mut out, 0x880, a.tiling_firmware_stamp);
+         u32_at(&mut out, 0x888, a.tiling_stamp as u32);
++        u32_at(&mut out, 0x894, 1); // Flush notifier stamps before storage reuse.
+         u32_at(&mut out, 0x88c, a.tiling_event as u32);
+         u32_at(&mut out, 0x898, a.tiling_uuid as u32);
+         u64_at(&mut out, 0x8a0, self.layers - 0x1);
+@@ -782,6 +783,7 @@ impl Parameters {
+         u64_at(&mut out, 0xbc0, a.fragment_driver_stamp);
+         u64_at(&mut out, 0xbc8, a.fragment_firmware_stamp);
+         u32_at(&mut out, 0xbd0, a.fragment_stamp as u32);
++        u32_at(&mut out, 0xbdc, 1);
+         u32_at(&mut out, 0xbd4, a.fragment_event as u32);
+         u32_at(&mut out, 0xbe0, a.fragment_uuid as u32);
+         u64_at(&mut out, 0xbe8, self.layers - 0x1);
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index d519d7adeeea..014599b3e603 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -36,6 +36,12 @@ struct Lane {
+     new: bool,
+ }
+ 
++impl Lane {
++    fn firmware_stamp(&self) -> u64 {
++        self.pointers + 0x1040
++    }
++}
++
+ /// Reserve three distinct event IDs while this queue has unfinished work.
+ /// Idle queues release their lease, so creating idle queues does not consume
+ /// firmware event slots. Slots 0..31 are left to the bootstrap protocol.
+@@ -92,6 +98,9 @@ pub(super) struct Flight {
+     context: u32,
+     started: Instant<Monotonic>,
+     stamps: [Option<Stamp>; 2],
++    driver_stamps: [Option<Stamp>; 2],
++    scratch: g16_vm::Scratch,
++    client: Arc<Mutex<g16_vm::AddressSpace>>,
+     queues: [(u64, u32); 2],
+     channels: [(usize, u32); 2],
+     render: Option<RenderFlight>,
+@@ -144,12 +153,18 @@ fn report_pressure(&self, bit: u64, resource: &str) {
+         }
+     }
+ 
+-    /// Amortize firmware page allocation and mapping over sixteen Works.
+-    /// Every slot is distinct and retained; firmware notifier links and saved
+-    /// completion stamps are never recycled. Render tails keep shared access.
++    /// Lease Work storage until notifier/driver stamps and transport retire.
++    /// Backing stays mapped. Queue-owned monotonic stamps outlive reused Work,
++    /// so a pending dependency never follows a recycled completion address.
+     fn allocate_work(&mut self, render: bool) -> Result<u64> {
+         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
+         let index = usize::from(render);
++        if let Some(va) = self.free_work[index].pop() {
++            return Ok(va);
++        }
++        // Retirement must not allocate. Space for every outstanding lease
++        // also covers all of them completing before another acquisition.
++        self.free_work[index].reserve(self.flights.len() + 1, GFP_KERNEL)?;
+         let stride = if render { 0x18000 } else { 0x8000 };
+         if self.work_arenas[index].is_empty() {
+             let base = self.next_work_va;
+@@ -455,7 +470,7 @@ pub(crate) fn poison(&mut self) {
+     fn stamps_done(&self, flight: &Flight) -> Result<bool> {
+         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+         for stamp in flight.stamps.iter().flatten() {
+-            if fw.read_u32(stamp.address)? != stamp.value {
++            if (fw.read_u32(stamp.address)?.wrapping_sub(stamp.value) as i32) < 0 {
+                 return Ok(false);
+             }
+         }
+@@ -623,6 +638,20 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+             let mut done = true;
++            // The notifier pass drops embedded JobMeta references and cleans
++            // their cache lines before publishing these later driver stamps.
++            for stamp in flight.driver_stamps.iter().flatten() {
++                done &= (fw.read_u32(stamp.address)?.wrapping_sub(stamp.value) as i32) >= 0;
++            }
++            // A reusable Work has its own notifier and exact submitted count.
++            // Removal must be visible before that storage can change queues.
++            let notifier = flight.id
++                + if flight.render.is_some() {
++                    0x200
++                } else {
++                    0x1400
++                };
++            done &= fw.read_u32(notifier + 0x94)? == 0;
+             for &(pointers, head) in &flight.queues {
+                 if pointers != 0 {
+                     done &= reached(fw.read_u32(pointers)?, head, 0x500)
+@@ -656,6 +685,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                 .as_ref()
+                 .is_some_and(|r| r.events.memory_limit);
+             let id = flight.id;
++            let render_work = flight.render.is_some();
+             if let Some(render) = &flight.render {
+                 let pool = self
+                     .tvb_pools
+@@ -671,7 +701,9 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             drop(owner);
+             self.context_users[flight.context as usize] -= 1;
+-            self.flights.remove(index).map_err(|_| EIO)?;
++            let flight = self.flights.remove(index).map_err(|_| EIO)?;
++            flight.client.lock().release_scratch(flight.scratch)?;
++            self.free_work[usize::from(render_work)].push(id, GFP_KERNEL)?;
+             // Queued commands can legitimately wait longer than one Work's
+             // timeout. Watch for a lack of retirement progress, rather than
+             // charging every command for all its predecessors' execution.
+@@ -1081,7 +1113,7 @@ fn submit_render_pool(
+         // BufferThing. Reusing scene 1 here corrupts other in-flight renders.
+         params.scene_slot = u64::from(scene);
+         params.cycle = 0x240000 + u64::from(scene) * 0x30;
+-        client.prepare_render(&mut params)?;
++        let scratch = client.prepare_render(&mut params)?;
+         let mut a = render::Addresses::bootstrap()
+             .publication(self.render_publication)
+             .ok_or(ENOSPC)?;
+@@ -1111,9 +1143,9 @@ fn submit_render_pool(
+         a.event_count_array = va + 0x300;
+         a.tiling_driver_stamp = va + 0x400;
+         a.fragment_driver_stamp = va + 0x440;
+-        a.tiling_firmware_stamp = va + 0x480;
+-        a.fragment_firmware_stamp = va + 0x4c0;
+-        let alias = 0x72_0000_0000 + self.render_publication * 0x8000;
++        a.tiling_firmware_stamp = lanes[0].firmware_stamp();
++        a.fragment_firmware_stamp = lanes[1].firmware_stamp();
++        let alias = 0x72_0000_0000 + (va - 0xffff_fc22_0000_0000);
+         if alias + 0x8000 > 0x73_0000_0000 {
+             return Err(ENOSPC);
+         }
+@@ -1123,12 +1155,7 @@ fn submit_render_pool(
+             let register_page = alias + stage * 0x4000;
+             let pa = fw.physical(work_page)?;
+             for view in [self._address_space.as_mut().ok_or(EIO)?, &mut *client] {
+-                view.low.map_pages(
+-                    register_page..register_page + 0x4000,
+-                    pa,
+-                    crate::pgtable::prot::PROT_GPU_SHARED_RW,
+-                    false,
+-                )?;
++                view.map_work_alias(register_page, pa)?;
+                 view.sync();
+             }
+             if stage == 0 {
+@@ -1210,6 +1237,19 @@ fn submit_render_pool(
+                     }),
+                     Some(stamp),
+                 ],
++                driver_stamps: [
++                    Some(Stamp {
++                        address: a.tiling_driver_stamp,
++                        value: a.tiling_stamp as u32,
++                        event: a.tiling_event as u32,
++                    }),
++                    Some(Stamp {
++                        address: a.fragment_driver_stamp,
++                        ..stamp
++                    }),
++                ],
++                scratch,
++                client: owner.clone(),
+                 queues: [(lanes[0].pointers, heads[0]), (lanes[1].pointers, heads[1])],
+                 channels: [
+                     (queue.priority as usize * 3, (epochs[0] + 1) & 255),
+@@ -1253,8 +1293,16 @@ fn publish_render(
+         ];
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         fw.write_live(a.event_control, &a.event_count_array.to_le_bytes())?;
++        fw.write_live(
++            a.event_control + 8,
++            &(a.fragment_stamp as u32).to_le_bytes(),
++        )?;
++        fw.write_live(a.event_control + 12, &0u32.to_le_bytes())?;
+         fw.write_live(a.event_control + 0x10, &0x50u32.to_le_bytes())?;
++        fw.write_live(a.event_control + 0x24, &(a.context_id as u32).to_le_bytes())?;
+         fw.write_live(a.event_count_array, &2u32.to_le_bytes())?;
++        fw.write_live(a.tiling_driver_stamp, &0u32.to_le_bytes())?;
++        fw.write_live(a.fragment_driver_stamp, &0u32.to_le_bytes())?;
+         // The queue lanes persist independently of the physical work channel.
+         for stage in 0..2 {
+             let Lane { ring, .. } = lanes[stage];
+@@ -1366,12 +1414,13 @@ pub(crate) fn map_compute_work(
+     pub(crate) fn submit_compute(
+         &mut self,
+         queues: Arc<Mutex<FirmwareQueues>>,
+-        client: &mut g16_vm::AddressSpace,
++        owner: Arc<Mutex<g16_vm::AddressSpace>>,
+         params: &compute::Parameters,
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
++        let mut client = owner.lock();
+         self.reserve_flight(
+             &queue,
+             false,
+@@ -1382,7 +1431,8 @@ pub(crate) fn submit_compute(
+         let result = self.submit_compute_queue(
+             &mut queue,
+             queues.clone(),
+-            client,
++            &mut client,
++            owner.clone(),
+             params,
+             timestamps,
+             dependencies,
+@@ -1398,6 +1448,7 @@ fn submit_compute_queue(
+         queue: &mut FirmwareQueues,
+         queues: Arc<Mutex<FirmwareQueues>>,
+         client: &mut g16_vm::AddressSpace,
++        owner: Arc<Mutex<g16_vm::AddressSpace>>,
+         params: &compute::Parameters,
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
+@@ -1406,7 +1457,7 @@ fn submit_compute_queue(
+         let priority = queue.priority;
+ 
+         let mut params = *params;
+-        client.prepare_compute(&mut params)?;
++        let scratch = client.prepare_compute(&mut params)?;
+         let space = client.roots();
+         if self.render_failed {
+             return Err(EIO);
+@@ -1416,7 +1467,7 @@ fn submit_compute_queue(
+         }
+         let ordinal = queue.compute_count;
+         let work = self.allocate_work(false)?;
+-        let alias = 0x71_0000_0000 + self.compute_publication * 0x4000;
++        let alias = 0x71_0000_0000 + (work - 0xffff_fc22_0000_0000);
+         if alias + 0x4000 > 0x72_0000_0000 {
+             return Err(ENOSPC);
+         }
+@@ -1425,21 +1476,16 @@ fn submit_compute_queue(
+         params.save_area = alias + 0x2000;
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         let pa = fw.physical(work)?;
+-        self._address_space.as_mut().ok_or(EIO)?.low.map_pages(
+-            alias..alias + 0x4000,
+-            pa,
+-            crate::pgtable::prot::PROT_GPU_SHARED_RW,
+-            false,
+-        )?;
+-        client.low.map_pages(
+-            alias..alias + 0x4000,
+-            pa,
+-            crate::pgtable::prot::PROT_GPU_SHARED_RW,
+-            false,
+-        )?;
++        self._address_space
++            .as_mut()
++            .ok_or(EIO)?
++            .map_work_alias(alias, pa)?;
++        client.map_work_alias(alias, pa)?;
++        fw.zero_live(work + 0x2000, 0x2000)?;
+         let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias)
+             .ok_or(ENOSPC)?;
+         a.queue = lane.queue;
++        a.firmware_stamp = lane.firmware_stamp();
+         a.event = queue.event(2)?;
+         a.stamp = u32::try_from((ordinal + 1) * 0x100).map_err(|_| ENOSPC)?;
+         self._address_space.as_ref().ok_or(EIO)?.sync();
+@@ -1473,14 +1519,12 @@ fn submit_compute_queue(
+         fw.write_live(user_timestamps, &timestamps[0].to_le_bytes())?;
+         fw.write_live(user_timestamps + 8, &timestamps[1].to_le_bytes())?;
+         fw.write_live(a.microsequence, &microsequence)?;
+-        let notifier = a.notifier(count32);
++        let notifier = a.notifier(0);
+         // Retained notifier list links are firmware-owned even after completion.
+         fw.write_live(a.notifier, &notifier[..0x14])?;
+         fw.write_live(a.notifier + 0x24, &notifier[0x24..0x28])?;
+-        fw.write_live(a.threshold, &count32.to_le_bytes())?;
+-        let previous = a.stamp.checked_sub(0x100).ok_or(EINVAL)?;
+-        fw.write_live(a.driver_stamp, &previous.to_le_bytes())?;
+-        fw.write_live(a.firmware_stamp, &previous.to_le_bytes())?;
++        fw.write_live(a.threshold, &1u32.to_le_bytes())?;
++        fw.write_live(a.driver_stamp, &0u32.to_le_bytes())?;
+         let mut pos = first;
+         for (index, dep) in dependencies.iter().flatten().enumerate() {
+             // Between the threshold/timestamps and the CDM entry trampoline.
+@@ -1524,6 +1568,15 @@ fn submit_compute_queue(
+                 context: a.context,
+                 started: Instant::now(),
+                 stamps: [Some(stamp), None],
++                driver_stamps: [
++                    Some(Stamp {
++                        address: a.driver_stamp,
++                        ..stamp
++                    }),
++                    None,
++                ],
++                scratch,
++                client: owner,
+                 queues: [(pointers, head), (0, 0)],
+                 channels: [(channel, (epoch + 1) & 255), (usize::MAX, 0)],
+                 render: None,
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 824a86afe923..4bbec51432a1 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -29,9 +29,32 @@ pub(crate) struct AddressSpace {
+     pages: RBTree<u64, Owned<Page>>,
+     compute_scratch: core::ops::Range<u64>,
+     render_scratch: core::ops::Range<u64>,
++    scratch_free: [KVec<core::ops::Range<u64>>; 2],
++    scratch_users: [usize; 2],
++}
++
++/// An exclusive suballocation; its backing remains owned by the VM.
++#[derive(Debug, PartialEq)]
++pub(crate) struct Scratch {
++    range: core::ops::Range<u64>,
++    render: bool,
+ }
+ 
+ impl AddressSpace {
++    /// Reused Work retains the same alias and backing. Existing aliases need
++    /// no PTE edit or invalidation; conflicting client mappings are rejected.
++    pub(crate) fn map_work_alias(&mut self, va: u64, pa: u64) -> Result {
++        match self.low.translate(va)? {
++            Some(existing) if existing == pa => Ok(()),
++            Some(_) => Err(EEXIST),
++            None => self.low.map_pages(
++                va..va + UAT_PGSZ as u64,
++                pa,
++                prot::PROT_GPU_SHARED_RW,
++                false,
++            ),
++        }
++    }
+     pub(crate) fn roots(&self) -> Roots {
+         Roots {
+             low: self.low.ttb(),
+@@ -46,6 +69,8 @@ pub(crate) fn new() -> Result<Self> {
+             pages: RBTree::new(),
+             compute_scratch: 0..0,
+             render_scratch: 0..0,
++            scratch_free: [KVec::new(), KVec::new()],
++            scratch_users: [0; 2],
+         })
+     }
+ 
+@@ -124,23 +149,18 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+         Ok(())
+     }
+ 
+-    /// Each render owns its tile metadata, deflake/status and auxiliary pages.
+-    /// Only fresh DVAs are installed, so earlier renders keep stable mappings.
+-    /// Pages remain owned by the VM until destruction, including failed setup.
+-    pub(crate) fn prepare_render(&mut self, p: &mut crate::g16_render::Parameters) -> Result {
++    /// Each active render exclusively leases tile metadata and save storage.
++    pub(crate) fn prepare_render(
++        &mut self,
++        p: &mut crate::g16_render::Parameters,
++    ) -> Result<Scratch> {
+         let (tilemap, tpc) = p.scratch_sizes().ok_or(EINVAL)?;
+-        let base = self.render_scratch.start;
+         let size = tilemap
+             .checked_add(tpc)
+             .and_then(|n| n.checked_add(5 * UAT_PGSZ))
+             .ok_or(ENOMEM)?;
+-        let end = base.checked_add(size as u64).ok_or(ENOMEM)?;
+-        if end > self.render_scratch.end {
+-            return Err(ENOMEM);
+-        }
+-        // Reserve before a fallible allocation so no partial range is reused.
+-        self.render_scratch.start = end;
+-        self.alloc_low(base, size, prot::PROT_GPU_SHARED_RW)?;
++        let scratch = self.lease_scratch(true, size)?;
++        let base = scratch.range.start;
+         p.tilemap = base;
+         p.tpc = base + tilemap as u64;
+         let meta = p.tpc + tpc as u64;
+@@ -154,7 +174,7 @@ pub(crate) fn prepare_render(&mut self, p: &mut crate::g16_render::Parameters) -
+         p.aux_fb = meta + 0x10000;
+         self.write_low(p.aux_fb + 0x600, &0x0000035b60000000u64.to_le_bytes())?;
+         self.sync();
+-        Ok(())
++        Ok(scratch)
+     }
+ 
+     /// Compute commands use distinct private scratch addresses in the caller's
+@@ -164,17 +184,84 @@ pub(crate) fn init_compute_private(&mut self, range: core::ops::Range<u64>) {
+         self.compute_scratch = range;
+     }
+ 
+-    pub(crate) fn prepare_compute(&mut self, p: &mut crate::g16_compute::Parameters) -> Result {
+-        let base = self.compute_scratch.start;
+-        let end = base.checked_add(0x24000).ok_or(ENOMEM)?;
+-        if end > self.compute_scratch.end {
+-            return Err(ENOMEM);
+-        }
+-        // Failed allocations retain their pages and cannot reuse this range.
+-        self.compute_scratch.start = end;
+-        self.alloc_low(base, 0x24000, prot::PROT_GPU_SHARED_RW)?;
++    pub(crate) fn prepare_compute(
++        &mut self,
++        p: &mut crate::g16_compute::Parameters,
++    ) -> Result<Scratch> {
++        let scratch = self.lease_scratch(false, 0x24000)?;
++        let base = scratch.range.start;
+         p.scratch = base;
+         p.marker = base + 0x20000;
++        Ok(scratch)
++    }
++
++    fn lease_scratch(&mut self, render: bool, size: usize) -> Result<Scratch> {
++        if size == 0 || size & (UAT_PGSZ - 1) != 0 {
++            return Err(EINVAL);
++        }
++        let index = usize::from(render);
++        // Splitting a free range adds at most one future free-list entry.
++        // Reserve now; completion and coalescing cannot allocate.
++        self.scratch_free[index].reserve(self.scratch_users[index] + 1, GFP_KERNEL)?;
++        let free = self.scratch_free[index]
++            .iter()
++            .position(|r| r.end - r.start >= size as u64);
++        let range = if let Some(slot) = free {
++            let start = self.scratch_free[index][slot].start;
++            let end = start + size as u64;
++            if end == self.scratch_free[index][slot].end {
++                self.scratch_free[index].remove(slot).map_err(|_| EIO)?;
++            } else {
++                self.scratch_free[index][slot].start = end;
++            }
++            // All previous GPU writes have retired. Reinitialize the entire
++            // leased range without touching PTEs or neighbouring active jobs.
++            for va in (start..end).step_by(UAT_PGSZ) {
++                let page = self.pages.get(&va).ok_or(EIO)?;
++                page.with_page_mapped(|ptr| {
++                    // SAFETY: The lease owns this full page exclusively.
++                    unsafe { core::ptr::write_bytes(ptr, 0, UAT_PGSZ) };
++                });
++                clean_page(page);
++            }
++            start..end
++        } else {
++            let arena = if render {
++                &mut self.render_scratch
++            } else {
++                &mut self.compute_scratch
++            };
++            let start = arena.start;
++            let end = start.checked_add(size as u64).ok_or(ENOMEM)?;
++            if end > arena.end {
++                return Err(ENOMEM);
++            }
++            // Partially allocated failures stay quarantined until VM teardown.
++            arena.start = end;
++            self.alloc_low(start, size, prot::PROT_GPU_SHARED_RW)?;
++            start..end
++        };
++        self.scratch_users[index] += 1;
++        Ok(Scratch { range, render })
++    }
++
++    pub(crate) fn release_scratch(&mut self, scratch: Scratch) -> Result {
++        let index = usize::from(scratch.render);
++        let mut range = scratch.range;
++        let free = &mut self.scratch_free[index];
++        let mut slot = 0;
++        while slot < free.len() {
++            if free[slot].end == range.start || range.end == free[slot].start {
++                let old = free.remove(slot).map_err(|_| EIO)?;
++                range.start = range.start.min(old.start);
++                range.end = range.end.max(old.end);
++                slot = 0;
++            } else {
++                slot += 1;
++            }
++        }
++        free.push(range, GFP_KERNEL)?;
++        self.scratch_users[index] -= 1;
+         Ok(())
+     }
+ 
+@@ -573,7 +660,6 @@ pub(crate) fn write_live(&mut self, va: u64, bytes: &[u8]) -> Result {
+         })
+     }
+ 
+-    #[cfg(test)]
+     pub(crate) fn zero_live(&mut self, va: u64, size: usize) -> Result {
+         self.update_live(va, size, |ptr, _, size| {
+             // SAFETY: update_live supplies a valid host-owned byte range.

@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Fri, 17 Feb 2023 00:20:55 +0900
+Subject: [PATCH] rust: bindings: Bind the Asahi DRM UAPI
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+(cherry picked from commit 1da303f29826f26c03966f4158328a5547b92e78)
+---
+ rust/uapi/uapi_helper.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/rust/uapi/uapi_helper.h b/rust/uapi/uapi_helper.h
+index 489748ef642c..677458183f6d 100644
+--- a/rust/uapi/uapi_helper.h
++++ b/rust/uapi/uapi_helper.h
+@@ -6,6 +6,8 @@
+  * Sorted alphabetically.
+  */
+ 
++#include <uapi/asm-generic/ioctl.h>
++#include <uapi/drm/asahi_drm.h>
+ #include <uapi/drm/drm.h>
+ #include <uapi/drm/nova_drm.h>
+ #include <uapi/drm/panthor_drm.h>

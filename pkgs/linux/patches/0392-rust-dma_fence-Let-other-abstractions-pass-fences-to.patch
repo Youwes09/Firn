@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 12 Nov 2026 14:33:56 -0600
+Subject: [PATCH] rust: dma_fence: Let other abstractions pass fences to C
+
+The GPU scheduler and DRM sync objects take fence references from C
+and give them back. Let the rest of the kernel crate reach the raw
+fence and move a reference in and out of an ARef<Fence>.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/dma_buf/dma_fence.rs | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/dma_buf/dma_fence.rs b/rust/kernel/dma_buf/dma_fence.rs
+index d86668bf9da8..75baa97a59c3 100644
+--- a/rust/kernel/dma_buf/dma_fence.rs
++++ b/rust/kernel/dma_buf/dma_fence.rs
+@@ -609,10 +609,27 @@ pub fn seqno(&self) -> u64 {
+         unsafe { (*self.as_raw()).seqno }
+     }
+ 
+-    fn as_raw(&self) -> *mut bindings::dma_fence {
++    pub(crate) fn as_raw(&self) -> *mut bindings::dma_fence {
+         self.inner.get()
+     }
+ 
++    /// Take over a reference to a C [`bindings::dma_fence`].
++    ///
++    /// # Safety
++    ///
++    /// `ptr` must point to an initialized fence, and the caller must own a
++    /// reference to it, which passes to the returned [`ARef`].
++    pub(crate) unsafe fn from_raw_owned(ptr: NonNull<bindings::dma_fence>) -> ARef<Self> {
++        // SAFETY: `Fence` is a transparent wrapper around `bindings::dma_fence`,
++        // and the caller hands over its reference.
++        unsafe { ARef::from_raw(ptr.cast()) }
++    }
++
++    /// Hand a reference over to C.
++    pub(crate) fn into_raw(fence: ARef<Self>) -> *mut bindings::dma_fence {
++        ARef::into_raw(fence).as_ptr().cast()
++    }
++
+     /// Create a [`Fence`] from a raw C [`bindings::dma_fence`].
+     ///
+     /// # Safety

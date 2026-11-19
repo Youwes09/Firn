@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sat, 3 Oct 2026 22:37:06 -0400
+Subject: [PATCH] rust: soc: apple: rtkit: Add set_early_crashlog() and
+ shutdown()
+
+Wrap apple_rtkit_set_early_crashlog() for G16's early crash-buffer
+handshake, and apple_rtkit_shutdown() for driver teardown.
+
+(split from commits bd25d194b0a2 and c41b69fe9a3a: Rust rtkit changes only)
+Co-developed-by: Niklas Sheth <hi@niklassheth.com>
+[Youwes09: add both to Firn's RtKit, which takes &self]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/soc/apple/rtkit.rs | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/rust/kernel/soc/apple/rtkit.rs b/rust/kernel/soc/apple/rtkit.rs
+index d1a52bd5e2b9..0a4c51205a45 100644
+--- a/rust/kernel/soc/apple/rtkit.rs
++++ b/rust/kernel/soc/apple/rtkit.rs
+@@ -69,6 +69,20 @@ fn as_raw(&self) -> *mut bindings::apple_rtkit {
+         self.0.get()
+     }
+ 
++    /// Selects the early preallocated crash-buffer exchange used by G16.
++    /// Call before starting the coprocessor CPU.
++    pub fn set_early_crashlog(&self) {
++        // SAFETY: `self.as_raw()` is valid by the type invariant.
++        unsafe { bindings::apple_rtkit_set_early_crashlog(self.as_raw()) };
++    }
++
++    /// Quiesces the host interface and puts the coprocessor to sleep.
++    /// Callers must retain firmware-accessible memory if this fails.
++    pub fn shutdown(&self) -> Result {
++        // SAFETY: `self.as_raw()` is valid by the type invariant.
++        to_result(unsafe { bindings::apple_rtkit_shutdown(self.as_raw()) })
++    }
++
+     /// Starts an application endpoint.
+     pub fn start_endpoint(&self, endpoint: u8) -> Result {
+         // SAFETY: `self.as_raw()` is valid by the type invariant.

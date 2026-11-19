@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 4 Oct 2026 17:59:03 -0400
+Subject: [PATCH] drm/asahi: Share one mapping snapshot across G16 submissions
+
+Every submission retains the VM's GEM mappings until it completes, so
+an unmap cannot free pages a running job still uses. It did so by
+copying the whole mapping list and taking a reference on each backing
+object, per submit. CS2 under muvm has thousands of mappings and
+submits hundreds of times per frame; profiling the VMM's GPU worker put
+about 82% of its CPU time in that copy and its reference counting.
+
+Keep one reference-counted copy of the list on the VM and hand that to
+each submission. Mapping changes drop the VM's copy and the next submit
+builds a fresh one; jobs still running keep the copy they were given,
+so lifetime guarantees are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RvQieG9SGoR3ZeSdSguHnB
+(cherry picked from commit 66829610172e048f292aaa6f6d7e1891deb6f96c)
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 28 +++++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 93851d3c7e67..adddcb2ab795 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -83,6 +83,10 @@ struct Vm {
+     compute_space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     // Large address spaces hold thousands of mappings; allow vmalloc.
+     mappings: KVVec<Mapping>,
++    /// Shared copy of `mappings` retained by submissions. Rebuilt only after
++    /// the mappings change, so a submit costs one reference, not one per
++    /// mapping.
++    snapshot: Option<Arc<KVVec<Mapping>>>,
+     pending: KVec<dma_fence::Fence>,
+     reservation: ARef<Object>,
+     render_support: Option<Arc<crate::g16::Support>>,
+@@ -94,7 +98,7 @@ struct Vm {
+ /// Retain submit-time GEM and timestamp bindings until actual completion.
+ /// Command preparation never reads caller CDM or shader resource data.
+ struct Bindings {
+-    _mappings: KVVec<Mapping>,
++    _mappings: Arc<KVVec<Mapping>>,
+     _timestamps: KVec<TimestampBuffer>,
+ }
+ 
+@@ -401,6 +405,7 @@ fn vm_create(
+                     GFP_KERNEL,
+                 )?,
+                 mappings: KVVec::new(),
++                snapshot: None,
+                 pending: KVec::new(),
+                 reservation,
+                 render_support: None,
+@@ -866,6 +871,7 @@ fn map(
+         single: bool,
+         runtime: &crate::g16::Bootstrap,
+     ) -> Result {
++        self.snapshot = None;
+         if self
+             .mappings
+             .iter()
+@@ -951,6 +957,7 @@ fn publish_mappings(&self, runtime: &crate::g16::Bootstrap) {
+     }
+ 
+     fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Result {
++        self.snapshot = None;
+         // Callers drain this VM's jobs and hold file state against new uses.
+         // A failure may have signaled those fences while we waited. The
+         // runtime lock prevents a concurrent failure during this teardown.
+@@ -1613,10 +1620,21 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+                 vm.render_broken = false;
+             }
+         }
+-        let mut mappings = KVVec::with_capacity(vm.mappings.len(), GFP_KERNEL)?;
+-        for mapping in &vm.mappings {
+-            mappings.push(mapping.clone(), GFP_KERNEL)?;
+-        }
++        // Every submission retains the VM's mappings until it completes.
++        // Share one copy until the mappings change: CS2-sized address spaces
++        // hold thousands of mappings and submit hundreds of times a frame.
++        let mappings = match &vm.snapshot {
++            Some(snapshot) => snapshot.clone(),
++            None => {
++                let mut copy = KVVec::with_capacity(vm.mappings.len(), GFP_KERNEL)?;
++                for mapping in &vm.mappings {
++                    copy.push(mapping.clone(), GFP_KERNEL)?;
++                }
++                let snapshot = Arc::new(copy, GFP_KERNEL)?;
++                vm.snapshot = Some(snapshot.clone());
++                snapshot
++            }
++        };
+         let bindings = Bindings {
+             _mappings: mappings,
+             _timestamps: timestamp_bindings,

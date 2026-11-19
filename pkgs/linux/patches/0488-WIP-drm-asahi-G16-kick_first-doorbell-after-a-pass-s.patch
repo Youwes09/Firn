@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 15:55:34 -0400
+Subject: [PATCH] WIP drm/asahi: G16 kick_first: doorbell after a pass's first
+ Work
+
+The pump rings the doorbell once per admission pass, after writing up to
+64 Works. In start_lat --chain 64 with HK_PERFTEST=batch the doorbell
+came p50 411 us after the first Work was published, and batch added
+~640 us to submit -> first GPU start. kick_first=1 (runtime: debugfs
+asahi_m4/kick_first) also flushes after the pass's first admitted Work.
+Default 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 23 +++++++++++++++++++++++
+ drivers/gpu/drm/asahi/g16_timeline.rs |  8 ++++++++
+ 3 files changed, 35 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index e13396288494..fe54c949c5fc 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -297,6 +297,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
+         },
++        kick_first: u32 {
++            default: 0,
++            description: "1 rings the doorbell after each pump pass's first admitted Work as well as at the end of the pass, so a large submission's first Work starts before the rest are written. Runtime: debugfs asahi_m4/kick_first",
++        },
+         dep_elide: u32 {
+             default: 0,
+             description: "Bitmask: drop firmware dependency items that are redundant: 1 on the same lane's earlier Work, 2 already reached at publish, 4 already waited on by this lane's previous Work. Counters in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/dep_elide",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index b49e906fac36..366d862d1b58 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -156,6 +156,7 @@ pub(crate) struct Data {
+     _early: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _dep_elide: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
++    _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+@@ -240,6 +241,14 @@ pub(crate) fn register<'a>(
+         dir.read_write_file(c_str!("dep_elide"), crate::g16_timeline::FlagKnob::DEP_ELIDE),
+         GFP_KERNEL,
+     )?;
++    crate::g16_timeline::KICK_FIRST.store(
++        crate::module_parameters::kick_first.value().min(1),
++        Ordering::Relaxed,
++    );
++    let kick_first = KBox::pin_init(
++        dir.read_write_file(c_str!("kick_first"), crate::g16_timeline::FlagKnob::KICK_FIRST),
++        GFP_KERNEL,
++    )?;
+     let dep_stats = KBox::pin_init(
+         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
+         GFP_KERNEL,
+@@ -280,6 +289,7 @@ pub(crate) fn register<'a>(
+         _early: early,
+         _dep_elide: dep_elide,
+         _dep_stats: dep_stats,
++        _kick_first: kick_first,
+         _profile_knob: profile_knob,
+         _lane_cap: lane_cap,
+         _debugfs: dir, });
+@@ -1627,6 +1637,19 @@ fn run(this: Arc<Self>) {
+                             // Experiment: one channel message per Work
+                             // instead of one per lane for the whole pass.
+                             runtime.flush()?;
++                        } else if admitted == 1
++                            && crate::g16_timeline::KICK_FIRST.load(Ordering::Relaxed) != 0
++                        {
++                            // Ring the doorbell for the pass's first Work so
++                            // an idle GPU starts it while the rest of the pass
++                            // (up to 63 more Works) is still being written.
++                            runtime.flush()?;
++                            if crate::module_parameters::timeline.value() >= 2 {
++                                let job = &mut engine.jobs[index];
++                                if job.kick == 0 {
++                                    job.kick = ticks();
++                                }
++                            }
+                         }
+                         if admitted == 64 {
+                             break;
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index ef238c8f8e42..07783b4575e6 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -332,6 +332,7 @@ impl FlagKnob {
+     pub(crate) const EARLY_SIGNAL: Self = Self { cell: &EARLY_SIGNAL, name: "early_signal", max: 2 };
+     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
+     pub(crate) const DEP_ELIDE: Self = Self { cell: &DEP_ELIDE, name: "dep_elide", max: 7 };
++    pub(crate) const KICK_FIRST: Self = Self { cell: &KICK_FIRST, name: "kick_first", max: 1 };
+ }
+ 
+ impl kernel::debugfs::Writer for FlagKnob {
+@@ -396,3 +397,10 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         )
+     }
+ }
++
++/// Ring the doorbell right after each pump pass's first admitted Work
++/// (asahi_m4.kick_first, runtime: debugfs `asahi_m4/kick_first`), besides the
++/// end-of-pass flush. A 64-Work submission otherwise waits for the whole pass
++/// to be written before its first Work can start (kick 411 µs after first
++/// publication, p50, start_lat --chain 64 batch on #165).
++pub(crate) static KICK_FIRST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);

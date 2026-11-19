@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 27 Oct 2026 02:41:12 -0400
+Subject: [PATCH] drm/asahi: G16: share one notifier per submission by default
+
+The per-submission notifier passed on both machines (manager, 10-27):
+no safety-poll rescues and no short-freed notifiers, equal frame times,
+a GPU mailbox IRQ rate no higher than per-render notifiers, and equal
+work done, or 30% more on the slow PMP mini. Make it the default;
+shared_notifier=0 keeps each render's own notifier as a fallback for
+one release.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 714cd55720a532c58c96d6cd2edb5ebd8a29b2aa)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs           |  4 ++--
+ drivers/gpu/drm/asahi/g16_runtime_render.rs | 12 +++++-------
+ drivers/gpu/drm/asahi/g16_timeline.rs       | 10 +++++-----
+ 3 files changed, 12 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 0ff1e22c67b4..fd9a673d05e6 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -177,8 +177,8 @@ fn probe<'bound>(
+             description: "1 advertises soft faults to userspace (needs fault_control=3; Mesa with hk 243c5ac0c43 and 31b9d1d5bfb); 0 hides them",
+         },
+         shared_notifier: u32 {
+-            default: 0,
+-            description: "0 (default): each render has its own completion notifier; 1: renders share the queue's notifier with a cumulative Work count, which delays completion messages until the queue drains (2026-10-03 to 10-27 behaviour, kept for comparison). Runtime: debugfs asahi_m4/shared_notifier",
++            default: 1,
++            description: "1 (default): the renders of one submission share a completion notifier, as Metal shares one per command buffer; 0: each render has its own (fallback). Runtime: debugfs asahi_m4/shared_notifier",
+         },
+         timeline: u32 {
+             default: 0,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_render.rs b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+index 3c158fe130c6..d133d3167caf 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_render.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+@@ -260,11 +260,11 @@ pub(super) fn submit_render_pool(
+         // The notifier pass stores driver stamps, then sends the IRQ after
+         // a DSB. These destinations must be firmware-uncached: a DSB does
+         // not clean a cached stamp, leaving Linux asleep on stale memory.
+-        // Each render has its own notifier, count and driver stamps, so the
+-        // firmware announces it as soon as it completes. A notifier shared
+-        // by the queue, with a cumulative count (shared_notifier=1, for
+-        // comparison), is only announced once every Work published to it
+-        // has completed: a busy queue then waited for the safety poll.
++        // Each render has its own driver stamps and, with shared_notifier=0,
++        // its own notifier and count. A notifier shared by the whole queue
++        // with a cumulative count (2026-10-03 to 10-27) was announced only
++        // once every Work published to it had completed, so a busy queue
++        // waited for the safety poll; one per submission (below) is not.
+         a.event_control = va + 0x200;
+         a.event_count_array = va + 0x300;
+         a.tiling_driver_stamp = va + 0x18000;
+@@ -562,8 +562,6 @@ pub(super) fn publish_render(
+         // lookup per destination region and one barrier pair, rather than a
+         // lookup and two barriers for each of about twenty writes.
+         let context = (a.context_id as u32).to_le_bytes();
+-        // The notifier header: the Work's own notifier and driver stamps, or
+-        // (shared_notifier=1) two words into the queue's shared notifier.
+         // The notifier header: the full header with its Work count when this
+         // render owns the notifier (its own, or its submission's first), else
+         // only this render's driver stamps.
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index cc5bfe380ab0..852a79810068 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -332,13 +332,13 @@ pub(crate) fn take_injection(cell: &core::sync::atomic::AtomicU32, tgid: i32) ->
+     fired
+ }
+ 
+-/// Each render's own completion notifier (0, default) or the queue-shared one
+-/// (1, for comparison: its cumulative count holds completion messages back
+-/// until the queue drains). asahi_m4.shared_notifier; runtime: debugfs
++/// One completion notifier per submission, shared by its renders (1,
++/// default, as Metal shares one per command buffer), or each render's own
++/// (0, the fallback). asahi_m4.shared_notifier; runtime: debugfs
+ /// asahi_m4/shared_notifier, for renders published afterwards.
+-pub(crate) static SHARED_NOTIFIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++pub(crate) static SHARED_NOTIFIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+ 
+-/// Whether new renders use the queue-shared notifier (see `SHARED_NOTIFIER`).
++/// Whether new renders share their submission's notifier (see `SHARED_NOTIFIER`).
+ pub(crate) fn shared_notifier() -> bool {
+     SHARED_NOTIFIER.load(core::sync::atomic::Ordering::Relaxed) != 0
+ }

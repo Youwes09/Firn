@@ -1,0 +1,360 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 18:10:52 -0400
+Subject: [PATCH] drm/asahi: G16: read_opt: fewer firmware reads per pump pass
+
+#167 makes ~150 firmware reads per pump pass in Dota default mode (64 per
+Work at 0.43 passes/Work), against ~90 with #149's knobs, and with
+maintenance on each read costs a civac + dsb. read_opt=1 (default,
+runtime debugfs asahi_m4/read_opt; 0 restores #167):
+- admission keeps each lane's last (read, done) cursors and rereads
+  them only when they show no room; cursors only advance, so a stale view
+  underestimates room;
+- retirement reads the shared render-notifier count through the scan
+  snapshot;
+- dep_elide's already-reached test uses the previous retire scan's values
+  (heap-held; Bootstrap stays small on the probe stack) and keeps the
+  item when the stamp was not seen, without reading.
+With profile=1, publish_profile now also attributes reads to the event
+ring, the retire scan, admission cursors and dep_elide.
+
+Folded in:
+- WIP drm/asahi: G16 read_opt: fewer firmware reads per pass, with read-site attribution
+- WIP drm/asahi: G16 read_opt: sample wedge detection at most every 50 ms
+
+[WIP drm/asahi: G16 read_opt: sample wedge detection at most every 50 ms]
+Read attribution on #168 (Dota default mode, profile=1): of ~60 firmware
+reads per Work, ~46 came from check_wedge, which ran at the end of every
+retire call that retired nothing, i.e. once per pump pass. Each sample
+reads both stamps of every outstanding render flight (plus dependency
+stamps) and 36 channel registers. Wedge detection only needs a few
+samples per wedge_ms window (default 2 s); with read_opt it samples at
+most every 50 ms. Attributed as 'reads: wedge check'.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 ++
+ drivers/gpu/drm/asahi/g16.rs          |  8 +++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 10 ++++
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 71 +++++++++++++++++++++++----
+ drivers/gpu/drm/asahi/g16_timeline.rs | 45 ++++++++++++++++-
+ 5 files changed, 127 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index f1996ca5e46c..13f31e1e23a9 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -297,6 +297,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
+         },
++        read_opt: u32 {
++            default: 1,
++            description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, dep_elide's reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
++        },
+         kick_first: u32 {
+             default: 0,
+             description: "1 rings the doorbell after each pump pass's first admitted Work as well as at the end of the pass, so a large submission's first Work starts before the rest are written. Runtime: debugfs asahi_m4/kick_first",
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 672e8d414da8..deaeaf59ed23 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -230,6 +230,9 @@ pub(crate) struct Bootstrap {
+     render_publication: u64,
+     /// A4 wedge detection state (check_wedge).
+     wedge_since: Option<kernel::time::Instant<kernel::time::Monotonic>>,
++    /// read_opt: when check_wedge last sampled (it reads every render
++    /// flight's stamps and every channel's registers).
++    wedge_sampled: Option<kernel::time::Instant<kernel::time::Monotonic>>,
+     wedge_signature: u64,
+     wedge_rung: u32,
+     /// Debug (dump_render_buffered): the most recent submitted renders,
+@@ -256,6 +259,9 @@ pub(crate) struct Bootstrap {
+     /// Queue storage returned by dropped queues, awaiting context destruction.
+     /// It holds a reserved slot for every region, so dropping never allocates.
+     retired_queues: Arc<kernel::sync::Mutex<KVec<u64>>>,
++    /// The last retire scan's firmware words (read_opt), on the heap: this
++    /// struct is built by value on the probe stack.
++    pub(crate) last_scan: KBox<render_runtime::WordSnapshot>,
+     queue_regions: usize,
+     /// Storage whose context destruction is published, with its control target.
+     destroying_queues: KVec<(u64, u32)>,
+@@ -727,6 +733,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             tvb_pools: KVec::new(),
+             render_publication: crate::module_parameters::fw_counter_start.value(),
+             wedge_since: None,
++            wedge_sampled: None,
+             wedge_signature: 0,
+             wedge_rung: 0,
+             render_ring: render_runtime::RenderRing::new(),
+@@ -755,6 +762,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             compute_publication: crate::module_parameters::fw_counter_start.value(),
+             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
+             retired_queues: Arc::pin_init(kernel::new_mutex!(KVec::new()), GFP_KERNEL)?,
++            last_scan: KBox::new(Default::default(), GFP_KERNEL)?,
+             queue_regions: 0,
+             destroying_queues: KVec::new(),
+             free_queues: KVec::new(),
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 366d862d1b58..ab51867bb956 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -157,6 +157,7 @@ pub(crate) struct Data {
+     _dep_elide: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
+     _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
++    _read_opt: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+@@ -249,6 +250,14 @@ pub(crate) fn register<'a>(
+         dir.read_write_file(c_str!("kick_first"), crate::g16_timeline::FlagKnob::KICK_FIRST),
+         GFP_KERNEL,
+     )?;
++    crate::g16_timeline::READ_OPT.store(
++        crate::module_parameters::read_opt.value().min(1),
++        Ordering::Relaxed,
++    );
++    let read_opt = KBox::pin_init(
++        dir.read_write_file(c_str!("read_opt"), crate::g16_timeline::FlagKnob::READ_OPT),
++        GFP_KERNEL,
++    )?;
+     let dep_stats = KBox::pin_init(
+         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
+         GFP_KERNEL,
+@@ -290,6 +299,7 @@ pub(crate) fn register<'a>(
+         _dep_elide: dep_elide,
+         _dep_stats: dep_stats,
+         _kick_first: kick_first,
++        _read_opt: read_opt,
+         _profile_knob: profile_knob,
+         _lane_cap: lane_cap,
+         _debugfs: dir, });
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 07ac4d3bb74d..070fe16b740e 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -34,6 +34,10 @@ pub(crate) struct FirmwareQueues {
+     /// Per lane (TA, 3D, compute), the latest stamps its published Works
+     /// waited on as firmware items, keyed by address (dep_elide bit 4).
+     waited: [[Option<Stamp>; 2]; 3],
++    /// read_opt: the last (read, done) cursors admission read per lane;
++    /// u32::MAX until read. Cursors only advance, so a stale view
++    /// underestimates room.
++    cursors: [core::cell::Cell<(u32, u32)>; 3],
+     /// Kernel-side dependency resolution statistics (logged at teardown with
+     /// dep_stats=1).
+     deps: DependencyStats,
+@@ -199,6 +203,7 @@ pub(crate) fn new(priority: u32) -> Self {
+             notified_works: 0,
+             last: [None; 2],
+             waited: [[None; 2]; 3],
++            cursors: [const { core::cell::Cell::new((u32::MAX, u32::MAX)) }; 3],
+             deps: DependencyStats::default(),
+         }
+     }
+@@ -212,8 +217,8 @@ fn event(&self, stage: u32) -> Result<u32> {
+ /// cursors are shared by every flight on the lane).
+ /// A fixed table on the stack: no allocation per scan. Words beyond its
+ /// capacity are read directly.
+-#[derive(Default)]
+-struct WordSnapshot {
++#[derive(Default, Clone)]
++pub(crate) struct WordSnapshot {
+     words: [(u64, u32); 32],
+     len: usize,
+ }
+@@ -230,6 +235,11 @@ fn read(&mut self, fw: &g16_vm::FirmwareSpace, address: u64) -> Result<u32> {
+         }
+         Ok(value)
+     }
++
++    /// A value seen by this snapshot, without reading.
++    fn peek(&self, address: u64) -> Option<u32> {
++        self.words[..self.len].iter().find(|(a, _)| *a == address).map(|&(_, v)| v)
++    }
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -684,6 +694,9 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+                 retired: self.retired_queues.clone(),
+             });
+             owner.lanes = Some(lanes);
++            for c in &owner.cursors {
++                c.set((u32::MAX, u32::MAX));
++            }
+             owner.notified_works = 0;
+             if crate::module_parameters::fw_trace.value() & 1 != 0 {
+                 dev_info!(
+@@ -835,8 +848,18 @@ fn reserve_flight(
+             if let Some(lanes) = &queue.lanes {
+                 let lane = lanes[stage];
+                 let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+-                let read = fw.read_u32(lane.pointers)?;
+-                let done = fw.read_u32(lane.pointers + 0x30)?;
++                let before = crate::g16_timeline::reads();
++                let (mut read, mut done) = queue.cursors[stage].get();
++                if !crate::g16_timeline::read_opt()
++                    || read >= 0x500
++                    || done >= 0x500
++                    || !ring_room(lane.head, read, done, entries[stage], 0x500)
++                {
++                    read = fw.read_u32(lane.pointers)?;
++                    done = fw.read_u32(lane.pointers + 0x30)?;
++                    queue.cursors[stage].set((read, done));
++                }
++                crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_ADMIT, before);
+                 if read >= 0x500 || done >= 0x500 || lane.head >= 0x500 {
+                     return Err(EIO);
+                 }
+@@ -1369,7 +1392,11 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+         if let Some((id, limited)) = self.retired.pop() {
+             return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(()) })));
+         }
+-        self.service_flights().inspect_err(|error| {
++        let before = crate::g16_timeline::reads();
++        let serviced = self.service_flights();
++        crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_EVENTS, before);
++        let scan_before = crate::g16_timeline::reads();
++        serviced.inspect_err(|error| {
+             dev_err!(
+                 self.dev.as_ref(),
+                 "G16: firmware event service failed: {:?}\n",
+@@ -1422,7 +1449,12 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                 let notified = match flight.notifier_count {
+                     // The shared notifier has counted this render's Works.
+                     Some((completed, total)) => {
+-                        (fw.read_u32(completed)?.wrapping_sub(total) as i32) >= 0
++                        let count = if crate::g16_timeline::read_opt() {
++                            snapshot.read(fw, completed)?
++                        } else {
++                            fw.read_u32(completed)?
++                        };
++                        (count.wrapping_sub(total) as i32) >= 0
+                     }
+                     None => {
+                         let notifier = flight.id
+@@ -1554,6 +1586,8 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             self.free_work[usize::from(render_work)].push(id, GFP_KERNEL)?;
+             self.retired.push_within_capacity((id, limited)).map_err(|_| ENOMEM)?;
+         }
++        crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_SCAN, scan_before);
++        *self.last_scan = snapshot;
+         if !self.retired.is_empty() {
+             // Queued commands can legitimately wait longer than one Work's
+             // timeout. Watch for a lack of retirement progress, rather than
+@@ -1565,7 +1599,18 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             let (id, limited) = self.retired.pop().ok_or(EIO)?;
+             return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(()) })));
+         }
+-        self.check_wedge()?;
++        // Wedge detection needs a few samples per wedge_ms window (default
++        // 2 s), not one per pump pass: each sample reads two stamps per
++        // outstanding render and 36 channel registers.
++        let sample = !crate::g16_timeline::read_opt()
++            || self.wedge_sampled.is_none_or(|t| t.elapsed().as_millis() >= 50);
++        if sample {
++            self.wedge_sampled = Some(Instant::now());
++            let before = crate::g16_timeline::reads();
++            let checked = self.check_wedge();
++            crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_WEDGE, before);
++            checked?;
++        }
+         if let Some(flight) = self
+             .flights
+             .iter()
+@@ -1939,8 +1984,16 @@ fn elide_item(&self, queue: &FirmwareQueues, lane: usize, dep: &Stamp, same_lane
+             t::DEP_REPEAT.fetch_add(1, Ordering::Relaxed);
+             mode & 4 != 0
+         } else if mode & 2 != 0 {
+-            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+-            let reached = g16_stamp::reached(fw.read_u32(dep.address)?, dep.value);
++            let before = t::reads();
++            let now = if t::read_opt() {
++                // The last retire scan's value: stamps only advance, so a
++                // value that already reached the target still does.
++                self.last_scan.peek(dep.address)
++            } else {
++                Some(self._firmware_space.as_ref().ok_or(EIO)?.read_u32(dep.address)?)
++            };
++            t::attribute(&t::P_RD_ELIDE, before);
++            let reached = now.is_some_and(|v| g16_stamp::reached(v, dep.value));
+             if reached {
+                 t::DEP_REACHED.fetch_add(1, Ordering::Relaxed);
+             }
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 07783b4575e6..c8fa8970d47a 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -147,8 +147,14 @@ const fn new(name: &'static str) -> Self {
+ pub(crate) static P_WRITE_LOW: Section = Section::new("vm write_low");
+ pub(crate) static P_FLUSH: Section = Section::new("flush (doorbell)");
+ pub(crate) static P_PUMP: Section = Section::new("pump pass");
+-
+-static SECTIONS: [&Section; 11] = [
++/// Read attribution (calls only): firmware reads made inside each site.
++pub(crate) static P_RD_EVENTS: Section = Section::new("reads: event ring");
++pub(crate) static P_RD_SCAN: Section = Section::new("reads: retire scan");
++pub(crate) static P_RD_ADMIT: Section = Section::new("reads: admission cursors");
++pub(crate) static P_RD_ELIDE: Section = Section::new("reads: dep_elide reached");
++pub(crate) static P_RD_WEDGE: Section = Section::new("reads: wedge check");
++
++static SECTIONS: [&Section; 16] = [
+     &P_SUBMIT_RENDER,
+     &P_SUBMIT_COMPUTE,
+     &P_PREPARE_RENDER,
+@@ -160,8 +166,27 @@ const fn new(name: &'static str) -> Self {
+     &P_WRITE_LOW,
+     &P_FLUSH,
+     &P_PUMP,
++    &P_RD_EVENTS,
++    &P_RD_SCAN,
++    &P_RD_ADMIT,
++    &P_RD_ELIDE,
++    &P_RD_WEDGE,
+ ];
+ 
++/// Firmware reads so far (counted only while profiling).
++#[inline(always)]
++pub(crate) fn reads() -> u64 {
++    P_READ.calls.load(core::sync::atomic::Ordering::Relaxed)
++}
++
++/// Attribute the firmware reads since `before` to `site` (profiling only).
++#[inline(always)]
++pub(crate) fn attribute(site: &Section, before: u64) {
++    if PROFILE.load(core::sync::atomic::Ordering::Relaxed) != 0 {
++        site.calls.fetch_add(reads().wrapping_sub(before), core::sync::atomic::Ordering::Relaxed);
++    }
++}
++
+ /// Section timing switch (asahi_m4.profile, runtime: debugfs
+ /// `asahi_m4/profile`). Off by default: each timed section costs two
+ /// serialized counter reads, which a pump-bound load pays per firmware read.
+@@ -333,6 +358,7 @@ impl FlagKnob {
+     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
+     pub(crate) const DEP_ELIDE: Self = Self { cell: &DEP_ELIDE, name: "dep_elide", max: 7 };
+     pub(crate) const KICK_FIRST: Self = Self { cell: &KICK_FIRST, name: "kick_first", max: 1 };
++    pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
+ }
+ 
+ impl kernel::debugfs::Writer for FlagKnob {
+@@ -404,3 +430,18 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ /// to be written before its first Work can start (kick 411 µs after first
+ /// publication, p50, start_lat --chain 64 batch on #165).
+ pub(crate) static KICK_FIRST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
++/// Fewer firmware reads per pass (asahi_m4.read_opt, runtime: debugfs
++/// `asahi_m4/read_opt`; 0 restores #167's reads):
++/// - admission reuses the last lane cursors it read and rereads them only when
++///   they show no room (cursors only advance, so a stale view is conservative);
++/// - retirement reads the shared render-notifier count through the scan
++///   snapshot;
++/// - dep_elide's already-reached test uses the last retire scan's values and
++///   keeps the item when the stamp wasn't seen there, with no read.
++pub(crate) static READ_OPT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
++
++#[inline(always)]
++pub(crate) fn read_opt() -> bool {
++    READ_OPT.load(core::sync::atomic::Ordering::Relaxed) != 0
++}

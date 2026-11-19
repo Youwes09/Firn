@@ -1,0 +1,859 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Wed, 28 Oct 2026 00:00:00 -0700
+Subject: [PATCH] drm/asahi: G16: Widen the native mesh experiment
+
+native_mesh gains modes 2 (multiple object workgroups), 3 (a research
+state model, not qualified) and 4 (only the 31 native-index classes
+Honeykrisp was qualified with), and T32 mesh state next to T16. The mode
+can change at runtime through debugfs asahi_m4/native_mesh; each VM
+keeps the mode it was created with, for its support header and every
+decode. The GPU device advertises the current mode in sysfs
+asahi_native_mesh. With a mode set, a render whose first command word is
+an ordinary header is published without waiting for its producers.
+
+The default stays 0, which leaves ordinary renders unchanged.
+
+Signed-off-by: Cody Ho <codyho@stanford.edu>
+Assisted-By: LLM
+[Youwes09: Split from Gravity's "apple: integrate shared G16C and G17P GPU
+on Linux 7.3" (ed2c67a9f6d4), keeping only the asahi_m4 mesh changes;
+left out Gravity's own Rust API adapters.]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/README.native-mesh.md   | 132 ++++++++-
+ drivers/gpu/drm/asahi/asahi_m4.rs             |   2 +-
+ drivers/gpu/drm/asahi/g16.rs                  |   5 +-
+ drivers/gpu/drm/asahi/g16_drm.rs              |  89 ++++++
+ drivers/gpu/drm/asahi/g16_drm_ioctl.rs        |   4 +
+ drivers/gpu/drm/asahi/g16_drm_submit.rs       |   2 +-
+ drivers/gpu/drm/asahi/g16_mesh.rs             | 253 +++++++++++++++++-
+ drivers/gpu/drm/asahi/g16_runtime.rs          |   5 +
+ drivers/gpu/drm/asahi/g16_runtime_contexts.rs |   8 +-
+ drivers/gpu/drm/asahi/g16_runtime_render.rs   |  22 +-
+ drivers/gpu/drm/asahi/g16_timeline.rs         |  22 ++
+ drivers/gpu/drm/asahi/g16_vm.rs               |   8 +-
+ 12 files changed, 523 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/README.native-mesh.md b/drivers/gpu/drm/asahi/README.native-mesh.md
+index 10753e368f77..7d26f6a811f2 100644
+--- a/drivers/gpu/drm/asahi/README.native-mesh.md
++++ b/drivers/gpu/drm/asahi/README.native-mesh.md
+@@ -5,21 +5,57 @@ The default is **0 and must remain 0**. No capability bit or execution UAPI
+ is provided. The paired stream starts with complete native object/mesh state.
+ The decoder runs only with the option enabled; ordinary streams are identified
+ by their first packet, without searching their contents for native state.
++In a nonzero mode, that first word is read before waiting for the render's
++producers. An ordinary first word publishes the render exactly as at mode 0,
++with no CPU wait. Only a native header, or an unreadable first word, waits for
++the producers and then decodes the whole stream. That relies on a userspace
++contract: native headers are written on the CPU before SUBMIT, and no GPU job
++writes or rewrites a render's first encoder word. claude-compiler confirmed it
++for every Honeykrisp emit path (`hk_apple9_mesh_command_build`, isolated at
++`cs->start`; secondaries are replayed on the CPU; the GPU VDM writers emit only
++ordinary words) in `tmp/claude-ct/native-header-peek-hk-audit-20261024.md`
++(2026-10-24). A userspace that emits native streams any other way must use the
++waiting path; the alternative is an explicit per-render flag.
+ 
+-The admitted class has T16 mesh execution, one direct object workgroup,
++The admitted class has physical T16 or T32 mesh execution, one direct object dispatch,
+ four-vertex storage and one triangle primitive. It supports 4–128 per-vertex
+ 32-bit scalar components, including XYZW. The two scalar counts and output-row
+ count must agree: N components, N+1 rows, with no reserved upper bits. This
+ corresponds to 32 + 16*N local bytes (at most 2080), rounded up by the paired
+ Mesa launch to a power-of-two allocation (at most 4096). Task payload,
+-per-primitive outputs, culling, multiple draws, indirect draws and wider
++per-primitive outputs, culling, multiple draws, hardware indirect packets and wider
+ resource classes remain rejected. Single-sample, single-layer restrictions
+ also remain in the runtime.
+ 
+-Object dispatch total and local thread dimensions must match, and must be
+-either (1,1,1) for the existing scalar carrier or (16,1,1) for physical T16.
++Object dispatch local thread dimensions must be either (1,1,1) for the existing
++scalar carrier, (16,1,1) for physical T16, or (32,1,1) for physical T32.
++At `native_mesh=1`, total thread dimensions must equal the local dimensions.
++Only `native_mesh=2` admits nonzero multiples of the local dimensions.
++Thus (512,2,3) total / (16,1,1) local describes 32x2x3 parent workgroups.
+ The mesh execution width in the state packet does not set the object dispatch
+-width. Mismatched dimensions, other shapes and multiple workgroups are rejected.
++width. Partial workgroups and other local shapes are rejected. This validates
++the parent packet shape, not a child mesh grid exported by its shader, nor an
++aggregate resource or workgroup-count limit. Physical T64/T128 state remains
++rejected; logical workgroups lowered
++by the compiler to physical T32 do not require those wider state values.
++T32 and multiple-parent admission enable device qualification without changing
++payload sizes, scene ownership or the default-off gate; neither is a hardware
++pass by itself. Multiple-parent use needs separate ordering and lifetime tests.
++
++A taskless API draw with N mesh workgroups can keep one object workgroup and
++read its child XYZ grid from a userspace GPU buffer. A future indirect API
++implementation can use that same packet with a GPU-produced grid. Neither
++requires a hardware indirect object packet or CPU reads of the grid/count
++buffer. Do not multiply parent dimensions by a taskless child grid. Indirect
++API semantics, producer synchronization, count/stride handling and zero-child
++completion still require userspace implementation and device qualification.
++The current hk native API gate excludes these broader API shapes independently
++of kernel admission. Hardware indirect/link packets and multiple draws in one
++stream remain rejected until their native packet contract is established.
++
++USC frame extents (for example mesh 64/64 versus Metal 16/16) are encoded by
++userspace in the launch record. The kernel passes the launch handles through;
++it does not read, size or validate those extents, or the local-allocation field.
+ 
+ This is bounded resource-class admission, not validation of arbitrary shader
+ programs. Launches and their local-allocation instructions remain userspace
+@@ -28,7 +64,8 @@ or fixed register assignment. The paired compiler must generate matching
+ allocation, output and interpolation state. Attribute admission alone is not
+ hardware qualification of attributes or the maximum component count.
+ 
+-All VMs initialize native support mode before first publication when opted in.
++A VM whose first render runs with the option enabled initializes native support
++mode before its first publication.
+ The initialized 24-buffer operand pool serves both ordinary and native Work;
+ there is no additional native buffer-admission request. Native payload storage
+ is cleared, exclusive per render, and retained through completion. CPU producer
+@@ -39,3 +76,86 @@ Position-only H1, cold initialization, slot rebind, sequential draws through
+ scene 7 and concurrent separate VMs passed the #82 device campaign. General
+ payload sizing, attribute rendering, scene wraparound and simultaneous native
+ renders on multiple queues in one VM require their own device qualification.
++
++### Admission modes
++
++`asahi_m4.native_mesh=0` remains the default and bypasses native parsing.
++`=1` retains the #85 one-parent class exactly: total XYZ equals local XYZ,
++with scalar, T16 or T32 object workgroups and T16/T32 mesh state.
++`=2` is the separate, unqualified multi-parent research mode; it admits
++nonzero total XYZ divisible by the supported local XYZ. Other values reject
++driver initialization. Both enabled modes initialize native support state.
++Multi-parent device use requires a guarded measurement of the 16 KiB native
++firmware payload's touched range versus parent count first. Host parser tests
++are not device qualification.
++
++`=3` is research admission for the native capability study
++(`native-capability-20261022`). It is not qualified and is not for normal use.
++It keeps mode 2's stream structure and object dispatch rules, and replaces
++the fixed one-triangle state check with that study's state model. With n
++vertex planes, P primitives, V vertices and C primitive components:
++
++- n: 4–128, with word 1 = n | (n + 1) << 8.
++- P: 1–512, with word 10 = (P - 1) | (ceil(P / 16) - 1) << 16. The culling bit
++  stays rejected.
++- V: 1–256, with word 13 = 1 + ceil(V / 4) × n.
++- C: 0–128, with word 12 = P × C. Word 2 is 0xd0 exactly when C > 0. Primitive
++  data adds one link plane, so n ≥ 5 then.
++- Application output (vertex planes without the link plane, plus 4 × P × C
++  bytes) is at most 32 KiB, the compiler's stated mesh-output limit.
++- Draw headers: 0x70000000 points, 0x70000100 lines, 0x70000600 triangles.
++
++Words 3, 4, 9 and 11 keep their mode 1/2 values. The checks use only the
++13 state words already read, so command-memory reads are unchanged. The
++object payload size is not a packet field. Its exclusive storage stays 16 KiB,
++which is the study's largest payload. The firmware TA size and gate are the
++fixed mesh values from modes 1 and 2. Whether they hold for wider shapes is a
++device question, so admission here is not GPU qualification.
++
++## Qualified classes (`native_mesh=4`)
++
++Mode 4 admits exactly the 31 device-qualified native-index classes of Mesa's
++`hk_apple9_native_index_shapes.def` and nothing else from mode 3's research
++model. Those are position-only, taskless triangle mesh classes at physical T16
++or T32, with the single-parent object dispatch they were qualified with:
++(16, 1, 1), as Honeykrisp emits it, or the scalar (1, 1, 1) carrier of the
++qualification fixtures.
++- **The state check:** four position planes (`0x504`), no primitive data
++  (`0x10`), no primitive components, one triangle draw (`0x70000600`), and total
++  = local = (16, 1, 1) or (1, 1, 1).
++- **The layout:** one of the 29 `(mesh width, primitive word, vertex rows)`
++  layouts in `g16_mesh::QUALIFIED`. The kernel sees vertices only as ceil(V / 4)
++  quads, so V3 and V4 share a layout at P1 and P2, and the exact class is
++  Mesa's.
++- **Excluded:** T16V16P16, physical W64, point and line draws, primitive data
++  and multi-parent dispatch.
++
++It is the only mode intended for a production default. That needs device
++qualification at mode 4, not mode 3.
++
++## Switching at runtime
++
++The boot value only sets the initial state. As root, with debugfs mounted:
++
++```sh
++cat /sys/kernel/debug/asahi_m4/native_mesh       # current mode
++echo 1 > /sys/kernel/debug/asahi_m4/native_mesh  # one-parent mode (2: multi-parent)
++echo 0 > /sys/kernel/debug/asahi_m4/native_mesh  # back to the default
++```
++
++Values above the highest supported mode return EINVAL. Each write starts a new
++generation, even when it writes the current value, and is logged as
++`G16: native_mesh=N (generation G)`. Flipping is safe at any time, not only
++when idle:
++
++- **A VM latches the mode when it is created** (VM_CREATE). Its support header
++  (native for modes 1–4) is built from that latch at its first render, and every
++  one of its renders is decoded with it. A runtime change affects only VMs
++  created afterwards.
++- **A VM created at mode 0** (KWin, for example) never decodes native streams.
++  Userspace must not submit any there: they would run as ordinary Work.
++- **A VM created in a native mode** keeps decoding with that mode after a switch
++  to 0, so its native streams never run with ordinary state.
++
++So start a fresh process (a new VM) after changing the mode. The module
++parameter is read-only in sysfs; use the debugfs file.
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 9f6bf66d106c..0a2fbc37d3b5 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -166,7 +166,7 @@ fn probe<'bound>(
+         },
+         native_mesh: u32 {
+             default: 0,
+-            description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16 per-vertex one-group profile; no capability advertisement",
++            description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16/T32 one-parent profile, 2=unqualified multiple-parent profile, 3=research admission of wider mesh state (not qualified); no capability advertisement. Runtime: debugfs asahi_m4/native_mesh (a VM keeps the support mode of its first render)",
+         },
+         dependency_kind: u32 {
+             default: 0,
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 80083745049f..0974dbf67711 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -394,9 +394,8 @@ pub(crate) fn firmware_pages(&self) -> Result<KVec<(u64, kernel::addr::PhysicalA
+     }
+ 
+     pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+-        if crate::module_parameters::native_mesh.value() > 1 {
+-            return Err(EINVAL);
+-        }
++        crate::g16_mesh::Mode::from_parameter(crate::module_parameters::native_mesh.value())
++            .ok_or(EINVAL)?;
+         validate_boot_resources(pdev)?;
+         let platform = crate::g16_platform::Platform::new(pdev.as_ref())?;
+         // All board inputs are checked before any firmware is started.
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 397fef166819..be33fdd058fd 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -20,6 +20,7 @@
+     ioctl,
+ };
+ use kernel::sync::{Arc, CondVar, Mutex, MutexGuard};
++use kernel::error::to_result;
+ use kernel::sync::aref::ARef;
+ use kernel::uaccess::{UserPtr, UserSlice};
+ use kernel::workqueue::{self, impl_has_work, new_work, Work, WorkItem};
+@@ -143,6 +144,9 @@ struct Vm {
+     draining: u32,
+     reservation: ARef<Object>,
+     render_support: Option<Arc<crate::g16::Support>>,
++    /// The native mesh mode when this VM was created. Its support header and
++    /// every decode of its streams use it, whatever the runtime mode is later.
++    native_mode: crate::g16_mesh::Mode,
+     render_ready: bool,
+     /// The runtime holds this VM root's TVB pool (created by its first render
+     /// submission, released with the VM).
+@@ -217,6 +221,8 @@ pub(crate) struct Data {
+     _profile: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Profile>>>,
+     _queue_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _flags: KVec<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>>,
++    _native_mesh: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::NativeMeshKnob>>>,
++    _native_mesh_attribute: NativeMeshAttribute,
+     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+@@ -255,6 +261,81 @@ impl drm::driver::Driver for Driver {
+     }
+ }
+ 
++/// sysfs `asahi_native_mesh` on the GPU platform device: the native-index
++/// advertisement (`g16_mesh::advertise`), readable by anyone (0444).
++struct AttributeCell(core::cell::UnsafeCell<bindings::device_attribute>);
++
++// SAFETY: The attribute is written only here, at compile time; the device core
++// only reads it.
++unsafe impl Sync for AttributeCell {}
++
++static NATIVE_MESH_ATTRIBUTE: AttributeCell = AttributeCell(core::cell::UnsafeCell::new(bindings::device_attribute {
++    attr: bindings::attribute {
++        name: c"asahi_native_mesh".as_ptr(),
++        mode: 0o444,
++        // SAFETY: Zero is valid for the remaining (lockdep) fields.
++        ..unsafe { core::mem::zeroed() }
++    },
++    __bindgen_anon_1: bindings::device_attribute__bindgen_ty_1 { show: Some(show_native_mesh) },
++    __bindgen_anon_2: bindings::device_attribute__bindgen_ty_2 { store: None },
++}));
++
++/// A bounded line buffer for the advertisement.
++struct Line {
++    bytes: [u8; crate::g16_mesh::ADVERTISEMENT_MAX],
++    len: usize,
++}
++
++impl core::fmt::Write for Line {
++    fn write_str(&mut self, s: &str) -> core::fmt::Result {
++        let end = self.len.checked_add(s.len()).filter(|&end| end <= self.bytes.len()).ok_or(core::fmt::Error)?;
++        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
++        self.len = end;
++        Ok(())
++    }
++}
++
++unsafe extern "C" fn show_native_mesh(
++    _dev: *mut bindings::device,
++    _attr: *mut bindings::device_attribute,
++    buf: *mut core::ffi::c_char,
++) -> isize {
++    let (generation, mode) = crate::g16_mesh::snapshot();
++    let mut line = Line { bytes: [0; crate::g16_mesh::ADVERTISEMENT_MAX], len: 0 };
++    if crate::g16_mesh::advertise(generation, mode, &mut line).is_err() {
++        return EIO.to_errno() as isize;
++    }
++    // SAFETY: sysfs passes a PAGE_SIZE buffer; the line is at most ADVERTISEMENT_MAX bytes.
++    unsafe { core::ptr::copy_nonoverlapping(line.bytes.as_ptr(), buf.cast(), line.len) };
++    line.len as isize
++}
++
++/// Keeps `asahi_native_mesh` on the device until the driver unbinds.
++struct NativeMeshAttribute(*mut bindings::device);
++
++// SAFETY: The pointer is only passed to device_remove_file, which may run on any thread.
++unsafe impl Send for NativeMeshAttribute {}
++// SAFETY: No method takes `&self`.
++unsafe impl Sync for NativeMeshAttribute {}
++
++impl NativeMeshAttribute {
++    fn new<C: kernel::device::DeviceContext>(dev: &kernel::device::Device<C>) -> Result<Self> {
++        // `Device` is a transparent wrapper of the C `struct device`.
++        let raw = core::ptr::from_ref(dev).cast_mut().cast::<bindings::device>();
++        // SAFETY: The device is bound; the attribute is static.
++        to_result(unsafe { bindings::device_create_file(raw, NATIVE_MESH_ATTRIBUTE.0.get()) })?;
++        Ok(Self(raw))
++    }
++}
++
++impl Drop for NativeMeshAttribute {
++    fn drop(&mut self) {
++        // SAFETY: Dropped with the driver data at unbind, while the platform
++        // device (which outlives its driver data) still exists.
++        unsafe { bindings::device_remove_file(self.0, NATIVE_MESH_ATTRIBUTE.0.get()) };
++    }
++}
++
+ pub(crate) fn register<'a>(
+     pdev: &'a platform::Device<Core<'_>>,
+ ) -> Result<drm::Registration<'a, Driver>> {
+@@ -292,6 +373,12 @@ pub(crate) fn register<'a>(
+         knob.init(value);
+         flags.push(KBox::pin_init(dir.read_write_file(name, knob), GFP_KERNEL)?, GFP_KERNEL)?;
+     }
++    crate::g16_mesh::init_mode(crate::module_parameters::native_mesh.value());
++    let native_mesh_attribute = NativeMeshAttribute::new(pdev.as_ref())?;
++    let native_mesh = KBox::pin_init(
++        dir.read_write_file(c_str!("native_mesh"), crate::g16_timeline::NativeMeshKnob),
++        GFP_KERNEL,
++    )?;
+     let dep_stats = KBox::pin_init(
+         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
+         GFP_KERNEL,
+@@ -338,6 +425,8 @@ pub(crate) fn register<'a>(
+         _profile: profile,
+         _queue_cap: queue_cap,
+         _flags: flags,
++        _native_mesh: native_mesh,
++        _native_mesh_attribute: native_mesh_attribute,
+         _dep_stats: dep_stats,
+         _lane_cap: lane_cap,
+         _debugfs: dir, });
+diff --git a/drivers/gpu/drm/asahi/g16_drm_ioctl.rs b/drivers/gpu/drm/asahi/g16_drm_ioctl.rs
+index 00b9898eabee..1489c925226c 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_ioctl.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_ioctl.rs
+@@ -99,6 +99,10 @@ pub(super) fn vm_create(
+                 draining: 0,
+                 reservation,
+                 render_support: None,
++                // The module parameter was validated at probe and debugfs
++                // writes are bounded, so the mode always parses.
++                native_mode: crate::g16_mesh::Mode::from_parameter(crate::g16_mesh::snapshot().1)
++                    .unwrap_or(crate::g16_mesh::Mode::Disabled),
+                 render_ready: false,
+                 tvb_ready: false,
+                 compute_ready: false,
+diff --git a/drivers/gpu/drm/asahi/g16_drm_submit.rs b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+index e3cd0518abce..8eaa3ef8d0a6 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_submit.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+@@ -264,7 +264,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                 // Acquire scarce support and its Arc before editing this
+                 // root. ENOSPC/ENOMEM here must not quarantine a healthy VM.
+                 let support = Arc::new(
+-                    runtime.acquire_render_support(&pool)?,
++                    runtime.acquire_render_support(&pool, vm.native_mode)?,
+                     GFP_KERNEL,
+                 )?;
+                 if let Err(error) = vm.space.lock()
+diff --git a/drivers/gpu/drm/asahi/g16_mesh.rs b/drivers/gpu/drm/asahi/g16_mesh.rs
+index 55bcc650bf95..7d910f984d45 100644
+--- a/drivers/gpu/drm/asahi/g16_mesh.rs
++++ b/drivers/gpu/drm/asahi/g16_mesh.rs
+@@ -4,10 +4,77 @@
+ //! Native object/mesh launch for the paired experiment.
+ //!
+ //! The render UAPI does not distinguish a user object shader from a stub that
+-//! writes outputs. `native_mesh=1` selects the user-object convention. A paired
++//! writes outputs. `native_mesh=1/2/3` selects the user-object convention. A paired
+ //! stream starts with a complete mesh state; there is no search for magic words
+ //! inside shader data, PPP records, or ordinary vertex streams.
+ 
++/// Runtime copy of `asahi_m4.native_mesh`, writable from debugfs
++/// `asahi_m4/native_mesh` without a reboot, and the generation of its last
++/// change: `generation << 8 | mode` in one word, so a writer, a VM's latch and
++/// the advertisement always see a consistent pair. A VM latches the mode when
++/// it is created (`Vm::native_mode`); its support header and every decode use
++/// that latch, so a later change affects only VMs created after it.
++static NATIVE_MESH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++
++/// The highest accepted `native_mesh` value.
++pub(crate) const MAX_MODE: u32 = 4;
++
++/// The current (generation, mode).
++pub(crate) fn snapshot() -> (u64, u32) {
++    let value = NATIVE_MESH.load(core::sync::atomic::Ordering::Acquire);
++    (value >> 8, (value & 0xff) as u32)
++}
++
++pub(crate) fn mode() -> u32 {
++    snapshot().1
++}
++
++/// The boot value: generation 0.
++pub(crate) fn init_mode(mode: u32) {
++    NATIVE_MESH.store(u64::from(mode.min(MAX_MODE)), core::sync::atomic::Ordering::Release);
++}
++
++/// A runtime change. Every call, even to the current mode, starts a new
++/// generation, so a reader that sees one generation twice knows the mode held
++/// in between. Returns the new generation.
++pub(crate) fn set_mode(mode: u32) -> u64 {
++    use core::sync::atomic::Ordering::{AcqRel, Acquire};
++    let next = |value: u64| (((value >> 8) + 1) << 8) | u64::from(mode.min(MAX_MODE));
++    let previous = NATIVE_MESH.fetch_update(AcqRel, Acquire, |value| Some(next(value)));
++    next(previous.unwrap_or_else(|value| value)) >> 8
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum Mode {
++    Disabled,
++    SingleParent,
++    MultipleParents,
++    /// Research admission for the capability study: the wider state model in
++    /// `research_state`, with mode 2's object dispatch rules. Not qualified.
++    Research,
++    /// Exactly the 31 device-qualified native-index classes (`QUALIFIED`), with
++    /// the single-parent dispatches they were qualified with: Honeykrisp's
++    /// (16, 1, 1) and the scalar (1, 1, 1) fixture carrier.
++    Qualified,
++}
++
++impl Mode {
++    pub(crate) fn from_parameter(value: u32) -> Option<Self> {
++        match value {
++            0 => Some(Self::Disabled),
++            1 => Some(Self::SingleParent),
++            2 => Some(Self::MultipleParents),
++            3 => Some(Self::Research),
++            4 => Some(Self::Qualified),
++            _ => None,
++        }
++    }
++
++    pub(crate) fn enabled(self) -> bool {
++        self != Self::Disabled
++    }
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(crate) struct Profile {
+     /// Exclusive per-render storage, filled by prepare_render, never userspace.
+@@ -33,14 +100,35 @@ pub(crate) enum DecodeError {
+     Unsupported,
+ }
+ 
+-/// Admit the paired T16 class: four vertices' storage, one primitive and one
+-/// direct object workgroup, with position and up to 124 per-vertex scalars.
++/// Admit the paired T16/T32 class: four vertices' storage, one primitive and one
++/// direct object dispatch, with position and up to 124 per-vertex scalars.
+ /// Primitive outputs, task payload and wider resource classes remain excluded.
++/// Mode 1 retains the qualified one-parent class. Only mode 2 admits multiple
++/// complete physical object workgroups, pending device qualification.
++/// This does not bound the child grid computed by the object shader, nor prove
++/// that a particular aggregate workload fits the available GPU resources.
++/// Mode 3 replaces the state check with `research_state` and also admits point
++/// and line draws; the stream structure and object dispatch rules are mode 2's.
+ /// The packet budget bounds malformed streams, including a missing terminator.
++/// The first word of a native object/mesh stream.
++const NATIVE_HEADER: u32 = 0x4000_0d2c;
++
++/// Whether a stream starting with `header` may be native: the native header,
++/// or an unfamiliar header with the native state extension (bit 11), which
++/// `decode` rejects. Any other first word makes `decode` return `Ok(None)`
++/// without reading further, so an ordinary render needs nothing else.
++pub(crate) fn may_be_native(header: u32) -> bool {
++    header == NATIVE_HEADER || (header >> 29 == 2 && header & (1 << 11) != 0)
++}
++
+ pub(crate) fn decode(
+     start: u64,
++    mode: Mode,
+     mut read: impl FnMut(u64) -> Option<u32>,
+ ) -> Result<Option<Profile>, DecodeError> {
++    if !mode.enabled() {
++        return Ok(None);
++    }
+     let mut cursor = start;
+     let mut remaining = 1024;
+     let mut next = || {
+@@ -53,10 +141,10 @@ pub(crate) fn decode(
+         Ok(value)
+     };
+     let header = next()?;
+-    if header != 0x4000_0d2c {
++    if header != NATIVE_HEADER {
+         // Bit 11 marks the native state extension. Reject unfamiliar native
+         // layouts rather than submitting them with ordinary TA state.
+-        return if header >> 29 == 2 && header & (1 << 11) != 0 {
++        return if may_be_native(header) {
+             Err(DecodeError::Unsupported)
+         } else {
+             Ok(None)
+@@ -75,14 +163,22 @@ pub(crate) fn decode(
+     // up to a power of two. This packet parser does not validate shader code or
+     // its local-allocation instructions.
+     let components = state[0] & 0xff;
+-    if !(4..=128).contains(&components)
++    if mode == Mode::Research {
++        if !research_state(&state) {
++            return Err(DecodeError::Unsupported);
++        }
++    } else if mode == Mode::Qualified {
++        if !qualified_state(&state) {
++            return Err(DecodeError::Unsupported);
++        }
++    } else if !(4..=128).contains(&components)
+         || state[0] != components | ((components + 1) << 8)
+         || state[1] != 0x10
+         || state[2] != 0
+         || state[3] != 0
+         || state[8] != 1
+         || state[9] != 0
+-        || state[10] != 0x400810
++        || !matches!(state[10], 0x400810 | 0x400820)
+         || state[11] != 0
+         || state[12] != components + 1
+     {
+@@ -99,12 +195,24 @@ pub(crate) fn decode(
+                 next()?;
+             }
+             1 if word & !0x2000_0013 == 0 => {} // G16 coherency barrier
+-            3 if word == 0x7000_0600 && !drew => {
+-                // Exactly one object workgroup: total threads equal local
+-                // threads. Keep the scalar carrier and admit physical T16.
++            3 if !drew
++                && (word == 0x7000_0600
++                    || (mode == Mode::Research && matches!(word, 0x7000_0000 | 0x7000_0100))) =>
++            {
++                // Total threads describe a nonempty grid of complete object
++                // workgroups. Keep the scalar carrier and physical T16/T32,
++                // independently of the mesh width in the state packet.
+                 let total = [next()?, next()?, next()?];
+                 let local = [next()?, next()?, next()?];
+-                if total != local || (local != [1, 1, 1] && local != [16, 1, 1]) {
++                if !matches!(local, [1, 1, 1] | [16, 1, 1] | [32, 1, 1])
++                    || (mode == Mode::SingleParent && total != local)
++                    || (mode == Mode::Qualified
++                        && (!matches!(local, [1, 1, 1] | [16, 1, 1]) || total != local))
++                    || total
++                        .iter()
++                        .zip(local)
++                        .any(|(&n, size)| n == 0 || n % size != 0)
++                {
+                     return Err(DecodeError::Unsupported);
+                 }
+                 drew = true;
+@@ -116,3 +224,126 @@ pub(crate) fn decode(
+         }
+     }
+ }
++
++/// The qualified layouts (`native_mesh=4`): (mesh state word 11, primitive
++/// word 10, vertex row word 13) of the 31 classes in Mesa's
++/// `hk_apple9_native_index_shapes.def`, from their qualification fixtures. The
++/// kernel sees vertices only as ceil(V / 4) quads, so V3 and V4 share a layout
++/// at P1 and P2; the exact class is Mesa's. T16V16P16 is deliberately absent.
++const QUALIFIED: [(u32, u32, u32); 29] = [
++    // T16, one vertex quad (V3, V4): P1..P8, P11, P17, P20, P21.
++    (0x400810, 0, 5), (0x400810, 1, 5), (0x400810, 2, 5), (0x400810, 3, 5),
++    (0x400810, 4, 5), (0x400810, 5, 5), (0x400810, 6, 5), (0x400810, 7, 5),
++    (0x400810, 10, 5), (0x400810, 0x10010, 5), (0x400810, 0x10013, 5), (0x400810, 0x10014, 5),
++    // T16, two quads (V6, V8): P2, P3, P5, P8.
++    (0x400810, 1, 9), (0x400810, 2, 9), (0x400810, 4, 9), (0x400810, 7, 9),
++    // T16, four quads (V16): P4, P8, P17, P21.
++    (0x400810, 3, 17), (0x400810, 7, 17), (0x400810, 0x10010, 17), (0x400810, 0x10014, 17),
++    // T32: V3P1; V24 (six quads) P3, P17, P31, P32; V32 (eight quads) P16, P32, P41, P42.
++    (0x400820, 0, 5),
++    (0x400820, 2, 25), (0x400820, 0x10010, 25), (0x400820, 0x1001e, 25), (0x400820, 0x1001f, 25),
++    (0x400820, 15, 33), (0x400820, 0x1001f, 33), (0x400820, 0x20028, 33), (0x400820, 0x20029, 33),
++];
++
++/// Mode 4's state check: position-only (four planes, no primitive data or
++/// components), as qualified, at one of the `QUALIFIED` layouts. The object
++/// dispatch must be a single parent of (16, 1, 1), as Honeykrisp emits, or the
++/// scalar (1, 1, 1) of the qualification fixtures.
++fn qualified_state(state: &[u32; 13]) -> bool {
++    state[0] == 0x504
++        && state[1] == 0x10
++        && state[2] == 0
++        && state[3] == 0
++        && state[8] == 1
++        && state[11] == 0
++        && QUALIFIED.contains(&(state[10], state[9], state[12]))
++}
++
++/// sha256 of the canonical class list `QUALIFIED` was taken from: one line
++/// `T<t>V<v>P<p>\n` per `HK_NATIVE_INDEX_SHAPE(t, v, p)` of Mesa's
++/// `hk_apple9_native_index_shapes.def`, in file order (31 classes).
++pub(crate) const QUALIFIED_CLASSES_SHA256: &str =
++    "5550ecf263192c596c3f9d8c3b84c0324ac3d0c8ee76da37c378205247f1a3bd";
++
++/// The longest advertisement line, newline included.
++pub(crate) const ADVERTISEMENT_MAX: usize = 160;
++
++/// The native-index advertisement (sysfs `asahi_native_mesh` on the GPU
++/// device), one line: `asahi-native-mesh v1 generation=<G> profile=<P>
++/// classes=<H>`. `qualified` (mode 4) carries the class-list hash, `research`
++/// (mode 3) and `none` (modes 0-2) carry `-`. Userspace treats only
++/// `qualified` with the expected hash as positive, and samples it before and
++/// after VM_CREATE (see `snapshot`).
++pub(crate) fn advertise(generation: u64, mode: u32, out: &mut impl core::fmt::Write) -> core::fmt::Result {
++    let (profile, classes) = match Mode::from_parameter(mode) {
++        Some(Mode::Qualified) => ("qualified", QUALIFIED_CLASSES_SHA256),
++        Some(Mode::Research) => ("research", "-"),
++        _ => ("none", "-"),
++    };
++    writeln!(out, "asahi-native-mesh v1 generation={generation} profile={profile} classes={classes}")
++}
++
++/// Research state model (`native_mesh=3`), from the 2026-10-22 capability
++/// study's own-MSL captures: n vertex planes, P primitives, ceil(V / 4) vertex
++/// quads and C 32-bit primitive components.
++///
++/// - word 1: n | (n + 1) << 8, 4 <= n <= 128
++/// - word 2: 0xd0 with primitive data (C > 0), otherwise 0x10
++/// - word 10: (P - 1) | (ceil(P / 16) - 1) << 16, 1 <= P <= 512, no culling
++/// - word 11: T16 or T32 mesh state, as in modes 1 and 2. Physical W64
++///   (0x400840) only for one probe shape: 4 vertex planes, one primitive, no
++///   primitive data, one vertex quad. That admits the W64 study's streams
++///   and qualifies neither W64 completion nor the fixed TA support resources.
++/// - word 12: P * C, 0 <= C <= 128
++/// - word 13: 1 + ceil(V / 4) * n, 1 <= V <= 256
++///
++/// Primitive data adds one link plane to n. The application output, vertex
++/// planes without that link plus 4 * P * C bytes of primitive data, must fit
++/// the compiler's 32 KiB mesh-output limit. Words 3, 4 and 9 keep their mode
++/// 1/2 values; words 5..8 are launch handles, as in the other modes. The object
++/// payload is not a packet field. Its exclusive storage is fixed at 16 KiB,
++/// the largest payload in the study. Everything is computed from the 13 words
++/// already read, so this adds no command-memory reads.
++/// The one research shape admitted at physical W64 (see `research_state`).
++fn w64_probe(state: &[u32; 13]) -> bool {
++    state[10] == 0x400840
++        && state[0] == 0x504
++        && state[1] == 0x10
++        && state[9] == 0
++        && state[11] == 0
++        && state[12] == 5
++}
++
++fn research_state(state: &[u32; 13]) -> bool {
++    let planes = state[0] & 0xff;
++    let primitives = (state[9] & 0xffff) + 1;
++    let data = state[1] == 0xd0;
++    if !(4..=128).contains(&planes)
++        || state[0] != planes | ((planes + 1) << 8)
++        || !matches!(state[1], 0x10 | 0xd0)
++        || state[2] != 0
++        || state[3] != 0
++        || state[8] != 1
++        || primitives > 512
++        || state[9] != (primitives - 1) | ((primitives.div_ceil(16) - 1) << 16)
++        || !(matches!(state[10], 0x400810 | 0x400820) || w64_probe(state))
++    {
++        return false;
++    }
++    let components = state[11] / primitives;
++    if state[11] % primitives != 0
++        || data != (components != 0)
++        || components > 128
++        || (data && planes < 5)
++    {
++        return false;
++    }
++    // The row count includes the header row. At most 64 vertex quads (V <= 256).
++    let rows = state[12].wrapping_sub(1);
++    let quads = rows / planes;
++    if rows % planes != 0 || !(1..=64).contains(&quads) {
++        return false;
++    }
++    // Bounded above: at most 64 * 16 * 128 + 4 * 512 * 128 bytes.
++    quads * 16 * (planes - u32::from(data)) + 4 * primitives * components <= 0x8000
++}
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 6e2fb3c4a4d7..9c166415f335 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -480,6 +480,11 @@ pub(crate) struct Support {
+     slots: Arc<AtomicU64>,
+     index: u32,
+     submissions: AtomicU64,
++    /// Initialized in native pool mode (native_mesh was nonzero when this VM
++    /// was created). Fixed for the support lifetime.
++    native: bool,
++    /// The VM's latched native mesh mode, which decodes all its renders.
++    mode: g16_mesh::Mode,
+ }
+ impl Support {
+     pub(crate) fn address(&self) -> u64 {
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_contexts.rs b/drivers/gpu/drm/asahi/g16_runtime_contexts.rs
+index 77ff059930b0..bc4db7998503 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_contexts.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_contexts.rs
+@@ -52,10 +52,12 @@ pub(crate) fn render_failed(&self) -> bool {
+         self.render_failed
+     }
+ 
+-    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> Result<Support> {
++    /// `mode`: the VM's native mesh mode, latched when it was created.
++    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool, mode: g16_mesh::Mode) -> Result<Support> {
+         if self.render_failed {
+             return Err(EIO);
+         }
++        let native = mode.enabled();
+         let mut used = self.render_support.load(Ordering::Acquire);
+         let index = loop {
+             let index = (!used).trailing_zeros();
+@@ -78,6 +80,8 @@ pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> R
+             submissions: AtomicU64::new(
+                 crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
+             ),
++            native,
++            mode,
+         };
+         let mut a = render::Addresses::bootstrap();
+         a.support = lease.address();
+@@ -85,7 +89,7 @@ pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> R
+         let mut page = KVec::new();
+         page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
+         page[..0x100].copy_from_slice(&pool.support(3 + u64::from(index), a.render_shared_state));
+-        if crate::module_parameters::native_mesh.value() == 1 {
++        if lease.native {
+             render::initialize_native_support(&mut page[..0x100]);
+         }
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_render.rs b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+index 3821110d4575..2809542abe73 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_render.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+@@ -92,7 +92,20 @@ pub(crate) fn submit_render(
+             return Err(EIO);
+         }
+         let mut mesh_params;
+-        let params = if crate::module_parameters::native_mesh.value() == 1 {
++        // The VM's latched mode, not the current one: a VM created native keeps
++        // decoding its streams after a runtime switch to 0.
++        let mesh_mode = support.mode;
++        // Peek at the first word without waiting for producers: an ordinary
++        // header publishes as at native_mesh=0, with no stall behind earlier
++        // work. Userspace writes a native header on the CPU before SUBMIT, and
++        // no GPU job rewrites a render's first word (Honeykrisp audit,
++        // 2026-10-24), so a stale read can only see a native header that is
++        // gone by now: that case still waits and decodes, which is
++        // authoritative. An unreadable first word also waits and then fails
++        // in the decode, as before.
++        let params = if mesh_mode.enabled()
++            && owner.lock().command_word(params.encoder).map_or(true, g16_mesh::may_be_native)
++        {
+             mesh_params = *params;
+             let params = &mut mesh_params;
+             // These are the raw producer dependencies, before same-lane wait
+@@ -105,7 +118,7 @@ pub(crate) fn submit_render(
+                 }
+             }
+             let mut client = owner.lock();
+-            params.mesh = g16_mesh::decode(params.encoder, |va| client.command_word(va).ok())
++            params.mesh = g16_mesh::decode(params.encoder, mesh_mode, |va| client.command_word(va).ok())
+                 .map_err(|error| match error {
+                     g16_mesh::DecodeError::Unmapped => EFAULT,
+                     g16_mesh::DecodeError::Unsupported => EOPNOTSUPP,
+@@ -114,6 +127,11 @@ pub(crate) fn submit_render(
+             if params.mesh.is_some() && (params.samples != 1 || params.layers != 1) {
+                 return Err(EOPNOTSUPP);
+             }
++            // A VM that first rendered with native_mesh=0 keeps its ordinary
++            // support header, which cannot run a native stream.
++            if params.mesh.is_some() && !support.native {
++                return Err(EOPNOTSUPP);
++            }
+             // The VM already owns and advertises all 24 operand buffers.
+             // This initialized pool serves both ordinary and native Work.
+             &mesh_params
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 852a79810068..79ef4acecd40 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -362,6 +362,28 @@ pub(crate) fn init(&self, value: u32) {
+     pub(crate) const FAIL_SKIP: Self = Self { cell: &FAIL_SKIP, name: "fail_skip", max: 4096 };
+ }
+ 
++/// debugfs `asahi_m4/native_mesh`: the runtime native mesh mode. Each write
++/// starts a new generation (see `g16_mesh::set_mode`).
++pub(crate) struct NativeMeshKnob;
++
++impl kernel::debugfs::Writer for NativeMeshKnob {
++    fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        writeln!(f, "{}", crate::g16_mesh::mode())
++    }
++}
++
++impl kernel::debugfs::Reader for NativeMeshKnob {
++    fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Result {
++        let value = knob_u32(reader)?;
++        if value > crate::g16_mesh::MAX_MODE {
++            return Err(EINVAL);
++        }
++        let generation = crate::g16_mesh::set_mode(value);
++        pr_info!("G16: native_mesh={} (generation {})\n", value, generation);
++        Ok(())
++    }
++}
++
+ impl kernel::debugfs::Writer for FlagKnob {
+     fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         writeln!(f, "{}", self.cell.load(core::sync::atomic::Ordering::Relaxed))
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 7b05ad575dd9..1a1ee5d8fcc0 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -62,9 +62,11 @@ pub(crate) fn roots(&self) -> Roots {
+         }
+     }
+ 
+-    /// Read a command word only while the execution owns its GEM mappings and
+-    /// after its GPU producer dependencies have completed. Volatile access also
+-    /// avoids creating Rust references to memory userspace can still write.
++    /// Read a command word only while the execution owns its GEM mappings.
++    /// A decode must also wait for the GPU producer dependencies first; the
++    /// unwaited first-word peek relies on userspace writing native headers on
++    /// the CPU (see `submit_render`). Volatile access also avoids creating Rust
++    /// references to memory userspace can still write.
+     pub(crate) fn command_word(&mut self, va: u64) -> Result<u32> {
+         if va & 3 != 0 {
+             return Err(EINVAL);

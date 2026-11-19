@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 00:11:05 -0600
+Subject: [PATCH] drm/asahi: Limit G16 performance requests to the top state
+
+Region C 0x88 and 0x8c are the thermal and power performance-state
+limits, and 0x98 caps the performance state the firmware picks, which it
+rereads as it runs. All three are in hundredths of a state. They were
+1000, one past the J713's top state 9; macOS 26.6.2 sets 900. Use the top
+state from the power table, as the power controllers already do.
+
+The meaning of 0x88 and 0x8c is from interface notes by Syd Garlathy
+<s@ll.dev>, and that of 0x98 from interface notes by Ibrahim Syed
+<ibrahim.syed787b@gmail.com>, both written from macOS's drivers. On the
+J713, lowering 0x98 to 300 at run time drops effect2d from 5460 to 3260
+FPS, and raising it back to 900 restores it.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_platform.rs | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 656073d455b9..dea9d8065f6d 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -375,6 +375,8 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+         // Keep GFX clock-gated briefly before powering it off. On T8132,
+         // 40 permits ACTUAL 4 between frames and state 0 after quiet time.
+         put32(&mut out, REGION_C_CLOCK_GATED_OFF_DELAY_MS, 40);
++        // Performance-state limits, in hundredths of a state.
++        let top_state = 100 * self.max_pstate();
+         for (off, value) in [
+             (0x78, 1),
+             (0x7ec, 1),
+@@ -390,9 +392,9 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+             (0x9cc, 64),
+             (0x9d0, 2),
+             (0x84, self.maximum_power),
+-            (0x88, 1000),
+-            (0x8c, 1000),
+-            (0x98, 1000),
++            (0x88, top_state),
++            (0x8c, top_state),
++            (0x98, top_state),
+         ] {
+             put32(&mut out, off, value);
+         }

@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 4 Oct 2026 18:18:05 -0400
+Subject: [PATCH] drm/asahi: Look up G16 mappings by binary search
+
+Submission validates each command's control stream, sampler heap,
+attachments, ZLS buffers and timestamps against the VM's mappings, and
+each check scanned the whole list linearly. With CS2's thousands of
+mappings these scans were the largest remaining cost in the VMM's GPU
+worker once submissions were batched.
+
+Mappings never overlap, so keep the list sorted by address (rotating new
+and split-off mappings into place) and find the one containing an
+address with a binary search.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RvQieG9SGoR3ZeSdSguHnB
+(cherry picked from commit c40933a8f793d36c3787bd7497aba794a0592ccc)
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index adddcb2ab795..a2cbee5070b2 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -62,11 +62,14 @@ fn cover(mappings: &[Self], start: u64, size: u64, permissions: u32) -> Result {
+         if size == 0 {
+             return Err(EINVAL);
+         }
++        // `mappings` is sorted by address and never overlaps, so the only
++        // candidate for `cursor` is the first mapping ending after it.
+         let mut cursor = start;
+         while cursor < end {
++            let index = mappings.partition_point(|m| m.range.end <= cursor);
+             let mapping = mappings
+-                .iter()
+-                .find(|m| m.range.contains(&cursor) && m.permissions & permissions == permissions)
++                .get(index)
++                .filter(|m| m.range.contains(&cursor) && m.permissions & permissions == permissions)
+                 .ok_or(EINVAL)?;
+             cursor = end.min(mapping.range.end);
+         }
+@@ -82,6 +85,7 @@ struct Vm {
+     space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     compute_space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     // Large address spaces hold thousands of mappings; allow vmalloc.
++    // Sorted by address; mappings never overlap.
+     mappings: KVVec<Mapping>,
+     /// Shared copy of `mappings` retained by submissions. Rebuilt only after
+     /// the mappings change, so a submit costs one reference, not one per
+@@ -914,6 +918,10 @@ fn map(
+             },
+             GFP_KERNEL,
+         )?;
++        // Keep the list sorted by address for lookups.
++        let last = self.mappings.len() - 1;
++        let index = self.mappings[..last].partition_point(|m| m.range.start < range.start);
++        self.mappings[index..].rotate_right(1);
+         let result = (|| {
+             // The shim uses distinct roots for the fixed render and compute
+             // private namespaces. Both views share the caller's GEM pages.
+@@ -940,6 +948,7 @@ fn map(
+             self.space.lock().low.unmap_pages(range.clone())?;
+             self.compute_space.lock().low.unmap_pages(range)?;
+             self.publish_mappings(runtime);
++            self.mappings[index..].rotate_left(1);
+             self.mappings.pop();
+             return Err(e);
+         }
+@@ -1013,8 +1022,12 @@ fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Resul
+             false
+         });
+         if let Some(right) = right {
++            let start = right.range.start;
+             self.mappings.push_within_capacity(right)
+                 .unwrap_or_else(|_| unreachable!("reserved split mapping"));
++            let last = self.mappings.len() - 1;
++            let index = self.mappings[..last].partition_point(|m| m.range.start < start);
++            self.mappings[index..].rotate_right(1);
+         }
+         Ok(())
+     }

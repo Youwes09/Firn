@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Tue, 10 Dec 2024 03:30:28 +0900
+Subject: [PATCH] rust: page: Make with_page_mapped() and
+ with_pointer_into_page() public
+
+Lets users do (unsafe) complex page read/write operations without having
+to repeatedly call into read_raw()/write_raw() (which may be expensive
+in some cases).
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+(cherry picked from commit 1f76daaa6e43e9063cbc02b08f3b3d6e3cfb0082)
+---
+ rust/kernel/page.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/rust/kernel/page.rs b/rust/kernel/page.rs
+index a305eebcf768..9e4c6c3da469 100644
+--- a/rust/kernel/page.rs
++++ b/rust/kernel/page.rs
+@@ -230,7 +230,7 @@ pub fn nid(&self) -> i32 {
+     /// different addresses. However, even if the addresses are different, the underlying memory is
+     /// still the same for these purposes (e.g., it's still a data race if they both write to the
+     /// same underlying byte at the same time).
+-    fn with_page_mapped<T>(&self, f: impl FnOnce(*mut u8) -> T) -> T {
++    pub fn with_page_mapped<T>(&self, f: impl FnOnce(*mut u8) -> T) -> T {
+         // SAFETY: `page` is valid due to the type invariants on `Page`.
+         let mapped_addr = unsafe { bindings::kmap_local_page(self.as_ptr()) };
+ 
+@@ -271,7 +271,7 @@ fn with_page_mapped<T>(&self, f: impl FnOnce(*mut u8) -> T) -> T {
+     /// different addresses. However, even if the addresses are different, the underlying memory is
+     /// still the same for these purposes (e.g., it's still a data race if they both write to the
+     /// same underlying byte at the same time).
+-    fn with_pointer_into_page<T>(
++    pub fn with_pointer_into_page<T>(
+         &self,
+         off: usize,
+         len: usize,

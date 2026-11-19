@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 00:10:42 -0600
+Subject: [PATCH] drm/asahi: Enable the MTR sensors the J713 fuses list
+
+The firmware samples only the MTR sensors enabled in the bundle at
+0x8ed8, so with none enabled it reads no GPU temperature at all, and an
+MTR alarm finds no sensor to match and crashes the firmware:
+
+  agfMTRAlarmHandler: Received MTR Alarm interrupt from GPU but no match
+  found in MTR hardware! chainID=0
+
+On the J713 the alarm comes as soon as PMP runs its GPU loop while the
+extra_0 policy object is zero, with or without the slot 36 window
+mapped. Setting the mask alone stops the crash and starts sampling.
+
+m1n1 passes the IDs listed in /arm-io/pmgr mtr-polynom-fuse-agx as
+apple,m4-sensor-mask. On the J713 that is 0x6b79, the value macOS 26.6.2
+sets (captured by Niklas Sheth). The field's meaning is from interface
+notes by Syd Garlathy <s@ll.dev>, written from macOS's drivers.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_platform.rs | 6 ++++++
+ drivers/gpu/drm/asahi/g16_power.rs    | 2 ++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index c7f4ee9ace95..656073d455b9 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -70,6 +70,7 @@ pub(crate) struct Platform {
+     relative_b: KVec<u32>,
+     pub(crate) maximum_power: u32,
+     pub(crate) core_mask: u32,
++    pub(crate) sensor_mask: u32,
+     revision: u32,
+     pub(crate) period_ms: u32,
+     pub(crate) period_clocks: u32,
+@@ -124,6 +125,10 @@ pub(crate) fn new(dev: &device::Device) -> Result<Self> {
+         if core_mask == 0 || core_mask & !0x3ff != 0 {
+             return Err(EINVAL);
+         }
++        let sensor_mask: u32 = node.get_property(c_str!("apple,m4-sensor-mask"))?;
++        if sensor_mask == 0 || sensor_mask & !0xffff != 0 {
++            return Err(EINVAL);
++        }
+         let mut this = Self {
+             core_voltage: ladder(&node, c_str!("apple,m4-core-voltage"))?,
+             memory_voltage: ladder(&node, c_str!("apple,m4-memory-voltage"))?,
+@@ -138,6 +143,7 @@ pub(crate) fn new(dev: &device::Device) -> Result<Self> {
+             freq_b,
+             maximum_power,
+             core_mask,
++            sensor_mask,
+             period_ms,
+             period_clocks,
+             registers: KVec::new(),
+diff --git a/drivers/gpu/drm/asahi/g16_power.rs b/drivers/gpu/drm/asahi/g16_power.rs
+index 027fa647edcc..d7ff12a5b604 100644
+--- a/drivers/gpu/drm/asahi/g16_power.rs
++++ b/drivers/gpu/drm/asahi/g16_power.rs
+@@ -66,6 +66,8 @@ pub(crate) fn bundle(&self, entropy: u32) -> Result<KVec<u8>> {
+         out[crate::g16_fw::MAIN_OFFSET..crate::g16_fw::MAIN_OFFSET + main.len()]
+             .copy_from_slice(&main);
+         put64(&mut out, 0x8ed0, 0xffff_fc20_000f_3440 + 0x80);
++        // The MTR sensors the firmware samples and checks for alarms.
++        put64(&mut out, 0x8ed8, self.sensor_mask.into());
+         put64(&mut out, 0xb698, 0xffff_fc20_c050_0000);
+         self.power_data(&mut out)?;
+         put32(&mut out, 0xb754, entropy);

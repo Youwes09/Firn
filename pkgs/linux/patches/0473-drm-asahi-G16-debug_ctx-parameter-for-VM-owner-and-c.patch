@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 19:57:20 -0400
+Subject: [PATCH] drm/asahi: G16: debug_ctx parameter for VM owner and context
+ slot logging
+
+The per-VM owner line ("file N vm N by tgid ...") and the context slot
+rebind line ("context N bound to root ...") are debug aids for the Dota
+hang. A CTS run printed hundreds of them. Log them only with
+debug_ctx=1; the text is unchanged so existing greps keep working.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit a6e385093a5ccb5eb586cabb61dfa3d56b3145a0)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs     |  2 +-
+ drivers/gpu/drm/asahi/g16_runtime.rs | 14 ++++++++------
+ 3 files changed, 13 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 3105cf1d6490..0e127292e411 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -232,6 +232,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 gives compute queues the native preemptible profile (Metal uses it for compute; this driver forces compute non-preemptible)",
+         },
++        debug_ctx: u32 {
++            default: 0,
++            description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
++        },
+         context_sticky: u32 {
+             default: 0,
+             description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index e3b7d290eba5..1770fda3c323 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -405,7 +405,7 @@ fn vm_create(
+         )?;
+         // Debug: name the process behind each VM so firmware context slots in
+         // hang reports (logged by root) can be traced to a client.
+-        {
++        if crate::module_parameters::debug_ctx.value() != 0 {
+             let task = kernel::current!();
+             let leader = task.group_leader();
+             // SAFETY: comm is a NUL-padded fixed array; a concurrent rename
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index e3e6754d5b45..8b19041ec05a 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1612,12 +1612,14 @@ fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<
+         if existing.is_none() {
+             let previous = self.context_roots[slot].map(|r| r.low);
+             self.set_context(slot, Some(roots))?;
+-            pr_info!(
+-                "G16: context {} bound to root {:#x} (previous {:#x})\n",
+-                slot,
+-                roots.low,
+-                previous.unwrap_or(0)
+-            );
++            if crate::module_parameters::debug_ctx.value() != 0 {
++                pr_info!(
++                    "G16: context {} bound to root {:#x} (previous {:#x})\n",
++                    slot,
++                    roots.low,
++                    previous.unwrap_or(0)
++                );
++            }
+         }
+         self.context_users[slot] += 1;
+         Ok(slot as u32)

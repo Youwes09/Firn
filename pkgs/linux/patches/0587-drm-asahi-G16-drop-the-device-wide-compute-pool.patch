@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 17:07:02 -0500
+Subject: [PATCH] drm/asahi: G16: drop the device-wide compute pool
+
+Every VM's compute Works now use that VM's own pool and support object,
+so nothing references the opening client's compute FList any more: its
+16 buffers, directory, scratch and marker pages (32.2 MiB) and the
+support object at slot 2. Stop allocating and writing them. The pool
+VAs stay reserved from client binds.
+---
+ drivers/gpu/drm/asahi/g16.rs         | 22 ++--------------------
+ drivers/gpu/drm/asahi/g16_compute.rs | 10 ++--------
+ 2 files changed, 4 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 75dba7d5334d..4c2d3302cf46 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -774,26 +774,8 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             }
+             opening_client.write_low(0x70_0000_0000 + (first * 8) as u64, &row)?;
+         }
+-        for (base, size) in compute::private_ranges() {
+-            opening_client.alloc_low(base, size, crate::pgtable::prot::PROT_GPU_SHARED_RW)?;
+-        }
+-        for buffer in 0..compute::BUFFER_COUNT {
+-            for first in (0..compute::BUFFER_SIZE / 0x1000).step_by(32) {
+-                let mut row = [0; 256];
+-                for i in 0..32 {
+-                    let va = compute::BUFFER_BASE
+-                        + buffer as u64 * compute::BUFFER_STRIDE
+-                        + (first + i) as u64 * 0x1000;
+-                    row[i * 8..i * 8 + 8].copy_from_slice(&va.to_le_bytes());
+-                }
+-                opening_client.write_low(
+-                    compute::DIRECTORY
+-                        + (buffer * (compute::BUFFER_SIZE / 0x1000) + first) as u64 * 8,
+-                    &row,
+-                )?;
+-            }
+-        }
+-        firmware_space.write_live(compute::SUPPORT, &compute::support())?;
++        // Compute has no device pool: each VM's compute root gets its own
++        // at its first compute command (map_compute_work).
+         opening_client.sync();
+         dev_info!(
+             dev,
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index 540ba543897e..38261fe407ea 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -24,8 +24,6 @@
+ pub(crate) const BUFFER_COUNT: usize = 16;
+ pub(crate) const SCRATCH: u64 = 0x70_030e_0000;
+ pub(crate) const MARKER: u64 = 0x10_00c6_0000;
+-pub(crate) const SUPPORT: u64 = 0xffff_fc20_c05e_8000;
+-pub(crate) const SHARED_STATE: u64 = 0xffff_fc20_001b_0000;
+ pub(crate) const ENTRY_OFFSET: u64 = 0x1a00;
+ 
+ /// Drain/invalidate compute caches before entering the caller's CDM stream.
+@@ -48,11 +46,6 @@
+     })
+ }
+ 
+-/// The opening (device) compute support object, slot 2.
+-pub(crate) fn support() -> [u8; 0x100] {
+-    pool_support(2, SHARED_STATE, BUFFER_COUNT)
+-}
+-
+ /// The support object of a compute FList with `buffers` buffers at the fixed
+ /// pool VAs. `id` is both the pool identity (+0) and the hardware FList slot
+ /// (+8): a pool must never share its slot with another pool in use.
+@@ -137,7 +130,8 @@ pub(crate) fn publication(index: u64, ordinal: u64, work: u64, alias: u64) -> Se
+             register_table: alias + 0x20,
+             queue: QUEUE,
+             stats: STATS,
+-            support: SUPPORT,
++            // The VM's support object, set by the submission.
++            support: 0,
+             notifier: work + 0x1400,
+             threshold: work + 0x1800,
+             driver_stamp: work + 0x1600,

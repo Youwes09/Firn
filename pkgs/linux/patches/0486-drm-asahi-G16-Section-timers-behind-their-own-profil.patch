@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 14:23:19 -0400
+Subject: [PATCH] drm/asahi: G16: Section timers behind their own profile knob
+
+timeline=2 also timed every publish-path section with two serialized
+counter reads, ~140 per Work at ~70 firmware reads per Work. In a
+pump-bound default-mode Dota load that overhead lands on frame time.
+Section timing now needs asahi_m4.profile=1 (runtime: debugfs
+asahi_m4/profile); the ring keeps its per-submission record only.
+publish_profile is always present.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 25 +++++++++++++++++--------
+ drivers/gpu/drm/asahi/g16_timeline.rs | 10 ++++++++--
+ 3 files changed, 29 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 43ace6550d05..2f5aa086b5a9 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -293,6 +293,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "1 restores CPU data-cache maintenance; 0 (default) skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
+         },
++        profile: u32 {
++            default: 0,
++            description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
++        },
+         early_signal: u32 {
+             default: 1,
+             description: "Fence signalling order in the pump: 0 one finished submission per pass after admission (the earlier behaviour); 1 every finished submission before admission; 2 publish first, then every finished submission in one batch. Runtime: debugfs asahi_m4/early_signal",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 5cea4558e26d..10b43c66a104 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -154,6 +154,7 @@ pub(crate) struct Data {
+     _maint: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::MaintKnob>>>,
+     _queue_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _early: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
++    _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+ }
+@@ -221,6 +222,14 @@ pub(crate) fn register<'a>(
+         crate::module_parameters::early_signal.value().min(2),
+         Ordering::Relaxed,
+     );
++    crate::g16_timeline::PROFILE.store(
++        crate::module_parameters::profile.value().min(1),
++        Ordering::Relaxed,
++    );
++    let profile_knob = KBox::pin_init(
++        dir.read_write_file(c_str!("profile"), crate::g16_timeline::FlagKnob::PROFILE),
++        GFP_KERNEL,
++    )?;
+     let early = KBox::pin_init(
+         dir.read_write_file(c_str!("early_signal"), crate::g16_timeline::FlagKnob::EARLY_SIGNAL),
+         GFP_KERNEL,
+@@ -229,19 +238,18 @@ pub(crate) fn register<'a>(
+         dir.read_write_file(c_str!("fw_cache_maint"), crate::g16_timeline::MaintKnob),
+         GFP_KERNEL,
+     )?;
+-    let (timeline, profile) = if crate::module_parameters::timeline.value() != 0 {
++    let timeline = if crate::module_parameters::timeline.value() != 0 {
+         let ring = crate::g16_timeline::Ring::new(
+             crate::module_parameters::timeline_records.value() as usize,
+         )?;
+-        let file = KBox::pin_init(dir.read_binary_file(c_str!("timeline"), ring), GFP_KERNEL)?;
+-        let profile = KBox::pin_init(
+-            dir.read_only_file(c_str!("publish_profile"), crate::g16_timeline::Profile),
+-            GFP_KERNEL,
+-        )?;
+-        (Some(file), Some(profile))
++        Some(KBox::pin_init(dir.read_binary_file(c_str!("timeline"), ring), GFP_KERNEL)?)
+     } else {
+-        (None, None)
++        None
+     };
++    let profile = Some(KBox::pin_init(
++        dir.read_only_file(c_str!("publish_profile"), crate::g16_timeline::Profile),
++        GFP_KERNEL,
++    )?);
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+@@ -256,6 +264,7 @@ pub(crate) fn register<'a>(
+         _maint: maint,
+         _queue_cap: queue_cap,
+         _early: early,
++        _profile_knob: profile_knob,
+         _lane_cap: lane_cap,
+         _debugfs: dir, });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 6a4d7b28e743..2f71e9e504ef 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -162,13 +162,18 @@ const fn new(name: &'static str) -> Self {
+     &P_PUMP,
+ ];
+ 
+-/// Times a section until dropped, when timeline >= 2.
++/// Section timing switch (asahi_m4.profile, runtime: debugfs
++/// `asahi_m4/profile`). Off by default: each timed section costs two
++/// serialized counter reads, which a pump-bound load pays per firmware read.
++pub(crate) static PROFILE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
++/// Times a section until dropped, when profiling is on.
+ pub(crate) struct Timer(Option<(u64, &'static Section)>);
+ 
+ impl Timer {
+     #[inline(always)]
+     pub(crate) fn start(section: &'static Section) -> Self {
+-        if crate::module_parameters::timeline.value() >= 2 {
++        if PROFILE.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+             Timer(Some((crate::g16_drm::ticks(), section)))
+         } else {
+             Timer(None)
+@@ -324,6 +329,7 @@ pub(crate) struct FlagKnob {
+ 
+ impl FlagKnob {
+     pub(crate) const EARLY_SIGNAL: Self = Self { cell: &EARLY_SIGNAL, name: "early_signal" };
++    pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile" };
+ }
+ 
+ impl kernel::debugfs::Writer for FlagKnob {

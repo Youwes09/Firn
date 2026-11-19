@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:10:42 -0400
+Subject: [PATCH] drm/asahi: G16: retire the notifier_flush experiment
+
+Write zero to the notifier-flush Work field, matching its only production value.
+
+K1: no callers found in boot configs, tools, or the retained test scripts. Keep the production default exactly.
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs   | 4 ----
+ drivers/gpu/drm/asahi/g16_render.rs | 2 +-
+ 2 files changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 15090b20ff7e..7bc8f6cc1a1a 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -241,10 +241,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug render-to-render barriers: 1=apply every render's vdm_barrier at fragment, 2=omit fragment waits already ordered by the queue's fragment lane",
+         },
+-        notifier_flush: u32 {
+-            default: 0,
+-            description: "Tiling Work notifier-stamp flush flag (macOS writes 0; this driver previously wrote 1)",
+-        },
+         render_preempt: u32 {
+             default: 1,
+             description: "1 lets firmware suspend and restart TA/3D work (preemptible render queues); 0 gives them compute's non-preemptible profile",
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index 201e6c2be9cd..b766de21fc7b 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -697,7 +697,7 @@ pub(crate) fn tiling_work(&self, a: &Addresses, out: &mut [u8]) -> Option<()> {
+         u64_at(&mut *out, 0x880, a.tiling_firmware_stamp);
+         u32_at(&mut *out, 0x888, a.tiling_stamp as u32);
+         // Flush notifier stamps before storage reuse. macOS writes 0 here.
+-        u32_at(&mut *out, 0x894, crate::module_parameters::notifier_flush.value());
++        u32_at(&mut *out, 0x894, 0);
+         u32_at(&mut *out, 0x88c, a.tiling_event as u32);
+         u32_at(&mut *out, 0x898, a.tiling_uuid as u32);
+         u64_at(&mut *out, 0x8a0, self.layers - 0x1);

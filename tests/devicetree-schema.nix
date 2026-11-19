@@ -21,6 +21,7 @@ let
     "apple,pcie.yaml"
     "apple,dwc3.yaml"
     "apple,mailbox.yaml"
+    "apple,agx.yaml"
     "apple,admac.yaml"
     "apple,cluster-cpufreq.yaml"
     "apple,sio.yaml"

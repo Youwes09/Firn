@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 09:18:02 -0400
+Subject: [PATCH] drm/asahi: G16: Bound dependency items per firmware lane;
+ runtime queue_cap/lane_cap
+
+The firmware stalls when a dependency item sits on a lane more than 128
+Works deep (native replay: max_lane_works 127 clean, 129 stall). #148
+bounded that with max_queue_entries=96, the sum of unretired Works and
+items over all of a queue's lanes. That is stricter than the limit, and
+it throttles large submissions: on Dota (#150 timeline, T1) 89% of
+submissions with 20 or more commands were deferred, their commands
+reaching firmware over 2.6 ms (p50) as earlier Works retired.
+
+Count per lane instead: each flight records the items it queued on each
+of its lanes (a render's move to the fragment lane with
+VDM_BARRIER_FRAGMENT), and max_lane_entries=120 bounds a lane's Works plus
+items. max_lane_works=64 stays. max_queue_entries remains as an opt-in,
+default 0.
+
+Folded in:
+- WIP drm/asahi: G16 bound dependency items per firmware lane
+- WIP drm/asahi: G16 runtime queue_cap/lane_cap knobs, #149 cap defaults
+
+[WIP drm/asahi: G16 runtime queue_cap/lane_cap knobs, #149 cap defaults]
+Keep production's max_queue_entries=96 and make the per-lane bound
+(cherry-picked from 1761082451919) opt-in with max_lane_entries=0.
+debugfs asahi_m4/queue_cap and lane_cap change them at runtime for
+same-session A/B; writes (and boot values) that would leave a lane
+able to exceed the firmware's 128-Work dependency window are refused:
+one of queue cap 1..127 or lane cap 1..127 must hold.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  6 ++-
+ drivers/gpu/drm/asahi/g16_drm.rs      | 16 +++++++
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 41 ++++++++++++++--
+ drivers/gpu/drm/asahi/g16_timeline.rs | 68 +++++++++++++++++++++++++++
+ 4 files changed, 126 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index d57893da2821..bf9b7a4bcfed 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -199,7 +199,11 @@ fn probe<'bound>(
+         },
+         max_queue_entries: u32 {
+             default: 96,
+-            description: "Maximum unretired Works plus their firmware dependency items per queue (all lanes together) before submissions back off; 0: unlimited. Keeps the firmware's per-queue completion window (about 128) from overflowing",
++            description: "Maximum unretired Works plus their firmware dependency items per queue (all lanes together) before submissions back off; 0: unlimited (then max_lane_entries must bound each lane). Runtime: debugfs asahi_m4/queue_cap",
++        },
++        max_lane_entries: u32 {
++            default: 0,
++            description: "Maximum unretired Works plus their firmware dependency items on one firmware lane (render TA or 3D, or compute) before submissions back off; 0: unlimited. Keeps dependency items below the firmware's 128-Work per-lane window. Keep it at 127 or less whenever compute_deps or render_deps leave firmware items",
+         },
+         max_lane_works: u32 {
+             default: 64,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 0d4e5f6f1ec4..735bd4999e01 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -152,6 +152,8 @@ pub(crate) struct Data {
+     timeline: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Ring>>>>,
+     _profile: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Profile>>>>,
+     _maint: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::MaintKnob>>>,
++    _queue_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
++    _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+ }
+ 
+@@ -201,7 +203,19 @@ pub(crate) fn register<'a>(
+         crate::module_parameters::fw_cache_maint.value(),
+         Ordering::Relaxed,
+     );
++    crate::g16_timeline::init_caps(
++        crate::module_parameters::max_queue_entries.value(),
++        crate::module_parameters::max_lane_entries.value(),
++    )?;
+     let dir = kernel::debugfs::Dir::new(c_str!("asahi_m4"));
++    let queue_cap = KBox::pin_init(
++        dir.read_write_file(c_str!("queue_cap"), crate::g16_timeline::CapKnob::QUEUE),
++        GFP_KERNEL,
++    )?;
++    let lane_cap = KBox::pin_init(
++        dir.read_write_file(c_str!("lane_cap"), crate::g16_timeline::CapKnob::LANE),
++        GFP_KERNEL,
++    )?;
+     let maint = KBox::pin_init(
+         dir.read_write_file(c_str!("fw_cache_maint"), crate::g16_timeline::MaintKnob),
+         GFP_KERNEL,
+@@ -231,6 +245,8 @@ pub(crate) fn register<'a>(
+         timeline,
+         _profile: profile,
+         _maint: maint,
++        _queue_cap: queue_cap,
++        _lane_cap: lane_cap,
+         _debugfs: dir, });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     let bound: &'a platform::Device<Bound> = pdev;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 5b7d622bb6c0..7145d77c09fb 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -253,6 +253,23 @@ pub(super) struct Flight {
+     blocked: u32,
+     /// Stamps this Work waits on before it may run, for hang reports.
+     dependencies: [Option<Stamp>; 2],
++    /// Firmware dependency items this flight queued on each of `queues`.
++    lane_items: [u32; 2],
++}
++
++impl Flight {
++    /// Works plus firmware dependency items this flight holds on `lane`
++    /// (identified by its pointers): one Work per lane it uses, plus the items
++    /// queued there (a render's move to its fragment lane with
++    /// VDM_BARRIER_FRAGMENT).
++    fn lane_load(&self, lane: u64) -> usize {
++        self.queues
++            .iter()
++            .zip(self.lane_items)
++            .filter(|((pointers, _), _)| *pointers == lane && lane != 0)
++            .map(|(_, items)| 1 + items as usize)
++            .sum()
++    }
+ }
+ 
+ /// One channel message for all staged commands on this firmware queue.
+@@ -726,7 +743,7 @@ fn reserve_flight(
+         // are outstanding: k24-cap129 (129 Works on a lane) and k69 on #108,
+         // whose compute_deps=2 adds firmware dependency items. Bound the
+         // whole queue's unretired Works plus their dependency items.
+-        let cap = crate::module_parameters::max_queue_entries.value() as usize;
++        let cap = crate::g16_timeline::QUEUE_CAP.load(Ordering::Relaxed) as usize;
+         if cap != 0 {
+             if let Some(lanes) = &queue.lanes {
+                 let ours = |f: &&Flight| {
+@@ -826,6 +843,19 @@ fn reserve_flight(
+                     self.report_pressure(16, "workqueue");
+                     return Err(EBUSY);
+                 }
++                // Dependency items on a lane deeper than its 128-Work window
++                // stall the firmware. Bound each lane's unretired Works plus
++                // the items queued on it (preludes are not Works).
++                let cap = crate::g16_timeline::LANE_CAP.load(Ordering::Relaxed) as usize;
++                if cap != 0 {
++                    let load: usize = self.flights.iter().map(|f| f.lane_load(lane.pointers)).sum();
++                    // A fragment Work may carry the render item it moved there.
++                    let new = if stage == 1 { 2 } else { entries[stage] as usize };
++                    if load + new > cap {
++                        self.report_pressure(32, "lane entries");
++                        return Err(EBUSY);
++                    }
++                }
+                 let next = (lane.head + entries[stage]) % 0x500;
+                 if self.flights.iter().any(|f| {
+                     f.queues
+@@ -2274,7 +2304,7 @@ fn submit_render_pool(
+         pool.increment(self._firmware_space.as_mut().ok_or(EIO)?)?;
+         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
+         self.note_dependency_events(dependencies, own);
+-        let (heads, epochs) = self.publish_render(
++        let (heads, epochs, lane_items) = self.publish_render(
+             &a, &ta, &frag, queue, initbm, pool.blocks, dependencies,
+             params.vdm_barrier_fragment,
+         )?;
+@@ -2337,6 +2367,7 @@ fn submit_render_pool(
+                 scratch,
+                 client: owner.clone(),
+                 queues: [(lanes[0].pointers, heads[0]), (lanes[1].pointers, heads[1])],
++                lane_items,
+                 channels: [
+                     (queue.priority as usize * 3, (epochs[0] + 1) & 255),
+                     (queue.priority as usize * 3 + 1, (epochs[1] + 1) & 255),
+@@ -2368,7 +2399,7 @@ fn publish_render(
+         blocks: u32,
+         dependencies: &[Option<Stamp>; 2],
+         vdm_barrier_fragment: bool,
+-    ) -> Result<([u32; 2], [u32; 2])> {
++    ) -> Result<([u32; 2], [u32; 2], [u32; 2])> {
+         let priority = queue.priority;
+         let lanes = queue.lanes.as_ref().ok_or(EIO)?;
+         let publication = self.render_publication;
+@@ -2500,7 +2531,8 @@ fn publish_render(
+                 publication.wrapping_add(1),
+             )?;
+         }
+-        Ok((heads, epochs))
++        let lane_items = stage_dependencies.map(|d| d.iter().flatten().count() as u32);
++        Ok((heads, epochs, lane_items))
+     }
+ }
+ 
+@@ -2769,6 +2801,7 @@ fn submit_compute_queue(
+                 scratch,
+                 client: owner,
+                 queues: [(pointers, head), (0, 0)],
++                lane_items: [dependencies.iter().flatten().count() as u32, 0],
+                 channels: [(channel, (epoch + 1) & 255), (usize::MAX, 0)],
+                 render: None,
+             },
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index b826118984fe..fea0f14be804 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -242,3 +242,71 @@ fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Resu
+         Ok(())
+     }
+ }
++
++/// Runtime copies of `max_queue_entries` and `max_lane_entries`, writable from
++/// debugfs `asahi_m4/queue_cap` and `asahi_m4/lane_cap` for same-session A/B.
++/// Every lane must stay below the firmware's 128-Work window for dependency
++/// items (k24: 127 clean, 129 stalled), so writes keep one bound in force: the queue cap at most 127
++/// (it bounds every lane), or a lane cap of at most 127.
++pub(crate) static QUEUE_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(96);
++pub(crate) static LANE_CAP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
++fn caps_safe(queue: u32, lane: u32) -> bool {
++    (1..=127).contains(&queue) || (1..=127).contains(&lane)
++}
++
++/// The debugfs view of one cap.
++pub(crate) struct CapKnob {
++    lane: bool,
++}
++
++impl CapKnob {
++    pub(crate) const QUEUE: Self = Self { lane: false };
++    pub(crate) const LANE: Self = Self { lane: true };
++}
++
++impl kernel::debugfs::Writer for CapKnob {
++    fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        let cap = if self.lane { &LANE_CAP } else { &QUEUE_CAP };
++        writeln!(f, "{}", cap.load(core::sync::atomic::Ordering::Relaxed))
++    }
++}
++
++impl kernel::debugfs::Reader for CapKnob {
++    fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Result {
++        use core::sync::atomic::Ordering::Relaxed;
++        let mut buf = [0u8; 8];
++        let n = reader.len();
++        if n == 0 || n > buf.len() {
++            return Err(EINVAL);
++        }
++        reader.read_slice(&mut buf[..n])?;
++        let value: u32 = core::str::from_utf8(&buf[..n])
++            .map_err(|_| EINVAL)?
++            .trim()
++            .parse()
++            .map_err(|_| EINVAL)?;
++        let (queue, lane) = if self.lane {
++            (QUEUE_CAP.load(Relaxed), value)
++        } else {
++            (value, LANE_CAP.load(Relaxed))
++        };
++        if !caps_safe(queue, lane) || lane > 127 {
++            return Err(EINVAL);
++        }
++        (if self.lane { &LANE_CAP } else { &QUEUE_CAP }).store(value, Relaxed);
++        pr_info!("G16: queue_cap={} lane_cap={}\n", queue, lane);
++        Ok(())
++    }
++}
++
++/// Validates the boot parameters with the same rule as the knobs.
++pub(crate) fn init_caps(queue: u32, lane: u32) -> Result {
++    if !caps_safe(queue, lane) || lane > 127 {
++        pr_err!("G16: max_queue_entries={} max_lane_entries={} leave a lane unbounded\n", queue, lane);
++        return Err(EINVAL);
++    }
++    QUEUE_CAP.store(queue, core::sync::atomic::Ordering::Relaxed);
++    LANE_CAP.store(lane, core::sync::atomic::Ordering::Relaxed);
++    Ok(())
++}

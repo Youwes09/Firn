@@ -1,0 +1,468 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 25 Oct 2026 00:18:42 -0400
+Subject: [PATCH] drm/asahi: G16: remove the firmware-memory cache maintenance
+ path
+
+fw_cache_maint=0 has been the default since #149: G16 firmware and client
+memory is coherent, as writeback user BOs are, and only barriers are
+needed. The =1 path (dc civac/cvac on firmware writes, reads and page
+initialization) and the per-page dirty tracking that fed it did nothing at
+the default. Remove the parameter, its debugfs file, clean_page and the
+region dirty lists. Page-table, TTB and handoff cleans stay, as before.
+Production behaviour is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |   4 -
+ drivers/gpu/drm/asahi/g16_drm.rs      |  10 --
+ drivers/gpu/drm/asahi/g16_timeline.rs |  38 +------
+ drivers/gpu/drm/asahi/g16_vm.rs       | 142 +++-----------------------
+ 4 files changed, 13 insertions(+), 181 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 0ee536f833ff..e3c845a080a1 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -180,10 +180,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
+         },
+-        fw_cache_maint: u32 {
+-            default: 0,
+-            description: "0 (default) skips CPU data-cache maintenance; 1 keeps it (#149 behaviour). 0 skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
+-        },
+         profile: u32 {
+             default: 0,
+             description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 21395406c3fb..a3fca9ba51f0 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -203,7 +203,6 @@ pub(crate) struct Data {
+     /// directory).
+     timeline: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Ring>>>>,
+     _profile: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Profile>>>,
+-    _maint: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::MaintKnob>>>,
+     _queue_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _flags: KVec<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>>,
+     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
+@@ -255,10 +254,6 @@ pub(crate) fn register<'a>(
+         pdev.dma_set_mask_and_coherent(DmaMask::try_new(42)?)?;
+     }
+     let runtime = crate::g16::Bootstrap::new(pdev)?;
+-    crate::g16_timeline::FW_CACHE_MAINT.store(
+-        crate::module_parameters::fw_cache_maint.value(),
+-        Ordering::Relaxed,
+-    );
+     crate::g16_timeline::init_caps(
+         crate::module_parameters::max_queue_entries.value(),
+         crate::module_parameters::max_lane_entries.value(),
+@@ -288,10 +283,6 @@ pub(crate) fn register<'a>(
+         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
+         GFP_KERNEL,
+     )?;
+-    let maint = KBox::pin_init(
+-        dir.read_write_file(c_str!("fw_cache_maint"), crate::g16_timeline::MaintKnob),
+-        GFP_KERNEL,
+-    )?;
+     let timeline = if crate::module_parameters::timeline.value() != 0 {
+         let ring = crate::g16_timeline::Ring::new(
+             crate::module_parameters::timeline_records.value() as usize,
+@@ -332,7 +323,6 @@ pub(crate) fn register<'a>(
+         }),
+         timeline,
+         _profile: profile,
+-        _maint: maint,
+         _queue_cap: queue_cap,
+         _flags: flags,
+         _dep_stats: dep_stats,
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index d4f0673679e7..9980eb667a23 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -232,17 +232,6 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+     }
+ }
+ 
+-/// Runtime copy of `fw_cache_maint`, writable from debugfs
+-/// `asahi_m4/fw_cache_maint` for same-boot A/B. Maintenance uses clean+invalidate
+-/// (`dc civac`), so switching it back on never discards lines written while it
+-/// was off.
+-pub(crate) static FW_CACHE_MAINT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+-
+-#[inline(always)]
+-pub(crate) fn fw_cache_maint() -> bool {
+-    FW_CACHE_MAINT.load(core::sync::atomic::Ordering::Relaxed) != 0
+-}
+-
+ /// Shared bounded text read; individual knobs retain their accepted syntax.
+ fn knob_text<'a>(reader: &mut kernel::uaccess::UserSliceReader, buf: &'a mut [u8; 8]) -> Result<&'a str> {
+     let n = reader.len();
+@@ -257,31 +246,6 @@ fn knob_u32(reader: &mut kernel::uaccess::UserSliceReader) -> Result<u32> {
+     knob_text(reader, &mut [0; 8])?.parse().map_err(|_| EINVAL)
+ }
+ 
+-/// The debugfs view of `FW_CACHE_MAINT` (accepts 0 or 1).
+-pub(crate) struct MaintKnob;
+-
+-impl kernel::debugfs::Writer for MaintKnob {
+-    fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+-        writeln!(f, "{}", FW_CACHE_MAINT.load(core::sync::atomic::Ordering::Relaxed))
+-    }
+-}
+-
+-impl kernel::debugfs::Reader for MaintKnob {
+-    fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Result {
+-        let mut buf = [0; 8];
+-        let value = match knob_text(reader, &mut buf)? {
+-            "0" => 0,
+-            "1" => 1,
+-            _ => return Err(EINVAL),
+-        };
+-        // Order earlier maintained writes before later unmaintained ones.
+-        crate::mem::sync();
+-        FW_CACHE_MAINT.store(value, core::sync::atomic::Ordering::Relaxed);
+-        pr_info!("G16: fw_cache_maint={}\n", value);
+-        Ok(())
+-    }
+-}
+-
+ /// Runtime copies of `max_queue_entries` and `max_lane_entries`, writable from
+ /// debugfs `asahi_m4/queue_cap` and `asahi_m4/lane_cap` for same-session A/B.
+ /// Every lane must stay below the firmware's 128-Work window for dependency
+@@ -504,7 +468,7 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ /// File offset = firmware VA - `FW_MEM_BASE`; offsets and lengths are whole
+ /// 32-bit words, and a read stops at the first unmapped page (ENXIO if that
+ /// is the first). Reads take no driver lock and do no cache maintenance
+-/// (firmware memory is coherent; see `fw_cache_maint`).
++/// (firmware memory is coherent).
+ pub(crate) const FW_MEM_BASE: u64 = 0xffff_fc00_0000_0000;
+ 
+ pub(crate) struct FwMem {
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index f604f9c48691..7b05ad575dd9 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -7,7 +7,6 @@
+ 
+ use crate::g16_alloc::Arena;
+ use crate::pgtable::{prot, UatPageTable, UAT_PGSZ};
+-use core::cell::{Cell, RefCell};
+ use kernel::rbtree::{RBTree, RBTreeNode};
+ use kernel::{device, page::Page, prelude::*};
+ 
+@@ -110,9 +109,6 @@ pub(crate) fn alloc_low(
+         }
+         for v in (va..end).step_by(UAT_PGSZ) {
+             let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+-            // These raw pages do not receive the GEM/DMA mapping's initial
+-            // publication. Clean CPU initialization before exposing them.
+-            clean_page(&page);
+             let phys = page.phys();
+             self.pages.try_create_and_insert(v, page, GFP_KERNEL)?;
+             self.low
+@@ -142,7 +138,6 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+                     return Err(EEXIST);
+                 }
+                 let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+-                clean_page(&page);
+                 self.pages.try_create_and_insert(va, page, GFP_KERNEL)?;
+             }
+             let physical = self.pages.get(&va).ok_or(EIO)?.phys();
+@@ -157,7 +152,6 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+                 let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, UAT_PGSZ) };
+                 render::private_page(&pool, offset, bytes).ok_or(EINVAL)
+             })?;
+-            clean_page(page);
+         }
+         for (alias, offset, size) in render::private_aliases(&pool) {
+             for page in (0..size).step_by(UAT_PGSZ) {
+@@ -278,7 +272,6 @@ fn lease_scratch(&mut self, render: bool, size: usize, metadata: usize) -> Resul
+                     // SAFETY: The lease owns this full page exclusively.
+                     unsafe { core::ptr::write_bytes(ptr, 0, UAT_PGSZ) };
+                 });
+-                clean_page(page);
+             }
+             start..end
+         } else {
+@@ -351,7 +344,6 @@ pub(crate) fn alloc_tvb_blocks(&mut self, count: usize, gfp: kernel::alloc::Flag
+                     Ok(page) => page,
+                     Err(_) => return Ok(None),
+                 };
+-                clean_page(&page);
+                 let node = match RBTreeNode::new(va, page, gfp) {
+                     Ok(node) => node,
+                     Err(_) => return Ok(None),
+@@ -392,7 +384,6 @@ pub(crate) fn write_low(&mut self, mut va: u64, mut bytes: &[u8]) -> Result {
+                 }
+                 Ok(())
+             })?;
+-            clean_page(page);
+             va = va.checked_add(size as u64).ok_or(EINVAL)?;
+             bytes = &bytes[size..];
+         }
+@@ -505,10 +496,6 @@ pub(crate) fn check_geometry(&mut self, dev: &device::Device) -> Result {
+ struct FirmwareRegion {
+     va: u64,
+     pages: KVec<Owned<Page>>,
+-    // One flag per owned page. Live writes publish themselves; only allocation
+-    // and unpublished initialization need work at the next space-wide sync.
+-    dirty_pages: KVec<Cell<bool>>,
+-    pending: Cell<bool>,
+ }
+ 
+ /// The firmware uses this bootloader root independently of all client slots.
+@@ -516,7 +503,6 @@ struct FirmwareRegion {
+ pub(crate) struct FirmwareSpace {
+     table: UatPageTable,
+     regions: RBTree<u64, FirmwareRegion>,
+-    dirty_regions: RefCell<KVec<u64>>,
+     external: KVec<core::ops::Range<u64>>,
+ }
+ 
+@@ -535,7 +521,6 @@ pub(crate) fn attach(dev: &device::Device) -> Result<Self> {
+         Ok(Self {
+             table,
+             regions: RBTree::new(),
+-            dirty_regions: RefCell::new(KVec::new()),
+             external: KVec::new(),
+         })
+     }
+@@ -608,20 +593,7 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+         for _ in 0..size / UAT_PGSZ {
+             pages.push(Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?, GFP_KERNEL)?;
+         }
+-        let mut dirty_pages = KVec::new();
+-        dirty_pages.extend_with(pages.len(), Cell::new(true), GFP_KERNEL)?;
+-        let node = RBTreeNode::new(
+-            va,
+-            FirmwareRegion {
+-                va,
+-                pages,
+-                dirty_pages,
+-                pending: Cell::new(true),
+-            },
+-            GFP_KERNEL,
+-        )?;
+-        // Reserve dirty tracking before the allocation is owned or mapped.
+-        self.dirty_regions.get_mut().push(va, GFP_KERNEL)?;
++        let node = RBTreeNode::new(va, FirmwareRegion { va, pages }, GFP_KERNEL)?;
+         self.regions.insert(node);
+         let region = self.regions.get(&va).ok_or(EIO)?;
+         for (i, page) in region.pages.iter().enumerate() {
+@@ -634,7 +606,6 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+                     self.table.unmap_pages(va..v)?;
+                 }
+                 self.table.publish();
+-                self.dirty_regions.get_mut().pop();
+                 self.regions.remove(&va);
+                 return Err(e);
+             }
+@@ -644,15 +615,11 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+ 
+     pub(crate) fn write(&mut self, va: u64, bytes: &[u8]) -> Result {
+         let region = self.region(va, bytes.len())?;
+-        if !bytes.is_empty() {
+-            self.queue_region(region)?;
+-        }
+         let mut offset = (va - region.va) as usize;
+         let mut remaining = bytes;
+         while !remaining.is_empty() {
+             let within = offset & (UAT_PGSZ - 1);
+             let size = remaining.len().min(UAT_PGSZ - within);
+-            region.dirty_pages[offset / UAT_PGSZ].set(true);
+             region.pages[offset / UAT_PGSZ].with_pointer_into_page(within, size, |p| {
+                 // SAFETY: These owned bytes are not yet published to firmware.
+                 unsafe {
+@@ -676,8 +643,6 @@ pub(crate) fn init_page(
+             return Err(EINVAL);
+         }
+         let region = self.region(va, UAT_PGSZ)?;
+-        self.queue_region(region)?;
+-        region.dirty_pages[((va - region.va) as usize) / UAT_PGSZ].set(true);
+         region.pages[((va - region.va) as usize) / UAT_PGSZ].with_pointer_into_page(
+             0,
+             UAT_PGSZ,
+@@ -723,8 +688,7 @@ pub(crate) fn alloc_render_support(&mut self) -> Result {
+         Ok(())
+     }
+ 
+-    /// Update host-owned bytes, preserving adjacent firmware-owned cache lines.
+-    /// Cache maintenance completes once per range, not once per page.
++    /// Update host-owned bytes in memory firmware may be reading.
+     pub(crate) fn write_live(&mut self, va: u64, bytes: &[u8]) -> Result {
+         self.update_live(va, bytes.len(), |ptr, offset, size| {
+             // SAFETY: update_live supplies an exclusively host-owned destination
+@@ -775,8 +739,9 @@ fn holds(region: &FirmwareRegion, va: u64, size: usize) -> bool {
+                 .is_some_and(|end| end <= region.va + (region.pages.len() * UAT_PGSZ) as u64)
+     }
+ 
+-    /// Update host-owned bytes, preserving adjacent firmware-owned cache lines.
+-    /// Cache maintenance completes once per batch, not once per page or write.
++    /// Update host-owned bytes in memory firmware may be reading, between one
++    /// barrier pair. G16 firmware memory is coherent, as writeback user BOs
++    /// are, so no CPU cache maintenance is needed.
+     /// `range(n)` is the destination of write `n` of `count`.
+     fn update_batch(
+         &mut self,
+@@ -785,7 +750,6 @@ fn update_batch(
+         mut update: impl FnMut(usize, *mut u8, usize, usize),
+     ) -> Result {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_LIVE);
+-        let maint = crate::g16_timeline::fw_cache_maint();
+         // Validate every destination before touching any of them, resolving
+         // each distinct region once: a render's writes alternate between a
+         // few regions (notifier, Work slot, lane rings).
+@@ -816,32 +780,6 @@ fn update_batch(
+                 None => self.region(va, size),
+             }
+         };
+-        if maint {
+-            for n in 0..count {
+-                let (va, size) = range(n);
+-                if size == 0 {
+-                    continue;
+-                }
+-                let region = resolve(n, va, size)?;
+-                let start = (va - region.va) as usize;
+-                let end = start + size;
+-                for index in start / UAT_PGSZ..=(end - 1) / UAT_PGSZ {
+-                    // Unpublished initialization is still authoritative in CPU cache.
+-                    if region.dirty_pages[index].get() {
+-                        continue;
+-                    }
+-                    let base = index * UAT_PGSZ;
+-                    let within = start.saturating_sub(base);
+-                    let limit = (end - base).min(UAT_PGSZ);
+-                    region.pages[index].with_page_mapped(|p| {
+-                        for off in (within & !63..limit).step_by(64) {
+-                            // SAFETY: These cache lines lie within the mapped page.
+-                            unsafe { core::arch::asm!("dc civac, {addr}", addr = in(reg) p.add(off)) };
+-                        }
+-                    });
+-                }
+-            }
+-        }
+         crate::mem::sync();
+         for which in 0..count {
+             let (va, size) = range(which);
+@@ -855,25 +793,10 @@ fn update_batch(
+                 let base = index * UAT_PGSZ;
+                 let within = start.saturating_sub(base);
+                 let limit = (end - base).min(UAT_PGSZ);
+-                let dirty = region.dirty_pages[index].replace(false);
+                 region.pages[index].with_page_mapped(|p| {
+-                    // SAFETY: The checked range lies in this mapped page. The
+-                    // caller owns these bytes; neighboring firmware bytes were
+-                    // invalidated before the batch's completion barrier above.
++                    // SAFETY: The checked range lies in this mapped page, and
++                    // the caller owns these bytes.
+                     unsafe { update(which, p.add(within), base + within - start, limit - within) };
+-                    // Publish all initialization on a dirty page, including zeros
+-                    // outside this write. Published pages need only touched lines.
+-                    let lines = if !maint {
+-                        0..0
+-                    } else if dirty {
+-                        0..UAT_PGSZ
+-                    } else {
+-                        (within & !63)..limit
+-                    };
+-                    for off in lines.step_by(64) {
+-                        // SAFETY: The cache line lies in this mapped page.
+-                        unsafe { core::arch::asm!("dc cvac, {addr}", addr = in(reg) p.add(off)) };
+-                    }
+                 });
+             }
+         }
+@@ -881,8 +804,8 @@ fn update_batch(
+         Ok(())
+     }
+ 
+-    /// Read one firmware-owned status word after invalidating the CPU view.
+-    /// Host writes to this cache line must have been synced before publication.
++    /// Read one firmware-owned 64-bit status value as two 32-bit reads.
++    /// Host writes to these words must have been published first.
+     pub(crate) fn read_u64(&self, va: u64) -> Result<u64> {
+         Ok(u64::from(self.read_u32(va)?) | (u64::from(self.read_u32(va + 4)?) << 32))
+     }
+@@ -903,9 +826,6 @@ pub(crate) fn release_region(&mut self, va: u64) -> Result {
+         let size = self.regions.get(&va).ok_or(EINVAL)?.pages.len() * UAT_PGSZ;
+         self.table.unmap_pages(va..va + size as u64)?;
+         self.table.publish();
+-        self.dirty_regions
+-            .get_mut()
+-            .retain(|pending| *pending != va);
+         self.regions.remove(&va);
+         Ok(())
+     }
+@@ -918,12 +838,10 @@ pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
+         let region = self.region(va, 4)?;
+         let offset = (va - region.va) as usize;
+         region.pages[offset / UAT_PGSZ].with_pointer_into_page(offset & (UAT_PGSZ - 1), 4, |p| {
+-            // SAFETY: The aligned word lies in this owned mapped page.
+-            // Firmware owns it and all CPU writes have reached PoC.
++            // SAFETY: The aligned word lies in this live owned page, mapped
++            // coherently with firmware; the barrier orders the volatile read
++            // after the caller's publication, and nothing here cleans caches.
+             unsafe {
+-                if crate::g16_timeline::fw_cache_maint() {
+-                    core::arch::asm!("dc civac, {addr}", addr = in(reg) p);
+-                }
+                 core::arch::asm!("dsb sy");
+                 Ok(u32::from_le(p.cast::<u32>().read_volatile()))
+             }
+@@ -932,15 +850,6 @@ pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
+ 
+     pub(crate) fn sync(&self) {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_FW_SYNC);
+-        for va in self.dirty_regions.borrow_mut().drain_all() {
+-            let region = self.regions.get(&va).unwrap();
+-            region.pending.set(false);
+-            for (page, dirty) in region.pages.iter().zip(&region.dirty_pages) {
+-                if dirty.replace(false) {
+-                    clean_page(page);
+-                }
+-            }
+-        }
+         self.table.publish();
+     }
+ 
+@@ -959,17 +868,6 @@ fn region(&self, va: u64, size: usize) -> Result<&FirmwareRegion> {
+         }
+         Ok(region)
+     }
+-
+-    fn queue_region(&self, region: &FirmwareRegion) -> Result {
+-        if !region.pending.get() {
+-            // Failure leaves both the bytes and queue membership unchanged.
+-            self.dirty_regions
+-                .borrow_mut()
+-                .push(region.va, GFP_KERNEL)?;
+-            region.pending.set(true);
+-        }
+-        Ok(())
+-    }
+ }
+ 
+ impl Drop for FirmwareSpace {
+@@ -987,19 +885,3 @@ fn drop(&mut self) {
+         self.table.publish();
+     }
+ }
+-
+-fn clean_page(page: &Page) {
+-    // fw_cache_maint=0: rely on G16 coherency for shared memory, as for
+-    // writeback user BOs; callers keep their barriers.
+-    if !(crate::g16_timeline::fw_cache_maint()) {
+-        return;
+-    }
+-    page.with_page_mapped(|p| {
+-        for off in (0..UAT_PGSZ).step_by(64) {
+-            // SAFETY: The cache line lies inside this owned page.
+-            unsafe {
+-                core::arch::asm!("dc cvac, {addr}", addr = in(reg) p.add(off));
+-            }
+-        }
+-    });
+-}

@@ -1,0 +1,170 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:12:03 -0400
+Subject: [PATCH] drm/asahi: G16: share firmware byte writers
+
+K10: use one put32/put64 implementation for platform, power, queue, render, compute and firmware builders. Keep the checked slice operations and byte order identical; local aliases avoid unrelated call-site churn.
+---
+ drivers/gpu/drm/asahi/g16_compute.rs  | 8 ++------
+ drivers/gpu/drm/asahi/g16_fw.rs       | 5 ++---
+ drivers/gpu/drm/asahi/g16_platform.rs | 8 ++------
+ drivers/gpu/drm/asahi/g16_power.rs    | 4 +++-
+ drivers/gpu/drm/asahi/g16_queue.rs    | 8 ++------
+ drivers/gpu/drm/asahi/g16_render.rs   | 8 ++------
+ drivers/gpu/drm/asahi/m4_util.rs      | 9 +++++++++
+ 7 files changed, 22 insertions(+), 28 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index 3aa4c2581b23..393079c42002 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -5,6 +5,8 @@
+ //! T8132 compute work and microsequence encoding. All links are supplied by
+ //! the owner of the work allocation, independently of Rust structure layout.
+ 
++use crate::util::{put32 as u32_at, put64 as u64_at};
++
+ pub(crate) const QUEUE: u64 = 0xffff_fc20_c500_0000;
+ pub(crate) const STATS: u64 = QUEUE + 0x8000;
+ pub(crate) const SHARED: u64 = 0xffff_fc20_0200_0000;
+@@ -58,12 +60,6 @@
+     out
+ }
+ 
+-fn u32_at(out: &mut [u8], off: usize, value: u32) {
+-    out[off..off + 4].copy_from_slice(&value.to_le_bytes());
+-}
+-fn u64_at(out: &mut [u8], off: usize, value: u64) {
+-    out[off..off + 8].copy_from_slice(&value.to_le_bytes());
+-}
+ 
+ #[derive(Clone, Copy)]
+ pub(crate) struct Parameters {
+diff --git a/drivers/gpu/drm/asahi/g16_fw.rs b/drivers/gpu/drm/asahi/g16_fw.rs
+index 247e04f11935..253bcdcf0306 100644
+--- a/drivers/gpu/drm/asahi/g16_fw.rs
++++ b/drivers/gpu/drm/asahi/g16_fw.rs
+@@ -5,6 +5,8 @@
+ //! G16 firmware initialization descriptors, serialized independently of Rust
+ //! structure alignment. Fields follow the source-built m1n1 G16 model.
+ 
++use crate::util::{put64};
++
+ #[path = "g16_queue.rs"]
+ pub(crate) mod queue;
+ 
+@@ -76,9 +78,6 @@ pub(crate) fn operand_page(index: usize) -> u64 {
+     0x70_0042_0000 + (index / 512) as u64 * 0x208000 + (index % 512) as u64 * 0x1000
+ }
+ 
+-fn put64(out: &mut [u8], offset: usize, value: u64) {
+-    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+-}
+ 
+ /// Three independent cursor addresses followed by the ring address.
+ pub(crate) struct Channel {
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 7e1c04fb1252..442316c84a0a 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -4,6 +4,8 @@
+ //! Live platform inputs and initialization builders from g16g_platform.py and
+ //! g16g_initdata.py. Firmware data is built from explicit bootloader properties.
+ 
++use crate::util::{put32, put64};
++
+ use kernel::{c_str, device, of, prelude::*};
+ 
+ const PAGE: u64 = 0x4000;
+@@ -12,13 +14,7 @@
+ const MCC_BASE: u64 = 0x2201c4000;
+ const MCC_SIZE: u32 = 0x18000;
+ 
+-pub(crate) fn put32(out: &mut [u8], offset: usize, value: u32) {
+-    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+-}
+ 
+-pub(crate) fn put64(out: &mut [u8], offset: usize, value: u64) {
+-    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+-}
+ 
+ pub(crate) fn zeroed(size: usize) -> Result<KVec<u8>> {
+     let mut out = KVec::new();
+diff --git a/drivers/gpu/drm/asahi/g16_power.rs b/drivers/gpu/drm/asahi/g16_power.rs
+index ff38426e7452..672d36d5b746 100644
+--- a/drivers/gpu/drm/asahi/g16_power.rs
++++ b/drivers/gpu/drm/asahi/g16_power.rs
+@@ -7,8 +7,10 @@
+ use crate::{
+     f32,
+     float::F32,
+-    g16_platform::{adt_word, put32, put64, zeroed, Platform},
++    g16_platform::{adt_word, zeroed, Platform},
+ };
++use crate::util::{put32, put64};
++
+ use kernel::{c_str, prelude::*};
+ 
+ fn putf(out: &mut [u8], offset: usize, value: F32) -> Result {
+diff --git a/drivers/gpu/drm/asahi/g16_queue.rs b/drivers/gpu/drm/asahi/g16_queue.rs
+index e0524531873c..849a747e0d97 100644
+--- a/drivers/gpu/drm/asahi/g16_queue.rs
++++ b/drivers/gpu/drm/asahi/g16_queue.rs
+@@ -4,12 +4,8 @@
+ 
+ //! G16 queue transport fields, independent of allocation addresses.
+ 
+-fn u32_at(out: &mut [u8], offset: usize, value: u32) {
+-    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+-}
+-fn u64_at(out: &mut [u8], offset: usize, value: u64) {
+-    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+-}
++use crate::util::{put32 as u32_at, put64 as u64_at};
++
+ 
+ pub(crate) struct Queue {
+     pub(crate) pointers: u64,
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index b766de21fc7b..7d89add2b84b 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -6,6 +6,8 @@
+ //! Ported from the open m1n1 G16/G17 register model. Addresses and lifecycle
+ //! values are supplied by the runtime; geometry is derived from each render.
+ 
++use crate::util::{put32 as u32_at, put64 as u64_at};
++
+ #[derive(Clone, Copy, Default)]
+ pub(crate) struct Parameters {
+     pub(crate) vdm_barrier_fragment: bool,
+@@ -383,12 +385,6 @@ fn geometry(&self) -> Geometry {
+     Some(out)
+ }
+ 
+-fn u32_at(out: &mut [u8], offset: usize, value: u32) {
+-    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+-}
+-fn u64_at(out: &mut [u8], offset: usize, value: u64) {
+-    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+-}
+ 
+ #[derive(Clone, Copy, Default)]
+ pub(crate) struct Addresses {
+diff --git a/drivers/gpu/drm/asahi/m4_util.rs b/drivers/gpu/drm/asahi/m4_util.rs
+index 708a3f5f124e..8851eaf385bd 100644
+--- a/drivers/gpu/drm/asahi/m4_util.rs
++++ b/drivers/gpu/drm/asahi/m4_util.rs
+@@ -65,3 +65,12 @@ pub(crate) fn is_empty(&self) -> bool {
+         self.offset >= self.buffer.len()
+     }
+ }
++
++/// Write a firmware ABI word in little-endian byte order.
++pub(crate) fn put32(out: &mut [u8], offset: usize, value: u32) {
++    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
++}
++
++pub(crate) fn put64(out: &mut [u8], offset: usize, value: u64) {
++    out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
++}

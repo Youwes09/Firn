@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 19:35:53 -0400
+Subject: [PATCH] drm/asahi: Queue G16 execution work on system_dfl_wq
+
+system_unbound_wq is deprecated in v7.3, which warns once on the first
+G16 submission. Use its replacement, the default unbound queue; the
+execution work keeps the same unbound behaviour.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index a2cbee5070b2..602300c47470 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -1355,7 +1355,7 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+         }
+         if !engine.running {
+             engine.running = true;
+-            let _ = workqueue::system_unbound().enqueue(execution.clone());
++            let _ = workqueue::system_dfl().enqueue(execution.clone());
+         }
+         // A running worker may be asleep waiting for firmware on another
+         // queue. New ready work must wake it even if no GPU event arrives.

@@ -1,0 +1,567 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 17:06:24 -0500
+Subject: [PATCH] drm/asahi: G16: give each VM its own compute scratch pool
+
+The compute FList (16 operand buffers of 2 MiB plus its 96 KiB ring
+directory) was one device-wide pool: the opening client's pages, mapped
+read-write at fixed VAs into every VM's compute root, with one support
+object and hardware FList slot 2. Shader private memory does not go
+through a separate permission check: any client could load and store
+those pages through a forged pointer. From a separate Vulkan process,
+99-100% of the words of another process's compute buffers were its
+scratch markers, during its dispatches and after it exited. The pages
+keep the last user's data, and the directory is writable as well, so a
+client could also corrupt other clients' live scratch or redirect their
+private memory and fault the GPU. This is the LeftoverLocals class of
+leak (CVE-2023-4969). Metal gives each process its own pool.
+
+Give each VM's compute root a private pool at the same VAs, allocated
+at that VM's first compute command and charged to the submitting
+client's memory cgroup (GFP_KERNEL_ACCOUNT, as the render pool). The
+pages are owned by the compute root, so fdinfo reports them, and are
+freed with the root once its last Work retires. Each pool gets its own
+support object, shared state page and hardware slot from the render
+support leases (slots 3..59), so no two pools in use share a slot; the
+compute root retains the lease, and pending or quarantined Works retain
+the root. The support's shared state now counts the Works submitted
+against that support, as for render, instead of the device-wide compute
+publication count. VMs that never run compute pay nothing; one that
+does pays 32.1 MiB.
+
+ENOMEM and ENOSPC (no free support lease) while setting up the pool no
+longer quarantine the VM: pages already allocated are kept and a retry
+resumes.
+
+Two research knobs, read at each VM's first compute (module parameters,
+and debugfs asahi_m4/<name> at runtime):
+- compute_pool_buffers: buffers per private pool, 1..=16 (default 16,
+  the size of the former device-wide pool).
+- compute_shares_render_pool (experimental, default 0): run compute on
+  the VM's render pool and support instead, mapping its directory,
+  descriptor table and buffers into the compute root at the same VAs
+  (allocating them first if the VM has not rendered). This costs no
+  memory or lease, but one FList slot then serves the TA, 3D and CDM
+  engines of the VM at once.
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs             |  8 ++
+ drivers/gpu/drm/asahi/g16_compute.rs          | 38 ++++++--
+ drivers/gpu/drm/asahi/g16_drm.rs              | 12 +++
+ drivers/gpu/drm/asahi/g16_drm_ioctl.rs        |  1 +
+ drivers/gpu/drm/asahi/g16_drm_submit.rs       | 40 ++++++--
+ drivers/gpu/drm/asahi/g16_runtime_compute.rs  | 40 ++++----
+ drivers/gpu/drm/asahi/g16_runtime_contexts.rs | 49 +++++++---
+ drivers/gpu/drm/asahi/g16_timeline.rs         | 19 ++++
+ drivers/gpu/drm/asahi/g16_vm.rs               | 93 +++++++++++++++++++
+ 9 files changed, 250 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index b686a9d26624..eae6f1f908bb 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -175,6 +175,14 @@ fn probe<'bound>(
+             default: 24,
+             description: "Research: 2 MiB shader private-memory (operand) buffers in each VM's render pool, 1..=24 (default 24; native mesh VMs always use 24). Each is resident for the VM's lifetime. Smaller pools starve large shader scratch frames: 8 made 32 KiB frames 3.7x slower with a 2 s stall, 4 hung the GPU. Runtime: debugfs asahi_m4/render_operand_buffers, read at each VM's first render",
+         },
++        compute_pool_buffers: u32 {
++            default: 16,
++            description: "Research: 2 MiB shader private-memory buffers in each VM's private compute pool, 1..=16 (default 16, the size of the former device-wide pool). Allocated at the VM's first compute command and charged to that client; VMs that never run compute pay nothing. Runtime: debugfs asahi_m4/compute_pool_buffers, read at each VM's first compute",
++        },
++        compute_shares_render_pool: u32 {
++            default: 0,
++            description: "Experimental: 1 makes each VM's compute Works use that VM's render pool and support object (allocating them at the first compute if the VM has not rendered) instead of a private compute pool; one FList slot then serves both engines. 0 (default): a private compute pool per VM. Runtime: debugfs asahi_m4/compute_shares_render_pool, read at each VM's first compute",
++        },
+         native_mesh: u32 {
+             default: 0,
+             description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16/T32 one-parent profile, 2=unqualified multiple-parent profile, 3=research admission of wider mesh state (not qualified); no capability advertisement. Runtime: debugfs asahi_m4/native_mesh (a VM keeps the support mode of its first render)",
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index 393079c42002..540ba543897e 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -11,13 +11,16 @@
+ pub(crate) const STATS: u64 = QUEUE + 0x8000;
+ pub(crate) const SHARED: u64 = 0xffff_fc20_0200_0000;
+ 
+-// Device-owned opening namespace. Client roots share only the FList directory
+-// and spill pool; each command receives distinct scratch/marker VAs instead.
++// Each VM's compute FList, in its compute root: the ring directory of free
++// 4 KiB pages and the 2 MiB buffers holding them, at fixed VAs outside the
++// client's GEM range. Each command receives distinct scratch/marker VAs in
++// the VM's kernel carveout instead.
+ pub(crate) const DIRECTORY: u64 = 0x70_02cc_0000;
+ pub(crate) const DIRECTORY_SIZE: usize = 0x18000;
+ pub(crate) const BUFFER_BASE: u64 = 0x70_0310_8000;
+ pub(crate) const BUFFER_STRIDE: u64 = 0x208000;
+ pub(crate) const BUFFER_SIZE: usize = 0x200000;
++/// Buffers the VA layout has room for, and the default pool size.
+ pub(crate) const BUFFER_COUNT: usize = 16;
+ pub(crate) const SCRATCH: u64 = 0x70_030e_0000;
+ pub(crate) const MARKER: u64 = 0x10_00c6_0000;
+@@ -45,21 +48,44 @@
+     })
+ }
+ 
++/// The opening (device) compute support object, slot 2.
+ pub(crate) fn support() -> [u8; 0x100] {
++    pool_support(2, SHARED_STATE, BUFFER_COUNT)
++}
++
++/// The support object of a compute FList with `buffers` buffers at the fixed
++/// pool VAs. `id` is both the pool identity (+0) and the hardware FList slot
++/// (+8): a pool must never share its slot with another pool in use.
++pub(crate) fn pool_support(id: u64, shared: u64, buffers: usize) -> [u8; 0x100] {
+     let mut out = [0; 0x100];
+-    let pages = (BUFFER_COUNT * BUFFER_SIZE / 0x1000) as u32;
+-    u64_at(&mut out, 0, 2);
++    let pages = (buffers.min(BUFFER_COUNT) * BUFFER_SIZE / 0x1000) as u32;
++    u64_at(&mut out, 0, id);
+     // +8 selects the hardware FList slot; +0 is a separate pool identity.
+     // Sharing slot zero with render corrupts concurrently active pool state.
+-    u32_at(&mut out, 8, 2);
++    u32_at(&mut out, 8, id as u32);
+     u64_at(&mut out, 0x14, DIRECTORY);
+     u32_at(&mut out, 0x1c, (DIRECTORY_SIZE / 8) as u32);
+     u32_at(&mut out, 0x24, pages % (DIRECTORY_SIZE / 8) as u32);
+     u32_at(&mut out, 0x2c, pages);
+-    u64_at(&mut out, 0x4c, SHARED_STATE);
++    u64_at(&mut out, 0x4c, shared);
+     out
+ }
+ 
++/// One 16 KiB page of the pool directory, at byte `offset`: ring entries
++/// 0..pages start out holding every pool page, in buffer order.
++pub(crate) fn directory_page(offset: usize, buffers: usize, out: &mut [u8]) {
++    let pages = buffers.min(BUFFER_COUNT) * (BUFFER_SIZE / 0x1000);
++    out.fill(0);
++    for i in 0..out.len() / 8 {
++        let page = offset / 8 + i;
++        if page >= pages {
++            break;
++        }
++        let per = BUFFER_SIZE / 0x1000;
++        let va = BUFFER_BASE + (page / per) as u64 * BUFFER_STRIDE + (page % per) as u64 * 0x1000;
++        u64_at(out, i * 8, va);
++    }
++}
+ 
+ #[derive(Clone, Copy)]
+ pub(crate) struct Parameters {
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 6fd9645d4f58..3522772d09b3 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -144,6 +144,8 @@ struct Vm {
+     draining: u32,
+     reservation: ARef<Object>,
+     render_support: Option<Arc<crate::g16::Support>>,
++    /// The render pool layout `render_support` describes, once rendering.
++    render_pool: Option<render::OperandPool>,
+     /// The native mesh mode when this VM was created. Its support header and
+     /// every decode of its streams use it, whatever the runtime mode is later.
+     native_mode: crate::g16_mesh::Mode,
+@@ -372,6 +374,16 @@ pub(crate) fn register<'a>(
+             FlagKnob::RENDER_OPERAND_BUFFERS,
+             crate::module_parameters::render_operand_buffers.value(),
+         ),
++        (
++            c_str!("compute_pool_buffers"),
++            FlagKnob::COMPUTE_POOL_BUFFERS,
++            crate::module_parameters::compute_pool_buffers.value(),
++        ),
++        (
++            c_str!("compute_shares_render_pool"),
++            FlagKnob::COMPUTE_SHARES_RENDER_POOL,
++            crate::module_parameters::compute_shares_render_pool.value(),
++        ),
+     ];
+     let mut flags = KVec::with_capacity(knobs.len(), GFP_KERNEL)?;
+     for (name, knob, value) in knobs {
+diff --git a/drivers/gpu/drm/asahi/g16_drm_ioctl.rs b/drivers/gpu/drm/asahi/g16_drm_ioctl.rs
+index 1489c925226c..52e8bde220c5 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_ioctl.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_ioctl.rs
+@@ -99,6 +99,7 @@ pub(super) fn vm_create(
+                 draining: 0,
+                 reservation,
+                 render_support: None,
++                render_pool: None,
+                 // The module parameter was validated at probe and debugfs
+                 // writes are bounded, so the mode always parses.
+                 native_mode: crate::g16_mesh::Mode::from_parameter(crate::g16_mesh::snapshot().1)
+diff --git a/drivers/gpu/drm/asahi/g16_drm_submit.rs b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+index 65ce0ae071c0..c996ef56dd33 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_submit.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+@@ -249,8 +249,11 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                 GFP_KERNEL,
+             )?;
+         }
+-        let needs_mapping =
+-            (renders != 0 && !vm.render_ready) || (computes != 0 && !vm.compute_ready);
++        let first_compute = computes != 0 && !vm.compute_ready;
++        // Experimental: compute on the VM's render pool needs that pool.
++        let share = first_compute
++            && crate::g16_timeline::COMPUTE_SHARES_RENDER_POOL.load(Ordering::Relaxed) != 0;
++        let needs_mapping = (renders != 0 && !vm.render_ready) || first_compute;
+         if needs_mapping {
+             // These reserved namespaces are initialized once before this
+             // VM's first command on the corresponding engine.
+@@ -258,7 +261,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+             if runtime.render_failed() {
+                 return Err(EIO);
+             }
+-            if renders != 0 && !vm.render_ready {
++            if (renders != 0 || share) && !vm.render_ready {
+                 // Native mesh keeps its qualified full-size pool.
+                 let buffers = if vm.native_mode.enabled() {
+                     render::OPERAND_BUFFERS_MAX
+@@ -283,13 +286,36 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                     return Err(error);
+                 }
+                 vm.render_support = Some(support);
++                vm.render_pool = Some(pool);
+                 vm.render_ready = true;
+             }
+-            if computes != 0 && !vm.compute_ready {
+-                vm.render_broken = true;
+-                runtime.map_compute_work(&mut vm.compute_space.lock(), vm.kernel.clone())?;
++            if first_compute {
++                let result = if share {
++                    let support = vm.render_support.clone().ok_or(EIO)?;
++                    let pool = vm.render_pool.ok_or(EIO)?;
++                    let pages = vm.space.lock().render_pool_pages(&pool)?;
++                    let start = pool.end().ok_or(EINVAL)?;
++                    let mut space = vm.compute_space.lock();
++                    space
++                        .share_render_pool(&pages, vm.space.clone())
++                        .and_then(|()| space.set_compute_support(support))
++                        .map(|()| {
++                            // Compute scratch stays clear of the pool VAs.
++                            space.init_compute_private(start..vm.kernel.end);
++                            space.sync();
++                        })
++                } else {
++                    let buffers =
++                        crate::g16_timeline::COMPUTE_POOL_BUFFERS.load(Ordering::Relaxed) as usize;
++                    runtime.map_compute_work(&mut vm.compute_space.lock(), vm.kernel.clone(), buffers)
++                };
++                if let Err(error) = result {
++                    // Allocation failures resume on a retry; anything else
++                    // (a conflicting PTE) quarantines the VM.
++                    vm.render_broken = error != ENOMEM && error != ENOSPC;
++                    return Err(error);
++                }
+                 vm.compute_ready = true;
+-                vm.render_broken = false;
+             }
+         }
+         // Provision what this queue's or VM root's first publication would
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_compute.rs b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+index aa159064a7b1..28e7380cc5e0 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+@@ -6,31 +6,21 @@
+ use super::*;
+ 
+ impl Bootstrap {
++    /// Give a VM's compute root its own FList before its first compute
++    /// command: `buffers` 2 MiB buffers plus the directory, mapped only into
++    /// this root, and an exclusively leased support object and hardware slot.
++    /// No other client's root can reach this pool's pages, and this root
++    /// reaches no other pool. ENOMEM/ENOSPC leave the root healthy: a retry
++    /// resumes the allocation.
+     pub(crate) fn map_compute_work(
+         &mut self,
+         space: &mut g16_vm::AddressSpace,
+         private: core::ops::Range<u64>,
++        buffers: usize,
+     ) -> Result {
+-        let opening = self._opening_client.as_mut().ok_or(EIO)?;
+-        for (base, size) in compute::private_ranges() {
+-            // Scratch and marker are private to each command at fresh VAs.
+-            // Only the device-owned FList directory and spill pool are shared.
+-            if base == compute::SCRATCH || base == compute::MARKER {
+-                continue;
+-            }
+-            for va in (base..base + size as u64).step_by(0x4000) {
+-                if space.low.translate(va)?.is_some() {
+-                    return Err(EEXIST);
+-                }
+-                let pa = opening.low.translate(va)?.ok_or(EIO)?;
+-                space.low.map_pages(
+-                    va..va + 0x4000,
+-                    pa,
+-                    crate::pgtable::prot::PROT_GPU_SHARED_RW,
+-                    false,
+-                )?;
+-            }
+-        }
++        space.alloc_compute_pool(buffers)?;
++        let support = Arc::new(self.acquire_compute_support(buffers)?, GFP_KERNEL)?;
++        space.set_compute_support(support)?;
+         space.init_compute_private(private);
+         space.sync();
+         Ok(())
+@@ -167,6 +157,8 @@ pub(super) fn submit_compute_queue(
+         }
+         fw.zero_live(work + 0x2000, 0x2000)?;
+         let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias);
++        let support = client.compute_support().ok_or(EIO)?;
++        a.support = support.address();
+         a.queue = lane.queue;
+         a.driver_stamp = work + 0x4000;
+         a.firmware_stamp = lane.firmware_stamp();
+@@ -196,12 +188,16 @@ pub(super) fn submit_compute_queue(
+         // cache lines lost timestamps once the Work was reused.
+         let user_timestamps = a.work + 0x4040;
+         let count = self.compute_publication.wrapping_add(1);
+-        let count32 = count as u32;
+ 
+         let first = lane.head;
+         let head = (first + 1 + dependencies.iter().flatten().count() as u32) % 0x500;
++        // The support's shared state counts every Work submitted against
++        // it (render items included, when compute shares the render pool).
++        let support = client.compute_support().ok_or(EIO)?;
++        let submitted = support.submissions.load(Ordering::Relaxed).wrapping_add(1);
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+-        fw.write_live(compute::SHARED_STATE, &count32.to_le_bytes())?;
++        fw.write_live(support.shared_state(), &(submitted as u32).to_le_bytes())?;
++        support.submissions.store(submitted, Ordering::Relaxed);
+         fw.write_live(a.work, &self.encodings.compute)?;
+         fw.write_live(a.work + compute::ENTRY_OFFSET, &compute::entry(params.cdm))?;
+         let mut microsequence = params.microsequence(&a);
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_contexts.rs b/drivers/gpu/drm/asahi/g16_runtime_contexts.rs
+index bc4db7998503..e77c17af666a 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_contexts.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_contexts.rs
+@@ -52,12 +52,13 @@ pub(crate) fn render_failed(&self) -> bool {
+         self.render_failed
+     }
+ 
+-    /// `mode`: the VM's native mesh mode, latched when it was created.
+-    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool, mode: g16_mesh::Mode) -> Result<Support> {
++    /// Lease a support object, its shared state page and hardware FList slot
++    /// 3 + index. Render pools and private compute pools share the leases, so
++    /// no two pools in use ever share a slot.
++    fn acquire_support_slot(&mut self, mode: g16_mesh::Mode) -> Result<Support> {
+         if self.render_failed {
+             return Err(EIO);
+         }
+-        let native = mode.enabled();
+         let mut used = self.render_support.load(Ordering::Acquire);
+         let index = loop {
+             let index = (!used).trailing_zeros();
+@@ -74,28 +75,46 @@ pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool, mode
+                 Err(value) => used = value,
+             }
+         };
+-        let lease = Support {
++        Ok(Support {
+             slots: self.render_support.clone(),
+             index,
+             submissions: AtomicU64::new(
+                 crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
+             ),
+-            native,
++            native: mode.enabled(),
+             mode,
+-        };
+-        let mut a = render::Addresses::bootstrap();
+-        a.support = lease.address();
+-        a.render_shared_state = lease.shared_state();
++        })
++    }
++
++    /// Write a fresh support header (the rest of its page zero) and zero the
++    /// lease's shared state: a reused lease starts its submitted-Work count
++    /// afresh.
++    fn publish_support(&mut self, lease: &Support, header: &[u8; 0x100]) -> Result {
+         let mut page = KVec::new();
+         page.extend_with(0x4000, 0u8, GFP_KERNEL)?;
+-        page[..0x100].copy_from_slice(&pool.support(3 + u64::from(index), a.render_shared_state));
++        page[..0x100].copy_from_slice(header);
++        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
++        fw.write_live(lease.address(), &page)?;
++        fw.zero_live(lease.shared_state(), 0x4000)?;
++        Ok(())
++    }
++
++    /// `mode`: the VM's native mesh mode, latched when it was created.
++    pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool, mode: g16_mesh::Mode) -> Result<Support> {
++        let lease = self.acquire_support_slot(mode)?;
++        let mut header = pool.support(3 + u64::from(lease.index), lease.shared_state());
+         if lease.native {
+-            render::initialize_native_support(&mut page[..0x100]);
++            render::initialize_native_support(&mut header);
+         }
+-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+-        fw.write_live(a.support, &page)?;
+-        // A reused lease starts its submitted-Work count afresh.
+-        fw.zero_live(a.render_shared_state, 0x4000)?;
++        self.publish_support(&lease, &header)?;
++        Ok(lease)
++    }
++
++    /// The support of a VM's private compute pool of `buffers` buffers.
++    pub(crate) fn acquire_compute_support(&mut self, buffers: usize) -> Result<Support> {
++        let lease = self.acquire_support_slot(g16_mesh::Mode::Disabled)?;
++        let header = compute::pool_support(3 + u64::from(lease.index), lease.shared_state(), buffers);
++        self.publish_support(&lease, &header)?;
+         Ok(lease)
+     }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index cd4e668a44ca..d8815a633be2 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -348,6 +348,15 @@ pub(crate) fn shared_notifier() -> bool {
+ /// asahi_m4/render_operand_buffers). Submission rejects values outside 1..=24.
+ pub(crate) static RENDER_OPERAND_BUFFERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(24);
+ 
++/// Buffers in the private compute pool of each VM whose first compute comes
++/// afterwards (asahi_m4.compute_pool_buffers; runtime: debugfs
++/// asahi_m4/compute_pool_buffers). Submission rejects 0.
++pub(crate) static COMPUTE_POOL_BUFFERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(16);
++
++/// 1: a VM whose first compute comes afterwards runs compute on its render
++/// pool and support (asahi_m4.compute_shares_render_pool; runtime: debugfs).
++pub(crate) static COMPUTE_SHARES_RENDER_POOL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
+ /// A 0/1 debugfs switch over a static.
+ pub(crate) struct FlagKnob {
+     cell: &'static core::sync::atomic::AtomicU32,
+@@ -370,6 +379,16 @@ pub(crate) fn init(&self, value: u32) {
+         name: "render_operand_buffers",
+         max: crate::g16_render::OPERAND_BUFFERS_MAX,
+     };
++    pub(crate) const COMPUTE_POOL_BUFFERS: Self = Self {
++        cell: &COMPUTE_POOL_BUFFERS,
++        name: "compute_pool_buffers",
++        max: crate::g16_compute::BUFFER_COUNT as u32,
++    };
++    pub(crate) const COMPUTE_SHARES_RENDER_POOL: Self = Self {
++        cell: &COMPUTE_SHARES_RENDER_POOL,
++        name: "compute_shares_render_pool",
++        max: 1,
++    };
+ }
+ 
+ /// debugfs `asahi_m4/native_mesh`: the runtime native mesh mode. Each write
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 02ece3c6c623..c63377357bed 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -77,6 +77,14 @@ pub(crate) struct AddressSpace {
+     render_arena: Arena,
+     scratch_free: [KVec<core::ops::Range<u64>>; 2],
+     scratch_users: [usize; 2],
++    /// The support of this compute root's FList (a private pool's own lease,
++    /// or the VM's render support when sharing its pool). Pending and
++    /// quarantined Works retain it with the root, so its hardware slot is not
++    /// recycled while the firmware can still use it.
++    compute_support: Option<kernel::sync::Arc<crate::g16::Support>>,
++    /// Owner of pool pages this root maps but does not own (the render root,
++    /// when sharing its pool); retained as long as the mappings.
++    _pool_owner: Option<kernel::sync::Arc<kernel::sync::Mutex<AddressSpace>>>,
+ }
+ 
+ /// An exclusive suballocation; its backing remains owned by the VM.
+@@ -144,6 +152,8 @@ pub(crate) fn new() -> Result<Self> {
+             render_arena: Arena::default(),
+             scratch_free: [KVec::new(), KVec::new()],
+             scratch_users: [0; 2],
++            compute_support: None,
++            _pool_owner: None,
+         })
+     }
+ 
+@@ -294,6 +304,89 @@ pub(crate) fn prepare_render(
+         Ok(scratch)
+     }
+ 
++    /// Back this compute root's private FList with `buffers` 2 MiB buffers
++    /// and its ring directory, at the fixed pool VAs, so the pool's pages are
++    /// reachable from no other client's roots. Runs in the submitting client's
++    /// ioctl, which is charged for the pages. After ENOMEM a retry resumes:
++    /// pages already owned here are kept, and the directory is rewritten.
++    pub(crate) fn alloc_compute_pool(&mut self, buffers: usize) -> Result {
++        use crate::g16_compute as compute;
++        if !(1..=compute::BUFFER_COUNT).contains(&buffers) {
++            return Err(EINVAL);
++        }
++        let ranges = Iterator::chain(
++            core::iter::once((compute::DIRECTORY, compute::DIRECTORY_SIZE)),
++            (0..buffers).map(|i| {
++                (compute::BUFFER_BASE + i as u64 * compute::BUFFER_STRIDE, compute::BUFFER_SIZE)
++            }),
++        );
++        for (base, size) in ranges {
++            for va in (base..base + size as u64).step_by(UAT_PGSZ) {
++                if self.pages.get(&va).is_none() {
++                    if self.low.translate(va)?.is_some() {
++                        return Err(EEXIST);
++                    }
++                    let page = GpuPage::alloc(GFP_KERNEL_ACCOUNT | __GFP_ZERO)?;
++                    self.pages.try_create_and_insert(va, page, GFP_KERNEL_ACCOUNT)?;
++                    self.owned_bytes += UAT_PGSZ;
++                }
++                let physical = self.pages.get(&va).ok_or(EIO)?.phys();
++                self.map_render_page(va, physical)?;
++            }
++        }
++        let mut row = [0u8; 256];
++        for offset in (0..compute::DIRECTORY_SIZE).step_by(row.len()) {
++            compute::directory_page(offset, buffers, &mut row);
++            self.write_low(compute::DIRECTORY + offset as u64, &row)?;
++        }
++        self.sync();
++        Ok(())
++    }
++
++    /// The (VA, physical) pages of this render root's FList: its directory,
++    /// descriptor table and buffers.
++    pub(crate) fn render_pool_pages(
++        &mut self,
++        pool: &crate::g16_render::OperandPool,
++    ) -> Result<KVec<(u64, u64)>> {
++        let end = pool.end().ok_or(EINVAL)?;
++        let mut pages = KVec::new();
++        for va in (pool.directory..end).step_by(UAT_PGSZ) {
++            if let Some(physical) = self.low.translate(va)? {
++                pages.push((va, physical), GFP_KERNEL)?;
++            }
++        }
++        Ok(pages)
++    }
++
++    /// Map the render pool of this VM (`pages`, from `render_pool_pages` of
++    /// `owner`) into this compute root at the same VAs, so compute Works can
++    /// use the render support object. `owner` is retained with the mappings.
++    pub(crate) fn share_render_pool(
++        &mut self,
++        pages: &[(u64, u64)],
++        owner: kernel::sync::Arc<kernel::sync::Mutex<AddressSpace>>,
++    ) -> Result {
++        for &(va, physical) in pages {
++            self.map_render_page(va, physical)?;
++        }
++        self._pool_owner = Some(owner);
++        self.sync();
++        Ok(())
++    }
++
++    pub(crate) fn compute_support(&self) -> Option<&crate::g16::Support> {
++        self.compute_support.as_deref()
++    }
++
++    pub(crate) fn set_compute_support(&mut self, support: kernel::sync::Arc<crate::g16::Support>) -> Result {
++        if self.compute_support.is_some() {
++            return Err(EEXIST);
++        }
++        self.compute_support = Some(support);
++        Ok(())
++    }
++
+     /// Compute commands use distinct private scratch addresses in the caller's
+     /// reserved kernel aperture. The persistent root and all backing remain
+     /// owned by the VM; allocating a later command never replaces a live PTE.

@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 12:35:24 -0400
+Subject: [PATCH] drm/asahi_m4: retry transient first-render setup failures
+
+The 58th live Vulkan render owner gets ENOSPC from the support-slot cap. After destroying a completed owner, retrying the identical submit on the same VM returns EIO because render_broken was set before resource allocation.
+
+Acquire support and its Arc before editing private page tables. Keep allocation failures recoverable: private render initialization can resume missing owned pages and PTEs after ENOMEM, accepting only mappings to the exact expected physical page. The render root has never been published on these paths, and all partial backing stays owned. Reinitialize its storage and sync the completed graph before first use. Structural errors still mark the VM broken; compute setup quarantine is unchanged.
+
+Confirmed cap failure and sticky EIO on the cleanup base. Host fault adapters compile the actual allocator and encoder: baseline retry fails after a partial allocation, while the candidate resumes early/middle/late backing and alias allocation failures and preserves conflicting PTEs. Device results are in tmp/simplification-review/REVIEW-REQUEST-kernel-bugs.md.
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 21 ++++++++++------
+ drivers/gpu/drm/asahi/g16_vm.rs  | 43 +++++++++++++++++++++++---------
+ 2 files changed, 45 insertions(+), 19 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 887dc6fba3e1..a7c851798940 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -2235,18 +2235,25 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+                 return Err(EIO);
+             }
+             if renders != 0 && !vm.render_ready {
+-                vm.render_broken = true;
+-                vm.space
+-                    .lock()
+-                    .alloc_render_private(vm.kernel.start, vm.kernel.end)?;
+                 let pool =
+                     render::OperandPool::new(vm.kernel.start, vm.kernel.end).ok_or(EINVAL)?;
+-                vm.render_support = Some(Arc::new(
++                // Acquire scarce support and its Arc before editing this
++                // root. ENOSPC/ENOMEM here must not quarantine a healthy VM.
++                let support = Arc::new(
+                     runtime.acquire_render_support(&pool)?,
+                     GFP_KERNEL,
+-                )?);
++                )?;
++                if let Err(error) = vm.space.lock()
++                    .alloc_render_private(vm.kernel.start, vm.kernel.end)
++                {
++                    // The unpublished graph owns every partial allocation
++                    // and resumes on ENOMEM. Structural/PTE inconsistencies
++                    // still quarantine the VM; do not mask those failures.
++                    vm.render_broken = error != ENOMEM;
++                    return Err(error);
++                }
++                vm.render_support = Some(support);
+                 vm.render_ready = true;
+-                vm.render_broken = false;
+             }
+             if computes != 0 && !vm.compute_ready {
+                 vm.render_broken = true;
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index c513e78ddb69..c999853b1938 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -104,8 +104,9 @@ pub(crate) fn alloc_low(
+     }
+ 
+     /// Build backend-only render storage before this root is published.
+-    /// Allocation failures leave any acquired pages owned by this address space;
+-    /// callers discard the unpublished VM rather than reusing a partial graph.
++    /// ENOMEM may leave a partial graph, all owned here. This root has never
++    /// rendered: retry can finish missing pages/PTEs and reinitialize storage
++    /// before its first publication. Never replace a conflicting mapping.
+     pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+         use crate::g16_render as render;
+         let mut params = render::Parameters::default();
+@@ -116,7 +117,19 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+             return Err(ENOMEM);
+         }
+         self.render_arena = Arena::new(remaining);
+-        self.alloc_low(start, render::PRIVATE_SIZE, prot::PROT_GPU_SHARED_RW)?;
++        for offset in (0..render::PRIVATE_SIZE).step_by(UAT_PGSZ) {
++            let va = start + offset as u64;
++            if self.pages.get(&va).is_none() {
++                if self.low.translate(va)?.is_some() {
++                    return Err(EEXIST);
++                }
++                let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
++                clean_page(&page);
++                self.pages.try_create_and_insert(va, page, GFP_KERNEL)?;
++            }
++            let physical = self.pages.get(&va).ok_or(EIO)?.phys();
++            self.map_render_page(va, physical)?;
++        }
+         for offset in (0..render::PRIVATE_SIZE).step_by(UAT_PGSZ) {
+             let va = start + offset as u64;
+             let page = self.pages.get(&va).ok_or(EIO)?;
+@@ -131,25 +144,31 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+         for (alias, offset, size) in render::private_aliases(&pool) {
+             for page in (0..size).step_by(UAT_PGSZ) {
+                 let va = alias + page as u64;
+-                if self.low.translate(va)?.is_some() {
+-                    return Err(EEXIST);
+-                }
+                 let physical = self
+                     .low
+                     .translate(start + offset + page as u64)?
+                     .ok_or(EIO)?;
+-                self.low.map_pages(
+-                    va..va + UAT_PGSZ as u64,
+-                    physical,
+-                    prot::PROT_GPU_SHARED_RW,
+-                    false,
+-                )?;
++                self.map_render_page(va, physical)?;
+             }
+         }
+         self.sync();
+         Ok(())
+     }
+ 
++    /// A failed first-render allocation can already own this exact PTE.
++    fn map_render_page(&mut self, va: u64, physical: u64) -> Result {
++        match self.low.translate(va)? {
++            Some(existing) if existing == physical => Ok(()),
++            Some(_) => Err(EEXIST),
++            None => self.low.map_pages(
++                va..va + UAT_PGSZ as u64,
++                physical,
++                prot::PROT_GPU_SHARED_RW,
++                false,
++            ),
++        }
++    }
++
+     /// Each active render exclusively leases tile metadata and save storage.
+     pub(crate) fn prepare_render(
+         &mut self,

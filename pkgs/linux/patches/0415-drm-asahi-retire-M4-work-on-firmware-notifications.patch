@@ -1,0 +1,715 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Mon, 14 Sep 2026 01:18:43 +0000
+Subject: [PATCH] drm/asahi: retire M4 work on firmware notifications
+
+(cherry picked from commit 12eaa9eaa1c357abb7100ea95914e72761edfc0c)
+(cherry picked from commit dc55a9529787b79a5dce587e5bb19e8a418ca0d8)
+---
+ drivers/gpu/drm/asahi/g16.rs         |  27 +++++-
+ drivers/gpu/drm/asahi/g16_drm.rs     |  81 ++++++++---------
+ drivers/gpu/drm/asahi/g16_fw.rs      |   2 +
+ drivers/gpu/drm/asahi/g16_notify.rs  |  74 ++++++++++++++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 127 +++++++++++++++++++--------
+ 5 files changed, 226 insertions(+), 85 deletions(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_notify.rs
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 4076c35e2b2a..fc3c36b0b6f2 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -89,6 +89,7 @@ pub(crate) fn validate_boot_resources(pdev: &platform::Device<Core>) -> Result {
+ 
+ struct BootData {
+     dev: ARef<platform::Device>,
++    notifications: Arc<Notifications>,
+ }
+ 
+ struct CrashBuffer {
+@@ -144,9 +145,10 @@ fn shmem_map(
+     }
+ 
+     fn recv_message(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, ep: u8, msg: u64) {
+-        // Ordinary ring notifications are serviced by the submitter. Logging
+-        // each notification can flood the console when a job times out.
+         if ep == 0x20 && msg == 0x0042_0000_0000_0000 {
++            // RTKit delivers this callback in process context after the
++            // mailbox receive barrier. The worker drains the firmware rings.
++            data.notifications.notify(false);
+             return;
+         }
+         dev_info!(
+@@ -158,6 +160,7 @@ fn recv_message(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, ep: u8, msg:
+     }
+ 
+     fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _log: Option<&[u8]>) {
++        data.notifications.notify(true);
+         dev_err!(data.dev.as_ref(), "G16: firmware crashed\n");
+     }
+ }
+@@ -168,6 +171,10 @@ fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _log: Option<&[u8
+ mod render_runtime;
+ pub(crate) use render_runtime::{FirmwareQueues, Support};
+ 
++#[path = "g16_notify.rs"]
++mod notify;
++pub(crate) use notify::Notifications;
++
+ // Keep the opening barrier transport separate from render queues. Firmware
+ // retains queue and item references after consuming this bootstrap prefix.
+ const BOOT_QUEUE: u64 = 0xffff_fc20_c000_4980;
+@@ -179,6 +186,7 @@ fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _log: Option<&[u8
+ 
+ pub(crate) struct Bootstrap {
+     dev: ARef<platform::Device>,
++    pub(crate) notifications: Arc<Notifications>,
+     _rtkit: Pin<KBox<rtkit::RtKit<BootOps>>>,
+     _asc: Pin<KBox<Devres<IoMem<0x4000>>>>,
+     _sgx: Pin<KBox<Devres<IoMem<0x4000000>>>>,
+@@ -232,7 +240,10 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         validate_boot_resources(pdev)?;
+         let platform = crate::g16_platform::Platform::new(pdev.as_ref())?;
+         // All board inputs are checked before any firmware is started.
+-        let bundle = platform.bundle(unsafe { kernel::bindings::get_random_u32() })?;
++        let mut bundle = platform.bundle(unsafe { kernel::bindings::get_random_u32() })?;
++        // The firmware Timestamp handler accepts user destinations only in
++        // this 64 MiB aperture, based at header+0x28.
++        bundle[0x28..0x30].copy_from_slice(&crate::g16_fw::TIMESTAMP_BASE.to_le_bytes());
+         let region_c = platform.region_c()?;
+         let dev = pdev.as_ref();
+         let mut address_space = crate::g16_vm::AddressSpace::new()?;
+@@ -296,7 +307,14 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         }
+         crate::mem::sync();
+ 
+-        let data = Arc::new(BootData { dev: pdev.into() }, GFP_KERNEL)?;
++        let notifications = Arc::pin_init(Notifications::new(), GFP_KERNEL)?;
++        let data = Arc::new(
++            BootData {
++                dev: pdev.into(),
++                notifications: notifications.clone(),
++            },
++            GFP_KERNEL,
++        )?;
+         let mut rtkit = KBox::pin(
+             rtkit::RtKit::<BootOps>::new(dev, None, 0, data)?,
+             GFP_KERNEL,
+@@ -620,6 +638,7 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         );
+         let mut session = Self {
+             dev: pdev.into(),
++            notifications,
+             _rtkit: rtkit,
+             _asc: asc,
+             _sgx: sgx,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 4966f3207b5d..9f84cce695cf 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -92,36 +92,8 @@ struct Vm {
+ /// input dependencies; no file-state lock is needed in the worker.
+ struct MemoryView {
+     mappings: KVec<Mapping>,
+-    timestamps: KVec<TimestampBuffer>,
++    _timestamps: KVec<TimestampBuffer>,
+ }
+-impl MemoryView {
+-    fn store_timestamps(&self, addresses: &[u64; 4], values: &[u64; 4]) -> Result {
+-        for (address, value) in addresses.iter().zip(values) {
+-            if *address == 0 {
+-                continue;
+-            }
+-            let binding = self
+-                .timestamps
+-                .iter()
+-                .find(|t| {
+-                    *address >= t.address
+-                        && address
+-                            .checked_add(8)
+-                            .is_some_and(|end| end <= t.address + t.size)
+-                })
+-                .ok_or(EIO)?;
+-            let offset = binding.offset + address - binding.address;
+-            binding
+-                .sg
+-                .object()
+-                .vmap::<u8>()?
+-                .write(&value.to_le_bytes(), offset.try_into()?)?;
+-        }
+-        crate::mem::sync();
+-        Ok(())
+-    }
+-}
+-
+ impl crate::g16_cdm::Memory for MemoryView {
+     fn cover(&self, start: u64, size: u64, permissions: u32) -> Result {
+         Mapping::cover(&self.mappings, start, size, permissions)
+@@ -184,7 +156,6 @@ struct TimestampBuffer {
+     extent: u64,
+     address: u64,
+     size: u64,
+-    offset: u64,
+ }
+ 
+ #[pin_data]
+@@ -195,6 +166,7 @@ pub(crate) struct Data {
+     #[pin]
+     admission: Mutex<KVec<dma_fence::Fence>>,
+     failed: AtomicBool,
++    notifications: Arc<crate::g16::Notifications>,
+     #[pin]
+     runtime: Mutex<crate::g16::Bootstrap>,
+     #[pin]
+@@ -245,6 +217,7 @@ pub(crate) fn register(pdev: &platform::Device<Core>) -> Result<DeviceRef> {
+         scheduler: sched::Scheduler::new(pdev.as_ref(), 4, 16, 0, 30000, c_str!("asahi_m4"))?,
+         admission <- kernel::new_mutex!(KVec::new()),
+         failed: AtomicBool::new(false),
++        notifications: runtime.notifications.clone(),
+         runtime <- kernel::new_mutex!(runtime),
+         engine <- kernel::new_mutex!(Engine { running: false, jobs: KVec::new(), issued: KVec::new() }), });
+     let device = Device::new(pdev.as_ref(), data)?;
+@@ -624,7 +597,6 @@ fn bind_object(
+                     extent,
+                     address: base + (data.offset - first),
+                     size: data.range,
+-                    offset: data.offset,
+                 };
+                 // Keep backing even if mapping installation or rollback fails.
+                 state
+@@ -1040,7 +1012,6 @@ struct Running {
+ struct Issued {
+     id: u64,
+     owner: u64,
+-    command: usize,
+ }
+ struct Engine {
+     running: bool,
+@@ -1055,15 +1026,21 @@ fn run(this: Arc<Self>) {
+         // Exactly one pump owns publication order. It holds these locks only
+         // while preparing/publishing or inspecting retirement, never asleep.
+         // Scheduler callbacks append ready jobs even while hardware is busy.
++        let mut wake_result = Ok(());
+         loop {
++            let generation = this.device.notifications.snapshot();
+             let mut engine = this.device.engine.lock();
+             let mut runtime = this.device.runtime.lock();
+             let result = (|| -> Result<bool> {
++                wake_result?;
++                generation?;
+                 if this.device.failed.load(Ordering::Acquire) {
+                     return Err(EIO);
+                 }
+                 let mut progress = false;
+-                while let Some((id, result)) = runtime.retire()? {
++                while let Some((id, result)) = runtime.retire().inspect_err(|error| {
++                    pr_err!("G16: firmware retirement failed: {:?}\n", error);
++                })? {
+                     let index = engine.issued.iter().position(|r| r.id == id).ok_or(EIO)?;
+                     let issued = engine.issued.remove(index).map_err(|_| EIO)?;
+                     let job = engine
+@@ -1072,11 +1049,6 @@ fn run(this: Arc<Self>) {
+                         .find(|r| r.execution.id == issued.owner)
+                         .ok_or(EIO)?;
+                     job.pending -= 1;
+-                    let result = result.and_then(|values| {
+-                        job.execution
+-                            .memory
+-                            .store_timestamps(&job.execution.timestamps[issued.command], &values)
+-                    });
+                     if let Err(error) = result {
+                         job.error = Some(error);
+                     }
+@@ -1116,27 +1088,40 @@ fn run(this: Arc<Self>) {
+                                 execution.render_space.clone(),
+                                 p,
+                                 execution.support.as_deref().ok_or(EIO)?,
++                                execution.timestamps[job.next],
+                             ),
+                             Parameters::Compute(p) => runtime.submit_compute(
+                                 execution.firmware.clone(),
+                                 &mut execution.space.lock(),
+                                 p,
+                                 &execution.memory,
++                                execution.timestamps[job.next],
+                             ),
+                         };
+                         let receipt = match receipt {
+                             Ok(receipt) => receipt,
+                             Err(EBUSY) if !runtime.render_failed() => return Ok(progress),
+                             Err(error) if !runtime.render_failed() => {
++                                pr_err!(
++                                    "G16: command {} preparation failed: {:?}\n",
++                                    job.next,
++                                    error
++                                );
+                                 job.error = Some(error);
+                                 break;
+                             }
+-                            Err(error) => return Err(error),
++                            Err(error) => {
++                                pr_err!(
++                                    "G16: command {} publication failed: {:?}\n",
++                                    job.next,
++                                    error
++                                );
++                                return Err(error);
++                            }
+                         };
+                         let issued = Issued {
+                             id: receipt.id,
+                             owner: execution.id,
+-                            command: job.next,
+                         };
+                         job.next += 1;
+                         job.pending += 1;
+@@ -1187,10 +1172,14 @@ fn run(this: Arc<Self>) {
+                 engine.running = false;
+                 return;
+             }
++            let timeout_ms = runtime.watchdog_remaining_ms();
+             drop(runtime);
+             drop(engine);
+             if !result.unwrap_or(false) {
+-                kernel::time::delay::fsleep(kernel::time::Delta::from_millis(1));
++                wake_result = this.device.notifications.wait(
++                    generation.expect("checked before servicing jobs"),
++                    timeout_ms,
++                );
+             }
+         }
+     }
+@@ -1238,13 +1227,17 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+             engine.running = true;
+             let _ = workqueue::system_unbound().enqueue(execution.clone());
+         }
++        // A running worker may be asleep waiting for firmware on another
++        // queue. New ready work must wake it even if no GPU event arrives.
++        execution.device.notifications.notify(false);
+         Ok(Some(fence))
+     }
+ 
+     fn timed_out(job: &mut sched::Job<Self>) -> sched::Status {
+         job.execution.device.failed.store(true, Ordering::Release);
+-        // The worker retains the mappings until its bounded firmware wait
+-        // ends. Do not signal its lifetime fence early here.
++        job.execution.device.notifications.notify(false);
++        // Wake the worker to quarantine firmware mappings and fail the jobs.
++        // Do not signal its lifetime fence before that cleanup here.
+         sched::Status::NoDevice
+     }
+ 
+@@ -1533,7 +1526,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+         }
+         let memory = MemoryView {
+             mappings,
+-            timestamps: timestamp_bindings,
++            _timestamps: timestamp_bindings,
+         };
+         let completion = dma_fence::Fence::from_fence(&unique);
+         let worker_completion = completion.clone();
+diff --git a/drivers/gpu/drm/asahi/g16_fw.rs b/drivers/gpu/drm/asahi/g16_fw.rs
+index a63ed17b8f34..97919511e954 100644
+--- a/drivers/gpu/drm/asahi/g16_fw.rs
++++ b/drivers/gpu/drm/asahi/g16_fw.rs
+@@ -17,6 +17,8 @@
+ pub(crate) const CONTROL_DATA: u64 = 0xffff_fc20_c052_8000;
+ pub(crate) const CONTROL_AUX: u64 = 0xffff_fc20_0014_8000;
+ pub(crate) const OPERAND_TABLE: u64 = 0x70_0040_8000;
++pub(crate) const TIMESTAMP_BASE: u64 = 0xffff_fc21_8140_0000;
++pub(crate) const TIMESTAMP_SIZE: u64 = 0x400_0000;
+ 
+ /// The two publications following firmware's already-consumed slot zero.
+ pub(crate) fn opening_control() -> [u8; 0x80] {
+diff --git a/drivers/gpu/drm/asahi/g16_notify.rs b/drivers/gpu/drm/asahi/g16_notify.rs
+new file mode 100644
+index 000000000000..5cc4e40381b5
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_notify.rs
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright The Gravity Linux Contributors
++
++//! RTKit and scheduler wakeups for the single G16 submission worker.
++
++use kernel::sync::{CondVar, CondVarTimeoutResult, Mutex};
++use kernel::{prelude::*, time::msecs_to_jiffies};
++
++#[pin_data]
++pub(crate) struct Notifications {
++    #[pin]
++    state: Mutex<State>,
++    #[pin]
++    changed: CondVar,
++}
++
++struct State {
++    generation: u64,
++    crashed: bool,
++}
++
++impl Notifications {
++    pub(crate) fn new() -> impl PinInit<Self> {
++        pin_init!(Self {
++            state <- kernel::new_mutex!(State { generation: 0, crashed: false }),
++            changed <- kernel::new_condvar!(),
++        })
++    }
++
++    /// Called from RTKit's threaded callback or a DRM scheduler callback.
++    /// Neither callback needs the submission engine or firmware memory lock.
++    pub(crate) fn notify(&self, crashed: bool) {
++        let mut state = self.state.lock();
++        state.crashed |= crashed;
++        state.generation = state.generation.wrapping_add(1);
++        self.changed.notify_one();
++    }
++
++    /// Sample before inspecting firmware or ready jobs. A notification between
++    /// that inspection and sleeping must cause another inspection, not be lost.
++    pub(crate) fn snapshot(&self) -> Result<u64> {
++        let state = self.state.lock();
++        if state.crashed {
++            return Err(EIO);
++        }
++        Ok(state.generation)
++    }
++
++    /// Sleep until the sampled generation changes or the progress watchdog
++    /// expires. Spurious wakeups preserve the remaining timeout.
++    pub(crate) fn wait(&self, generation: u64, timeout_ms: u32) -> Result {
++        let mut remaining = msecs_to_jiffies(timeout_ms.max(1));
++        let mut state = self.state.lock();
++        while state.generation == generation && !state.crashed {
++            remaining = match self
++                .changed
++                .wait_interruptible_timeout(&mut state, remaining)
++            {
++                CondVarTimeoutResult::Woken { jiffies }
++                | CondVarTimeoutResult::Signal { jiffies } => jiffies,
++                CondVarTimeoutResult::Timeout => {
++                    if state.generation == generation && !state.crashed {
++                        return Err(ETIMEDOUT);
++                    }
++                    break;
++                }
++            };
++        }
++        if state.crashed {
++            return Err(EIO);
++        }
++        Ok(())
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 196459a050b2..74f8ac8d60a2 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -89,6 +89,11 @@ impl Stamp {
+             (0x20, self.event),
+             (0x24, target),
+             (0x28, uuid),
++            // General queue dependency, as in M1/M2's explicit barriers.
++            // Zero is reserved for the fixed TA -> fragment dependency.
++            // G16's DAG barrier checker skips the dynamic stamp checks when
++            // this field is zero, which can strand a compute -> TA wait.
++            (0x30, 1),
+         ] {
+             out[off..off + 4].copy_from_slice(&value.to_le_bytes());
+         }
+@@ -113,13 +118,12 @@ pub(super) struct Flight {
+     stamps: [Option<Stamp>; 2],
+     queues: [(u64, u32); 2],
+     channels: [(usize, u32); 2],
+-    timestamps: [u64; 4],
+     render: Option<RenderFlight>,
+ }
+ 
+ /// Ring distance is unambiguous because admission keeps less than half a ring
+ /// outstanding. Equality alone would lose completions when firmware advances
+-/// past several commands between polls, including over the wrap boundary.
++/// past several commands between notifications, including over the wrap boundary.
+ fn reached(cursor: u32, target: u32, capacity: u32) -> bool {
+     cursor < capacity && target < capacity && (cursor + capacity - target) % capacity < capacity / 2
+ }
+@@ -327,7 +331,15 @@ fn service_flights(&mut self) -> Result {
+                     }
+                 }
+             }
+-            let index = selected.ok_or(EIO)?;
++            let index = selected.ok_or_else(|| {
++                dev_err!(
++                    self.dev.as_ref(),
++                    "G16: unowned Event kind {} cursor {}\n",
++                    kind,
++                    cursor
++                );
++                EIO
++            })?;
+             let mut render = self.flights[index].render.take().ok_or(EIO)?;
+             let pool_index = self
+                 .tvb_pools
+@@ -351,11 +363,17 @@ fn service_flights(&mut self) -> Result {
+         self.drain_trace_rx()
+     }
+ 
+-    pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result<[u64; 4]>)>> {
++    pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+         if self.render_failed {
+             return Err(EIO);
+         }
+-        self.service_flights()?;
++        self.service_flights().inspect_err(|error| {
++            dev_err!(
++                self.dev.as_ref(),
++                "G16: firmware event service failed: {:?}\n",
++                error
++            );
++        })?;
+         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
+         for index in 0..self.flights.len() {
+             let flight = &self.flights[index];
+@@ -392,12 +410,6 @@ fn service_flights(&mut self) -> Result {
+             if !done {
+                 continue;
+             }
+-            let mut values = [0; 4];
+-            for (i, &address) in flight.timestamps.iter().enumerate() {
+-                if address != 0 {
+-                    values[i] = timestamp_ns(fw.read_u64(address)?)?;
+-                }
+-            }
+             let limited = flight
+                 .render
+                 .as_ref()
+@@ -418,12 +430,12 @@ fn service_flights(&mut self) -> Result {
+             for pending in &mut self.flights {
+                 pending.started = now;
+             }
+-            return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(values) })));
++            return Ok(Some((id, if limited { Err(ENOMEM) } else { Ok(()) })));
+         }
+         if let Some(flight) = self
+             .flights
+             .iter()
+-            .find(|f| f.started.elapsed().as_millis() > 10000)
++            .find(|f| f.started.elapsed().as_millis() >= 10000)
+         {
+             dev_err!(
+                 self.dev.as_ref(),
+@@ -436,6 +448,16 @@ fn service_flights(&mut self) -> Result {
+         }
+         Ok(None)
+     }
++
++    /// Notifications do not extend the watchdog. Only retirement progress
++    /// resets it, so trace traffic cannot keep a stuck command alive.
++    pub(crate) fn watchdog_remaining_ms(&self) -> u32 {
++        self.flights
++            .iter()
++            .map(|flight| (10000 - flight.started.elapsed().as_millis()).clamp(1, 10000) as u32)
++            .min()
++            .unwrap_or(10000)
++    }
+ }
+ 
+ /// A per-VM firmware support object retained by every queued execution until
+@@ -463,7 +485,7 @@ pub(crate) fn reserve_timestamp(&mut self, size: u64) -> Result<u64> {
+             return Err(EINVAL);
+         }
+         // Match the shim's firmware-shared special-object aperture.
+-        let mut base = 0xfffffc2181400000u64;
++        let mut base = g16_fw::TIMESTAMP_BASE;
+         for range in &self.timestamp_ranges {
+             if base.checked_add(size).ok_or(ENOSPC)? <= range.start {
+                 break;
+@@ -471,7 +493,7 @@ pub(crate) fn reserve_timestamp(&mut self, size: u64) -> Result<u64> {
+             base = base.max(range.end);
+         }
+         let end = base.checked_add(size).ok_or(ENOSPC)?;
+-        if end > 0xfffffc2185400000 {
++        if end > g16_fw::TIMESTAMP_BASE + g16_fw::TIMESTAMP_SIZE {
+             return Err(ENOSPC);
+         }
+         self.timestamp_ranges.push(base..end, GFP_KERNEL)?;
+@@ -630,6 +652,14 @@ fn drain_trace_rx(&mut self) -> Result {
+             let read = fw.read_u32(state)?;
+             let write = fw.read_u32(state + 0x20)?;
+             if read >= capacity || write >= capacity {
++                dev_err!(
++                    self.dev.as_ref(),
++                    "G16: invalid RX cursors at {:#x}: {}/{} capacity {}\n",
++                    state,
++                    read,
++                    write,
++                    capacity
++                );
+                 return Err(EIO);
+             }
+             if read != write {
+@@ -664,11 +694,19 @@ pub(crate) fn submit_render(
+         owner: Arc<Mutex<g16_vm::AddressSpace>>,
+         params: &render::Parameters,
+         support: &Support,
++        timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+         self.reserve_flight()?;
+         let mut queue = queues.lock();
+         self.prepare_queues(&mut queue)?;
+-        let result = self.submit_render_queue(&mut queue, queues.clone(), owner, params, support);
++        let result = self.submit_render_queue(
++            &mut queue,
++            queues.clone(),
++            owner,
++            params,
++            support,
++            timestamps,
++        );
+         if queue.pending == 0 {
+             queue.events = None;
+         }
+@@ -682,6 +720,7 @@ fn submit_render_queue(
+         owner: Arc<Mutex<g16_vm::AddressSpace>>,
+         params: &render::Parameters,
+         support: &Support,
++        timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+         let mut guard = owner.lock();
+         let client = &mut *guard;
+@@ -712,6 +751,7 @@ fn submit_render_queue(
+             queues,
+             &mut pool,
+             owner.clone(),
++            timestamps,
+         );
+         self.tvb_pools.push(pool, GFP_KERNEL)?;
+         result
+@@ -726,6 +766,7 @@ fn submit_render_pool(
+         queues: Arc<Mutex<FirmwareQueues>>,
+         pool: &mut crate::g16_tvb::Tvb,
+         owner: Arc<Mutex<g16_vm::AddressSpace>>,
++        timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+         if self.render_failed {
+             return Err(EIO);
+@@ -741,8 +782,8 @@ fn submit_render_pool(
+             .publication(self.render_publication)
+             .ok_or(ENOSPC)?;
+         pool.work_addresses(&mut a, self.render_publication);
+-        // Timestamp microcommands write private per-Work counter slots. The
+-        // frontend copies the converted values to caller BOs before its fence.
++        // Keep profiling storage private to the Work. Public timestamp BOs
++        // are written by the firmware through its separate user destinations.
+         let lanes = queue.lanes.as_ref().ok_or(EIO)?;
+         a.tiling_queue = lanes[0].queue;
+         a.fragment_queue = lanes[1].queue;
+@@ -803,15 +844,20 @@ fn submit_render_pool(
+         crate::mem::sync();
+         // A live context lease keeps these roots fixed through retirement.
+         a.context_id = u64::from(self.acquire_context(space, 9)?);
++        a.tiling_user_timestamp_start = timestamps[0];
++        a.tiling_user_timestamp_end = timestamps[1];
++        a.fragment_user_timestamp_start = timestamps[2];
++        a.fragment_user_timestamp_end = timestamps[3];
+         // From here any publication failure quarantines the roots.
+         self.render_failed = true;
+         let mut ta = params.tiling_work(&a).ok_or(EINVAL)?;
+         let mut frag = params.fragment_work(&a).ok_or(EINVAL)?;
+-        let raw_timestamps = [va + 0x100, va + 0x108, va + 0x110, va + 0x118];
+-        ta[0x8c8..0x8d0].copy_from_slice(&raw_timestamps[0].to_le_bytes());
+-        ta[0x8d0..0x8d8].copy_from_slice(&raw_timestamps[1].to_le_bytes());
+-        frag[0xc10..0xc18].copy_from_slice(&raw_timestamps[2].to_le_bytes());
+-        frag[0xc18..0xc20].copy_from_slice(&raw_timestamps[3].to_le_bytes());
++        // Keep firmware's internal profiling destinations distinct from the
++        // explicit user timestamp slots used for UAPI completion above.
++        ta[0x8c8..0x8d0].copy_from_slice(&(va + 0x100).to_le_bytes());
++        ta[0x8d0..0x8d8].copy_from_slice(&(va + 0x108).to_le_bytes());
++        frag[0xc10..0xc18].copy_from_slice(&(va + 0x110).to_le_bytes());
++        frag[0xc18..0xc20].copy_from_slice(&(va + 0x118).to_le_bytes());
+         // TVB initialization and first publication of a firmware queue are
+         // independent: several public queues can share one VM's TVB pool.
+         let initbm = !pool.initialized;
+@@ -866,7 +912,6 @@ fn submit_render_pool(
+                     (queue.priority as usize * 3, epoch),
+                     (queue.priority as usize * 3 + 1, epoch),
+                 ],
+-                timestamps: raw_timestamps,
+                 render: Some(RenderFlight {
+                     addresses: a,
+                     client: owner,
+@@ -1035,11 +1080,19 @@ pub(crate) fn submit_compute(
+         parent: &mut g16_vm::AddressSpace,
+         params: &compute::Parameters,
+         memory: &impl crate::g16_cdm::Memory,
++        timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+         self.reserve_flight()?;
+         let mut queue = queues.lock();
+         self.prepare_queues(&mut queue)?;
+-        let result = self.submit_compute_queue(&mut queue, queues.clone(), parent, params, memory);
++        let result = self.submit_compute_queue(
++            &mut queue,
++            queues.clone(),
++            parent,
++            params,
++            memory,
++            timestamps,
++        );
+         if queue.pending == 0 {
+             queue.events = None;
+         }
+@@ -1053,6 +1106,7 @@ fn submit_compute_queue(
+         parent: &mut g16_vm::AddressSpace,
+         params: &compute::Parameters,
+         memory: &impl crate::g16_cdm::Memory,
++        timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+         let lane = queue.lanes.as_ref().ok_or(EIO)?[2];
+         let priority = queue.priority;
+@@ -1119,6 +1173,10 @@ fn submit_compute_queue(
+         self.render_failed = true;
+         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
+         let work = params.work(&a).ok_or(EINVAL)?;
++        // Timestamp's user destinations must lie in the validated special-
++        // object aperture. Firmware writes nanoseconds directly, as on M1/M2.
++        // The pointer pair is private to this Work and may be consumed/reset.
++        let user_timestamps = a.work + 0x17c0;
+         let count = self.compute_publication.checked_add(1).ok_or(ENOSPC)?;
+         let count32 = u32::try_from(count).map_err(|_| ENOSPC)?;
+ 
+@@ -1128,7 +1186,13 @@ fn submit_compute_queue(
+         fw.write_live(compute::SHARED_STATE, &count32.to_le_bytes())?;
+         fw.write_live(a.work, &work)?;
+         fw.write_live(a.work + compute::ENTRY_OFFSET, &compute::entry(params.cdm))?;
+-        fw.write_live(a.microsequence, &params.microsequence(&a))?;
++        let mut microsequence = params.microsequence(&a);
++        for base in [0x1bc, 0x20c] {
++            microsequence[base + 0x24..base + 0x2c].copy_from_slice(&user_timestamps.to_le_bytes());
++        }
++        fw.write_live(user_timestamps, &timestamps[0].to_le_bytes())?;
++        fw.write_live(user_timestamps + 8, &timestamps[1].to_le_bytes())?;
++        fw.write_live(a.microsequence, &microsequence)?;
+         let notifier = a.notifier(count32);
+         // Retained notifier list links are firmware-owned even after completion.
+         fw.write_live(a.notifier, &notifier[..0x14])?;
+@@ -1200,7 +1264,6 @@ fn submit_compute_queue(
+                 stamps: [Some(stamp), None],
+                 queues: [(pointers, head), (0, 0)],
+                 channels: [(channel, next), (usize::MAX, 0)],
+-                timestamps: [a.timestamp_start, a.timestamp_end, 0, 0],
+                 render: None,
+             },
+             GFP_KERNEL,
+@@ -1330,13 +1393,3 @@ fn service_render_events(
+         Ok(())
+     }
+ }
+-
+-fn timestamp_ns(raw: u64) -> Result<u64> {
+-    // Firmware profiling timestamps use the 24 MHz always-on clock. M4's
+-    // architectural CNTFRQ can instead describe the extended 1 GHz counter.
+-    const FREQUENCY: u64 = 24_000_000;
+-    (raw / FREQUENCY)
+-        .checked_mul(1_000_000_000)
+-        .and_then(|n| n.checked_add((raw % FREQUENCY) * 1_000_000_000 / FREQUENCY))
+-        .ok_or(EOVERFLOW)
+-}

@@ -1,0 +1,554 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Sun, 13 Sep 2026 19:22:01 +0000
+Subject: [PATCH] drm/asahi: batch M4 memory publication and clean only dirty
+ pages
+
+Skip unchanged firmware allocations and page tables during cache maintenance. Read-only UAT walks no longer allocate or dirty tracking metadata. Record table edits and new zero tables before publication, retaining ownership across allocation failures.
+
+Batch live writes and queue clearing across pages with two barriers per range, and publish TVB growth entries together before the existing count/reply barriers. Preserve cache invalidation, TLB ordering, and context/device memory lifetimes.
+
+Validated with actual Rust methods under a host page/cache model, including cross-page guards and allocation failures; warning-free kernel build 044; and M4 boot 023 tests covering UAPI, async bursts, pending teardown, mixed/partial rendering, TVB growth/refusal, indirect compute, GPU aliases, compressed ZLS, spilling, and delayed dependencies/timestamps.
+
+(cherry picked from commit f61af905d49ddaebede60ffeb9bd9e76d2b5445c)
+(cherry picked from commit e1a4f50d0fe3ffcb62c2807a8a87e9fd278080c9)
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs |  14 +--
+ drivers/gpu/drm/asahi/g16_tvb.rs     |  11 ++-
+ drivers/gpu/drm/asahi/g16_vm.rs      | 137 ++++++++++++++++++++-------
+ drivers/gpu/drm/asahi/m4_mem.rs      |   3 +-
+ drivers/gpu/drm/asahi/m4_pgtable.rs  |  79 ++++++++++-----
+ 5 files changed, 170 insertions(+), 74 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 2b264c1f3d88..094aaa166c29 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -487,11 +487,7 @@ fn publish_render(
+                 q::RING
+             };
+             if rebind {
+-                let zeros = [0u8; 0x100];
+-                for offset in (0..0x2410usize).step_by(zeros.len()) {
+-                    let size = zeros.len().min(0x2410 - offset);
+-                    fw.write_live(queue + 0xb0 + offset as u64, &zeros[..size])?;
+-                }
++                fw.zero_live(queue + 0xb0, 0x2410)?;
+                 let jobs = q::JOBS;
+                 let context = q::CONTEXT;
+                 fw.write_live(
+@@ -764,13 +760,7 @@ pub(crate) fn submit_compute(
+         .encode_priority(priority)
+         .ok_or(EINVAL)?;
+         if rebind {
+-            let zeros = [0u8; 0x100];
+-            for offset in (0..0x2410usize).step_by(zeros.len()) {
+-                fw.write_live(
+-                    compute::QUEUE + 0xb0 + offset as u64,
+-                    &zeros[..zeros.len().min(0x2410 - offset)],
+-                )?;
+-            }
++            fw.zero_live(compute::QUEUE + 0xb0, 0x2410)?;
+             fw.write_live(compute::QUEUE, &queue)?;
+             fw.write_live(compute::POINTERS, &q::pointers(0x500, 0))?;
+             fw.write_live(compute::JOBS, &q::jobs(compute::JOBS))?;
+diff --git a/drivers/gpu/drm/asahi/g16_tvb.rs b/drivers/gpu/drm/asahi/g16_tvb.rs
+index 4417912f0522..45eda3533781 100644
+--- a/drivers/gpu/drm/asahi/g16_tvb.rs
++++ b/drivers/gpu/drm/asahi/g16_tvb.rs
+@@ -114,14 +114,17 @@ pub(crate) fn grow(
+         client.sync();
+         crate::mem::tlbi_all();
+         crate::mem::sync();
++        let mut entries = [0u8; GROW_BLOCKS as usize * 8];
+         for index in 0..new - old {
+             let dva = self.next + u64::from(index) * 0x28000;
+             let id = (dva - render::CONTEXT_BASE) / 0x8000;
+-            fw.write_live(
+-                a.buffer_manager_block_list + u64::from(old + index) * 8,
+-                &id.to_le_bytes(),
+-            )?;
++            let offset = index as usize * 8;
++            entries[offset..offset + 8].copy_from_slice(&id.to_le_bytes());
+         }
++        fw.write_live(
++            a.buffer_manager_block_list + u64::from(old) * 8,
++            &entries[..(new - old) as usize * 8],
++        )?;
+         crate::mem::sync();
+         let counts = (u64::from(new) | (u64::from(new) << 32)).to_le_bytes();
+         fw.write_live(a.buffer_manager_block_control, &counts)?;
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 057e3fe03e88..edf6133d9cfb 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -6,6 +6,7 @@
+ //! roots, even when the hardware context table is using slot zero.
+ 
+ use crate::pgtable::{prot, UatPageTable, UAT_PGSZ};
++use core::cell::Cell;
+ use kernel::{device, page::Page, prelude::*};
+ 
+ const IAS: usize = 42;
+@@ -66,7 +67,7 @@ pub(crate) fn alloc_low(
+             let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+             // These raw pages do not receive the GEM/DMA mapping's initial
+             // publication. Clean CPU initialization before exposing them.
+-            sync_page(&page);
++            clean_page(&page);
+             let phys = page.phys();
+             self.pages.push((v, page), GFP_KERNEL)?;
+             self.low
+@@ -93,7 +94,7 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+                 let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, UAT_PGSZ) };
+                 render::private_page(&pool, offset, bytes).ok_or(EINVAL)
+             })?;
+-            sync_page(page);
++            clean_page(page);
+         }
+         for (alias, offset, size) in render::private_aliases(&pool) {
+             for page in (0..size).step_by(UAT_PGSZ) {
+@@ -140,7 +141,7 @@ pub(crate) fn alloc_tvb_blocks(&mut self, base: u64, count: usize) -> Result<boo
+                     Ok(page) => page,
+                     Err(_) => return Ok(false),
+                 };
+-                sync_page(&page);
++                clean_page(&page);
+                 pages.push((va, page), GFP_KERNEL)?;
+             }
+         }
+@@ -173,7 +174,7 @@ pub(crate) fn write_low(&mut self, mut va: u64, mut bytes: &[u8]) -> Result {
+                 }
+                 Ok(())
+             })?;
+-            sync_page(page);
++            clean_page(page);
+             va = va.checked_add(size as u64).ok_or(EINVAL)?;
+             bytes = &bytes[size..];
+         }
+@@ -207,7 +208,7 @@ pub(crate) fn snapshot(
+                 core::slice::from_raw_parts_mut(ptr, UAT_PGSZ)
+             })
+         })?;
+-        sync_page(&page);
++        clean_page(&page);
+         let phys = page.phys();
+         self.snapshots.push(page, GFP_KERNEL)?;
+         // Retain backing before the first possible translation change.
+@@ -229,8 +230,8 @@ pub(crate) fn snapshot(
+     /// mapping changes do not need to sweep all existing client allocations.
+     /// Firmware-private storage is managed separately by FirmwareSpace.
+     pub(crate) fn sync(&self) {
+-        self.low.sync();
+-        self.high.sync();
++        self.low.clean();
++        self.high.clean();
+         crate::mem::sync();
+     }
+ 
+@@ -330,6 +331,10 @@ pub(crate) fn check_geometry(&mut self, dev: &device::Device) -> Result {
+ struct FirmwareRegion {
+     va: u64,
+     pages: KVec<Owned<Page>>,
++    // One flag per owned page. Live writes publish themselves; only allocation
++    // and unpublished initialization need work at the next space-wide sync.
++    dirty_pages: KVec<Cell<bool>>,
++    pending: Cell<bool>,
+ }
+ 
+ /// The firmware uses this bootloader root independently of all client slots.
+@@ -408,8 +413,17 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+         for _ in 0..size / UAT_PGSZ {
+             pages.push(Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?, GFP_KERNEL)?;
+         }
+-        self.regions
+-            .push(FirmwareRegion { va, pages }, GFP_KERNEL)?;
++        let mut dirty_pages = KVec::new();
++        dirty_pages.extend_with(pages.len(), Cell::new(true), GFP_KERNEL)?;
++        self.regions.push(
++            FirmwareRegion {
++                va,
++                pages,
++                dirty_pages,
++                pending: Cell::new(true),
++            },
++            GFP_KERNEL,
++        )?;
+         let region = self.regions.last().ok_or(EIO)?;
+         for (i, page) in region.pages.iter().enumerate() {
+             let v = va + (i * UAT_PGSZ) as u64;
+@@ -439,6 +453,8 @@ pub(crate) fn write(&mut self, va: u64, bytes: &[u8]) -> Result {
+         while !remaining.is_empty() {
+             let within = offset & (UAT_PGSZ - 1);
+             let size = remaining.len().min(UAT_PGSZ - within);
++            region.pending.set(true);
++            region.dirty_pages[offset / UAT_PGSZ].set(true);
+             region.pages[offset / UAT_PGSZ].with_pointer_into_page(within, size, |p| {
+                 // SAFETY: These owned bytes are not yet published to firmware.
+                 unsafe {
+@@ -466,6 +482,8 @@ pub(crate) fn init_page(
+             .iter()
+             .find(|r| va >= r.va && va < r.va + (r.pages.len() * UAT_PGSZ) as u64)
+             .ok_or(EINVAL)?;
++        region.pending.set(true);
++        region.dirty_pages[((va - region.va) as usize) / UAT_PGSZ].set(true);
+         region.pages[((va - region.va) as usize) / UAT_PGSZ].with_pointer_into_page(
+             0,
+             UAT_PGSZ,
+@@ -504,38 +522,82 @@ pub(crate) fn alloc_render_support(&mut self) -> Result {
+         Ok(())
+     }
+ 
+-    /// Update host-owned fields after publication, preserving adjacent firmware
+-    /// data in the CPU cache line. The caller must own the requested bytes.
++    /// Update host-owned bytes, preserving adjacent firmware-owned cache lines.
++    /// Cache maintenance completes once per range, not once per page.
+     pub(crate) fn write_live(&mut self, va: u64, bytes: &[u8]) -> Result {
+-        let end = va.checked_add(bytes.len() as u64).ok_or(EINVAL)?;
++        self.update_live(va, bytes.len(), |ptr, offset, size| {
++            // SAFETY: update_live supplies an exclusively host-owned destination
++            // and a range within the source slice, with no alias between them.
++            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), ptr, size) };
++        })
++    }
++
++    pub(crate) fn zero_live(&mut self, va: u64, size: usize) -> Result {
++        self.update_live(va, size, |ptr, _, size| {
++            // SAFETY: update_live supplies a valid host-owned byte range.
++            unsafe { core::ptr::write_bytes(ptr, 0, size) };
++        })
++    }
++
++    fn update_live(
++        &mut self,
++        va: u64,
++        size: usize,
++        mut update: impl FnMut(*mut u8, usize, usize),
++    ) -> Result {
++        let end = va.checked_add(size as u64).ok_or(EINVAL)?;
+         let region = self
+             .regions
+             .iter()
+             .find(|r| va >= r.va && end <= r.va + (r.pages.len() * UAT_PGSZ) as u64)
+             .ok_or(EINVAL)?;
+-        let mut offset = (va - region.va) as usize;
+-        let mut remaining = bytes;
+-        while !remaining.is_empty() {
+-            let within = offset & (UAT_PGSZ - 1);
+-            let size = remaining.len().min(UAT_PGSZ - within);
+-            region.pages[offset / UAT_PGSZ].with_page_mapped(|p| {
+-                // SAFETY: Bounds above place all lines and bytes in this page.
+-                // Previously published CPU writes have already reached PoC.
+-                unsafe {
+-                    for off in (within & !63..within + size).step_by(64) {
+-                        core::arch::asm!("dc ivac, {addr}", addr = in(reg) p.add(off));
+-                    }
+-                    core::arch::asm!("dsb sy");
+-                    core::ptr::copy_nonoverlapping(remaining.as_ptr(), p.add(within), size);
+-                    for off in (within & !63..within + size).step_by(64) {
+-                        core::arch::asm!("dc cvac, {addr}", addr = in(reg) p.add(off));
+-                    }
+-                    core::arch::asm!("dsb sy");
++        if size == 0 {
++            return Ok(());
++        }
++        let start = (va - region.va) as usize;
++        let end = start + size;
++        let first = start / UAT_PGSZ;
++        let last = (end - 1) / UAT_PGSZ;
++        for index in first..=last {
++            // Unpublished initialization is still authoritative in CPU cache.
++            if region.dirty_pages[index].get() {
++                continue;
++            }
++            let base = index * UAT_PGSZ;
++            let within = start.saturating_sub(base);
++            let limit = (end - base).min(UAT_PGSZ);
++            region.pages[index].with_page_mapped(|p| {
++                for off in (within & !63..limit).step_by(64) {
++                    // SAFETY: These cache lines lie within the mapped page.
++                    unsafe { core::arch::asm!("dc ivac, {addr}", addr = in(reg) p.add(off)) };
+                 }
+             });
+-            remaining = &remaining[size..];
+-            offset += size;
+         }
++        crate::mem::sync();
++        for index in first..=last {
++            let base = index * UAT_PGSZ;
++            let within = start.saturating_sub(base);
++            let limit = (end - base).min(UAT_PGSZ);
++            let dirty = region.dirty_pages[index].replace(false);
++            region.pages[index].with_page_mapped(|p| {
++                // SAFETY: The checked range lies in this mapped page. The
++                // caller owns these bytes; neighboring firmware bytes were
++                // invalidated before the batch's completion barrier above.
++                unsafe { update(p.add(within), base + within - start, limit - within) };
++                // Publish all initialization on a dirty page, including zeros
++                // outside this write. Published pages need only touched lines.
++                let lines = if dirty {
++                    0..UAT_PGSZ
++                } else {
++                    (within & !63)..limit
++                };
++                for off in lines.step_by(64) {
++                    // SAFETY: The cache line lies in this mapped page.
++                    unsafe { core::arch::asm!("dc cvac, {addr}", addr = in(reg) p.add(off)) };
++                }
++            });
++        }
++        crate::mem::sync();
+         Ok(())
+     }
+ 
+@@ -580,8 +642,13 @@ pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
+ 
+     pub(crate) fn sync(&self) {
+         for region in &self.regions {
+-            for page in &region.pages {
+-                sync_page(page);
++            if !region.pending.replace(false) {
++                continue;
++            }
++            for (page, dirty) in region.pages.iter().zip(&region.dirty_pages) {
++                if dirty.replace(false) {
++                    clean_page(page);
++                }
+             }
+         }
+         self.table.sync();
+@@ -608,7 +675,7 @@ fn drop(&mut self) {
+     }
+ }
+ 
+-fn sync_page(page: &Page) {
++fn clean_page(page: &Page) {
+     page.with_page_mapped(|p| {
+         for off in (0..UAT_PGSZ).step_by(64) {
+             // SAFETY: The cache line lies inside this owned page.
+diff --git a/drivers/gpu/drm/asahi/m4_mem.rs b/drivers/gpu/drm/asahi/m4_mem.rs
+index 9c76f1351e00..bbcfae457981 100644
+--- a/drivers/gpu/drm/asahi/m4_mem.rs
++++ b/drivers/gpu/drm/asahi/m4_mem.rs
+@@ -1,7 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ // Copyright The Gravity Linux Contributors
+ 
+-//! GPU page-table publication, matching the Python shim's native UAT sync.
++//! GPU memory publication and translation invalidation.
++//! Cache-clean loops queue maintenance; publication boundaries complete it.
+ 
+ #[inline(always)]
+ pub(crate) fn sync() {
+diff --git a/drivers/gpu/drm/asahi/m4_pgtable.rs b/drivers/gpu/drm/asahi/m4_pgtable.rs
+index 2c8adaba9538..253ffa5a6888 100644
+--- a/drivers/gpu/drm/asahi/m4_pgtable.rs
++++ b/drivers/gpu/drm/asahi/m4_pgtable.rs
+@@ -8,6 +8,7 @@
+ //! format. This module manages the actual page tables by allocating raw memory pages from
+ //! the kernel page allocator.
+ 
++use core::cell::Cell;
+ use core::fmt::Debug;
+ use core::mem::size_of;
+ use core::ops::Range;
+@@ -219,6 +220,12 @@ pub(crate) struct DumpedPage {
+     pub(crate) data: Option<Owned<Page>>,
+ }
+ 
++enum Walk {
++    Read,
++    Write,
++    Allocate,
++}
++
+ struct OwnedTable {
+     phys: PhysicalAddr,
+     parent: PhysicalAddr,
+@@ -232,7 +239,7 @@ pub(crate) struct UatPageTable {
+     oas_mask: u64,
+     ias_mask: u64,
+     owned_tables: KVec<OwnedTable>,
+-    walked_tables: KVec<PhysicalAddr>,
++    dirty_tables: KVec<(PhysicalAddr, Cell<bool>)>,
+ }
+ 
+ impl UatPageTable {
+@@ -247,6 +254,8 @@ pub(crate) fn new_with_ias(oas: u32, ias: usize) -> Result<Self> {
+         }
+         pr_debug!("UATPageTable::new: oas={} ias={}\n", oas, ias);
+         let ttb_page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
++        let mut dirty_tables = KVec::new();
++        dirty_tables.push((ttb_page.phys(), Cell::new(true)), GFP_KERNEL)?;
+         let ttb = Page::into_phys(ttb_page);
+         Ok(UatPageTable {
+             ttb,
+@@ -255,7 +264,7 @@ pub(crate) fn new_with_ias(oas: u32, ias: usize) -> Result<Self> {
+             oas_mask: (1u64 << oas) - 1,
+             ias_mask: (1u64 << ias) - 1,
+             owned_tables: KVec::new(),
+-            walked_tables: KVec::new(),
++            dirty_tables,
+         })
+     }
+ 
+@@ -301,14 +310,17 @@ pub(crate) fn new_with_ttb_and_ias(
+             oas_mask: (1u64 << oas) - 1,
+             ias_mask: (1u64 << ias) - 1,
+             owned_tables: KVec::new(),
+-            walked_tables: KVec::new(),
++            dirty_tables: KVec::new(),
+         })
+     }
+ 
+-    /// Publish table edits to the noncoherent firmware walker. Includes
+-    /// inherited tables modified while extending a firmware-owned root.
+-    pub(crate) fn sync(&self) {
+-        for phys in Iterator::chain(core::iter::once(&self.ttb), self.walked_tables.iter()) {
++    /// Queue cache cleaning for edited tables, including borrowed ancestors.
++    /// The enclosing publication batch supplies the completion barrier.
++    pub(crate) fn clean(&self) {
++        for (phys, dirty) in &self.dirty_tables {
++            if !dirty.replace(false) {
++                continue;
++            }
+             // SAFETY: Every recorded table is live until this owner is dropped.
+             let page = unsafe { Page::borrow_phys_unchecked(phys) };
+             page.with_page_mapped(|p| {
+@@ -320,17 +332,35 @@ pub(crate) fn sync(&self) {
+                 }
+             });
+         }
++    }
++
++    pub(crate) fn sync(&self) {
++        self.clean();
+         crate::mem::sync();
+     }
+ 
++    // Record dirtiness before writing a PTE so allocation failure cannot leave
++    // an untracked edit. Read-only walks neither allocate nor dirty metadata.
++    fn mark_dirty(&mut self, phys: PhysicalAddr) -> Result {
++        if let Some((_, dirty)) = self.dirty_tables.iter().find(|(p, _)| *p == phys) {
++            dirty.set(true);
++            return Ok(());
++        }
++        self.dirty_tables
++            .push((phys, Cell::new(true)), GFP_KERNEL)?;
++        Ok(())
++    }
++
+     pub(crate) fn ttb(&self) -> PhysicalAddr {
+         self.ttb
+     }
+ 
+-    fn with_pages<F>(&mut self, iova_range: Range<u64>, alloc: bool, mut cb: F) -> Result
++    fn with_pages<F>(&mut self, iova_range: Range<u64>, walk: Walk, mut cb: F) -> Result
+     where
+         F: FnMut(u64, &[Pte]) -> Result,
+     {
++        let alloc = matches!(walk, Walk::Allocate);
++        let write = !matches!(walk, Walk::Read);
+         pr_debug!(
+             "UATPageTable::with_pages: {:#x?} alloc={}\n",
+             iova_range,
+@@ -381,9 +411,6 @@ fn with_pages<F>(&mut self, iova_range: Range<u64>, alloc: bool, mut cb: F) -> R
+                         as usize;
+                     // SAFETY: Page table addresses are either allocated by us, or
+                     // firmware-managed and safe to borrow a struct page from.
+-                    if !self.walked_tables.contains(&phys) {
+-                        self.walked_tables.push(phys, GFP_KERNEL)?;
+-                    }
+                     let upt = unsafe { Page::borrow_phys_unchecked(&phys) };
+                     pr_debug!("UATPageTable::with_pages: borrowed phys {:#x}\n", phys);
+                     pt_addr[level] =
+@@ -395,6 +422,7 @@ fn with_pages<F>(&mut self, iova_range: Range<u64>, alloc: bool, mut cb: F) -> R
+                             let mut upte_val = upte.load(Ordering::Relaxed);
+                             // Allocate if requested
+                             if upte_val == 0 && alloc {
++                                self.mark_dirty(phys)?;
+                                 let pt_page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+                                 pr_debug!("UATPageTable::with_pages: alloc PT at {:#x}\n", pt_page.phys());
+                                 let pt_paddr = pt_page.phys();
+@@ -404,6 +432,9 @@ fn with_pages<F>(&mut self, iova_range: Range<u64>, alloc: bool, mut cb: F) -> R
+                                     index: upidx,
+                                 }, GFP_KERNEL)?;
+                                 let _ = Page::into_phys(pt_page);
++                                // The new table's zero entries also need publication.
++                                // Ownership has transferred before this fallible step.
++                                self.mark_dirty(pt_paddr)?;
+                                 upte_val = pt_paddr | PTE_TYPE_LEAF_TABLE;
+                                 upte.store(upte_val, Ordering::Relaxed);
+                             }
+@@ -452,8 +483,8 @@ fn with_pages<F>(&mut self, iova_range: Range<u64>, alloc: bool, mut cb: F) -> R
+             );
+             // SAFETY: Page table addresses are either allocated by us, or
+             // firmware-managed and safe to borrow a struct page from.
+-            if !self.walked_tables.contains(&phys) {
+-                self.walked_tables.push(phys, GFP_KERNEL)?;
++            if write {
++                self.mark_dirty(phys)?;
+             }
+             let pt = unsafe { Page::borrow_phys_unchecked(&phys) };
+             pt.with_pointer_into_page(idx * PTE_SIZE, count * PTE_SIZE, |p| {
+@@ -502,7 +533,7 @@ pub(crate) fn map_pages(
+ 
+         let pte_bits = self.pte_bits();
+ 
+-        self.with_pages(iova_range, true, |iova, ptes| {
++        self.with_pages(iova_range, Walk::Allocate, |iova, ptes| {
+             for (idx, pte) in ptes.iter().enumerate() {
+                 let ptev = pte.load(Ordering::Relaxed);
+                 if ptev != 0 {
+@@ -530,7 +561,7 @@ pub(crate) fn translate(&mut self, iova: u64) -> Result<Option<PhysicalAddr>> {
+         }
+         let mut result = None;
+         let mask = self.oas_mask & !(UAT_PGMSK as u64);
+-        self.with_pages(page..end, false, |_, ptes| {
++        self.with_pages(page..end, Walk::Read, |_, ptes| {
+             let pte = ptes[0].load(Ordering::Relaxed);
+             if pte & PTE_TYPE_BITS == PTE_TYPE_LEAF_TABLE {
+                 result = Some((pte & mask) | (iova & UAT_PGMSK as u64));
+@@ -546,7 +577,7 @@ pub(crate) fn leaf(&mut self, address: u64) -> Result<u64> {
+             return Err(EINVAL);
+         }
+         let mut value = 0;
+-        self.with_pages(address..address + UAT_PGSZ as u64, false, |_, ptes| {
++        self.with_pages(address..address + UAT_PGSZ as u64, Walk::Read, |_, ptes| {
+             value = ptes[0].load(Ordering::Relaxed);
+             Ok(())
+         })?;
+@@ -561,15 +592,19 @@ pub(crate) fn restore_leaf(&mut self, address: u64, value: u64) -> Result {
+         if address & UAT_PGMSK as u64 != 0 || value & PTE_TYPE_BITS != PTE_TYPE_LEAF_TABLE {
+             return Err(EINVAL);
+         }
+-        self.with_pages(address..address + UAT_PGSZ as u64, false, |_, ptes| {
+-            ptes[0].store(value, Ordering::Relaxed);
+-            Ok(())
+-        })
++        self.with_pages(
++            address..address + UAT_PGSZ as u64,
++            Walk::Write,
++            |_, ptes| {
++                ptes[0].store(value, Ordering::Relaxed);
++                Ok(())
++            },
++        )
+     }
+ 
+     pub(crate) fn unmap_pages(&mut self, iova_range: Range<u64>) -> Result {
+         pr_debug!("UATPageTable::unmap_pages: {:#x?}\n", iova_range);
+-        self.with_pages(iova_range, false, |iova, ptes| {
++        self.with_pages(iova_range, Walk::Write, |iova, ptes| {
+             for (idx, pte) in ptes.iter().enumerate() {
+                 if pte.load(Ordering::Relaxed) & PTE_TYPE_LEAF_TABLE == 0 {
+                     pr_err!(
+@@ -588,7 +623,7 @@ pub(crate) fn dump_pages(&mut self, iova_range: Range<u64>) -> Result<KVVec<Dump
+         let mut pages = KVVec::new();
+         let oas_mask = self.oas_mask;
+         let iova_base = self.va_range.start & !self.ias_mask;
+-        self.with_pages(iova_range, false, |iova, ptes| {
++        self.with_pages(iova_range, Walk::Read, |iova, ptes| {
+             let iova = iova | iova_base;
+             for (idx, ppte) in ptes.iter().enumerate() {
+                 let pte = ppte.load(Ordering::Relaxed);

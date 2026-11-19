@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 4 Oct 2026 16:01:31 -0400
+Subject: [PATCH] drm/asahi: Report G16 submission backpressure that cannot
+ clear
+
+Admission returns EBUSY when a firmware resource is exhausted, and the
+worker retries every 10 s without logging. Every resource involved is
+released when work retires, so EBUSY with no flights outstanding can
+never clear: it is an accounting leak, and submissions stall forever
+with an idle GPU while the client waits on its fence. CS2 loads under
+muvm stalled exactly like that, with no kernel output.
+
+Always report, once per boot per resource, backpressure with nothing in
+flight, as well as queue-event-slot and ASID exhaustion, with current
+occupancy. Transient pressure under load stays behind fw_trace & 2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RvQieG9SGoR3ZeSdSguHnB
+(cherry picked from commit d9161764fb9a8f2b0866fb5f4f071a1192f6ae43)
+[Niklas: ported to v7.3: module parameter .value() returns the value, not a reference]
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index ceb8dfb85765..cb9bd53e32d1 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -196,14 +196,23 @@ impl Bootstrap {
+     /// Report each exhausted resource once, without logging every retry or
+     /// enabling firmware KTrace (which changes command execution timing).
+     fn report_pressure(&self, bit: u64, resource: &str) {
+-        if crate::module_parameters::fw_trace.value() & 2 != 0
++        // Every resource here is released when work retires. Backpressure with
++        // nothing in flight can therefore never clear: it means an accounting
++        // leak, and submission stalls indefinitely with an idle GPU. Always
++        // report that, and event/ASID exhaustion, once per boot; transient
++        // ring and scene pressure under load stays behind fw_trace & 2.
++        let persistent = bit & (1 | 8) != 0 || self.flights.is_empty();
++        if (persistent || crate::module_parameters::fw_trace.value() & 2 != 0)
+             && self.pressure_reported.fetch_or(bit, Ordering::Relaxed) & bit == 0
+         {
++            let asids = (1..64).filter(|&i| self.context_users[i] != 0).count();
+             dev_info!(
+                 self.dev.as_ref(),
+-                "G16: backpressure {} outstanding={}\n",
++                "G16: backpressure {} outstanding={} queue_events={}/32 asids={}/63\n",
+                 resource,
+-                self.flights.len()
++                self.flights.len(),
++                (self.queue_events.load(Ordering::Acquire) & 0xffff_ffff).count_ones(),
++                asids
+             );
+         }
+     }

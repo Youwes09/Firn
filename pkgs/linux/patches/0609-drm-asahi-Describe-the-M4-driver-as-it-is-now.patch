@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 11:36:20 -0600
+Subject: [PATCH] drm/asahi: Describe the M4 driver as it is now
+
+The help text still called the driver a development port of the Python
+firmware shim. Say what it drives and what it needs from the bootloader.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/Kconfig | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/Kconfig b/drivers/gpu/drm/asahi/Kconfig
+index 6d61de97a677..641170e59136 100644
+--- a/drivers/gpu/drm/asahi/Kconfig
++++ b/drivers/gpu/drm/asahi/Kconfig
+@@ -10,7 +10,9 @@ config DRM_ASAHI_M4
+ 	select RUST_APPLE_RTKIT
+ 	select APPLE_MAILBOX
+ 	help
+-	  Rust DRM driver for the T8132 (M4) GPU, following the Asahi UAPI
+-	  and the M4 Python DRM-shim firmware implementation. Intended for
+-	  development under m1n1. Normal initialization is the default;
+-	  probe_only selects identification without firmware startup.
++	  DRM driver for the GPU in Apple's M4 (T8132), with the Asahi UAPI
++	  Mesa's asahi drivers use. It needs m1n1 to hand the GPU over:
++	  its firmware, memory regions and calibration.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called asahi_m4.

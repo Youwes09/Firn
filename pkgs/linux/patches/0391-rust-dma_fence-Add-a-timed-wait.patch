@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 12 Nov 2026 14:33:47 -0600
+Subject: [PATCH] rust: dma_fence: Add a timed wait
+
+Drivers that tear down a client's work wait for its fences with a
+bound on how long they're willing to stall. Wrap
+dma_fence_wait_timeout() for them.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/dma_buf/dma_fence.rs | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/dma_buf/dma_fence.rs b/rust/kernel/dma_buf/dma_fence.rs
+index c4a3a4405c97..d86668bf9da8 100644
+--- a/rust/kernel/dma_buf/dma_fence.rs
++++ b/rust/kernel/dma_buf/dma_fence.rs
+@@ -43,7 +43,8 @@
+             Relaxed, //
+         },
+         rcu::rcu_barrier, //
+-    }, //
++    },
++    time::Jiffies, //
+ };
+ 
+ /// VTable for dma_fence backend_ops callbacks.
+@@ -582,6 +583,25 @@ fn lock(&self) -> FenceGuard<'_> {
+         guard
+     }
+ 
++    /// Wait for the fence to be signaled, for at most `timeout` jiffies.
++    ///
++    /// Returns the jiffies left, at least one, once the fence is signaled, or
++    /// zero if the wait timed out. An interruptible wait fails with
++    /// `ERESTARTSYS` when a signal arrives.
++    pub fn wait_timeout(&self, interruptible: bool, timeout: Jiffies) -> Result<Jiffies> {
++        let timeout = c_long::try_from(timeout).unwrap_or(c_long::MAX);
++
++        // SAFETY: Inner `fence` is valid because `self` is valid.
++        let ret = unsafe { bindings::dma_fence_wait_timeout(self.as_raw(), interruptible, timeout) };
++        if ret < 0 {
++            // `ret` is a negative errno, which fits in an `i32`.
++            return Err(Error::from_errno(ret as i32));
++        }
++
++        // `ret` is non-negative and at most `timeout`, which came from a `Jiffies`.
++        Ok(ret as Jiffies)
++    }
++
+     /// Get the fence's sequence number.
+     #[inline]
+     pub fn seqno(&self) -> u64 {

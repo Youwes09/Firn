@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:08:37 -0400
+Subject: [PATCH] drm/asahi: G16: retire the cc_pattern experiment
+
+Use the same completion control for both stages. Drop the capture-specific phase and stamp rewrites; the default never performed them.
+
+K1: no callers found in boot configs, tools, or the retained test scripts. Keep the production default exactly.
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ----
+ drivers/gpu/drm/asahi/g16_render.rs  |  5 +----
+ drivers/gpu/drm/asahi/g16_runtime.rs | 28 ----------------------------
+ 3 files changed, 1 insertion(+), 36 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index ae535168a46c..ef2d7d9ff4b3 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -181,10 +181,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
+         },
+-        cc_pattern: u32 {
+-            default: 0,
+-            description: "Experiment: 1 overrides completion_control with Metal's observed per-render pattern, 0 on every fifth render of a queue and 3 otherwise. 2: also the fragment work stamp Metal pairs with it (0x100 + 2k with completion 0, 0x510 + (n + 1) / 2 with completion 3). 3: also the tiling side's own phase from Metal (completion 0 when the ordinal % 5 == 3, stamps 0x100 + 2k or 0x50f + (n + 1) / 2). 0: completion_control as configured",
+-        },
+         ta3d_item: u32 {
+             default: 0,
+             description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index ed2f544f69e3..664a3517123f 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -27,9 +27,6 @@ pub(crate) struct Parameters {
+     /// Diagnostics: the submitting process, captured at ioctl time.
+     pub(crate) tgid: i32,
+     pub(crate) comm: [u8; 16],
+-    /// Tiling-side completion_control when it differs from the fragment
+-    /// side (Metal phases them independently).
+-    pub(crate) tiling_completion_control: Option<u64>,
+     pub(crate) context_base: u64,
+     pub(crate) cycle: u64,
+     pub(crate) deflake_1: u64,
+@@ -265,7 +262,7 @@ fn geometry(&self) -> Geometry {
+             (0x10209, self.tiling_work_stamp),
+             (0x1c9f0, self.tiling_work_stamp),
+             (0x14320, self.tiling_work_stamp),
+-            (0x14308, self.tiling_completion_control.unwrap_or(self.completion_control)),
++            (0x14308, self.completion_control),
+             (0x14318, self.ta_status | 1),
+             (0x01740, 1),
+         ])
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 866d357fa95d..5e6ba98cde7c 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -2498,34 +2498,6 @@ fn submit_render_pool(
+             a.fragment_uuid = u64::from(low);
+             a.tiling_uuid = u64::from(low + 1);
+         }
+-        let cc_pattern = crate::module_parameters::cc_pattern.value();
+-        if cc_pattern != 0 {
+-            let solo = queue_ordinal % 5 == 1;
+-            params.completion_control = if solo { 0 } else { 3 };
+-            if cc_pattern == 3 {
+-                // Capture 8's tiling side has its own phase, two renders
+-                // later, and a stamp series one below the fragment one.
+-                let tiling_solo = queue_ordinal % 5 == 3;
+-                params.tiling_completion_control = Some(if tiling_solo { 0 } else { 3 });
+-                params.tiling_work_stamp = if tiling_solo {
+-                    0x100 + 2 * ((queue_ordinal / 5) & 0x7f)
+-                } else {
+-                    let count = queue_ordinal - (queue_ordinal + 1) / 5;
+-                    0x500 | ((0x0f + (count + 1) / 2) & 0xff)
+-                };
+-            }
+-            if cc_pattern >= 2 {
+-                // Metal pairs the two: completion 0 renders count 0x100 up
+-                // in steps of two, completion 3 renders count 0x510 up once
+-                // per two renders (all 24 renders of capture 8 fit).
+-                params.fragment_work_stamp = if solo {
+-                    0x100 + 2 * ((queue_ordinal / 5) & 0x7f)
+-                } else {
+-                    let count = queue_ordinal - (queue_ordinal + 3) / 5;
+-                    0x500 | ((0x10 + (count + 1) / 2) & 0xff)
+-                };
+-            }
+-        }
+         // Heap buffers: two copies of each encoding on this frame would
+         // exceed the kernel stack together with the job worker's own frame.
+         let mut ta = KVec::new();

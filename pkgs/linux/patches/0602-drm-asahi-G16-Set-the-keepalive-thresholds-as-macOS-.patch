@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 20:03:57 -0600
+Subject: [PATCH] drm/asahi: G16: Set the keepalive thresholds as macOS does
+
+Region C +0x7f4 and +0x7f8 are the keepalive performance and off-mode
+thresholds, in hundredths of a state. The driver left them zero; macOS
+26.6.2 sets 100 on the J713 (captured by Niklas Sheth). The meaning is
+from interface notes by Syd Garlathy <s@ll.dev>, written from macOS's
+drivers. No difference in rendering or idle was measured.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_platform.rs | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index a871d9812eac..414e896e06cc 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -424,6 +424,10 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+             (0x9c8, 40),
+             (0x9cc, 50),
+             (0x9d0, 1),
++            // Keepalive performance and off-mode thresholds, in hundredths
++            // of a state.
++            (0x7f4, 100),
++            (0x7f8, 100),
+             (0x84, self.maximum_power),
+             (0x88, top_state),
+             (0x8c, top_state),

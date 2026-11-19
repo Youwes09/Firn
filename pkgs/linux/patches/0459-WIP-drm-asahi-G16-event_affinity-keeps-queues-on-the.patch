@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 13:48:10 -0400
+Subject: [PATCH] WIP drm/asahi: G16 event_affinity keeps queues on their
+ firmware event index
+
+A queue releases its firmware event index whenever it goes idle and takes
+the lowest free index on its next submission, so after an idle gap a
+queue's Works can name a different event than its earlier ones, and an
+index another queue just released is reused at once. Hang reports show
+it: KWin's consecutive renders 3659 and 3660 wait on the same stamp with
+events 33 and 39, and event 33 also tags waits on Dota's and Xwayland's
+stamps. A4 stalls the first render of a burst after an idle gap, while
+other clients are busy.
+
+event_affinity=1 retakes a queue's previous index when free and otherwise
+allocates next-fit, so released indices are not handed straight to other
+queues; 2 also keeps the index while the queue is idle. fw_trace & 256
+logs each index change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  6 +++-
+ drivers/gpu/drm/asahi/g16_runtime.rs | 44 ++++++++++++++++++++++------
+ 2 files changed, 40 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index e6410a3fabfb..e84c275964a9 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -118,7 +118,7 @@ fn probe<'bound>(
+         },
+         fw_trace: u32 {
+             default: 0,
+-            description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump",
++            description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump, 256=queue event index changes",
+         },
+         dep_stats: u32 {
+             default: 0,
+@@ -160,6 +160,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Experiment: on every VM bind and unbind, 1 also invalidates each bound context's whole ASID (not only the changed pages); 2 additionally invalidates all EL1 translations (tlbi vmalle1os). Both complete with dsb sy before the ioctl returns",
+         },
++        event_affinity: u32 {
++            default: 0,
++            description: "Experiment: firmware event indices of idle queues. 0: an idle queue releases its index and takes the lowest free one when it next submits. 1: it retakes its previous index if free, else the next free index after the last one handed out (so a just-released index is not immediately given to another queue). 2: as 1, and a queue keeps its index while idle, for its whole lifetime (risks event exhaustion with more than 32 live queues; see backpressure logs)",
++        },
+         lifecycle: u32 {
+             default: 0,
+             description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 153dcd286e23..9989dd5ed5ef 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -23,6 +23,8 @@ pub(crate) struct FirmwareQueues {
+     storage: Option<QueueStorage>,
+     priority: u32,
+     events: Option<QueueEvents>,
++    /// The event index this queue held last (event_affinity).
++    last_event: Option<u32>,
+     pending: usize,
+     render_count: u64,
+     compute_count: u64,
+@@ -173,6 +175,7 @@ pub(crate) fn new(priority: u32) -> Self {
+             storage: None,
+             priority,
+             events: None,
++            last_event: None,
+             pending: 0,
+             render_count: crate::module_parameters::fw_counter_start.value(),
+             compute_count: crate::module_parameters::fw_counter_start.value(),
+@@ -574,19 +577,42 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+             }
+         }
+         if owner.events.is_none() {
+-            let previous = self
+-                .queue_events
+-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |mask| {
+-                    let free = !mask & 0xffff_ffff;
+-                    (free != 0).then(|| mask | (1 << free.trailing_zeros()))
++            // Bits 0-31 are the event indices in use. With event_affinity,
++            // bits 32-36 are a next-fit cursor: a queue retakes the index it
++            // last held, and otherwise takes the next free index after the
++            // last one handed out, so an index a queue just released is not
++            // immediately given to a different queue.
++            let affinity = crate::module_parameters::event_affinity.value() != 0;
++            let last = owner.last_event;
++            let mut picked = 0u32;
++            self.queue_events
++                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
++                    let free = !(value as u32);
++                    if free == 0 {
++                        return None;
++                    }
++                    let cursor = ((value >> 32) & 31) as u32;
++                    picked = if !affinity {
++                        free.trailing_zeros()
++                    } else if let Some(last) = last.filter(|&l| free & (1 << l) != 0) {
++                        last
++                    } else {
++                        (free.rotate_right(cursor).trailing_zeros() + cursor) % 32
++                    };
++                    let cursor = if affinity { u64::from((picked + 1) % 32) } else { u64::from(cursor) };
++                    Some((value & 0xffff_ffff) | (1 << picked) | (cursor << 32))
+                 })
+                 .map_err(|_| {
+                     self.report_pressure(8, "events");
+                     EBUSY
+                 })?;
++            if crate::module_parameters::fw_trace.value() & 256 != 0 && owner.last_event != Some(picked) {
++                pr_info!("G16: queue event index {:?} -> {}\n", owner.last_event, picked);
++            }
++            owner.last_event = Some(picked);
+             owner.events = Some(QueueEvents {
+                 slots: self.queue_events.clone(),
+-                index: (!previous & 0xffff_ffff).trailing_zeros(),
++                index: picked,
+             });
+         }
+         Ok(())
+@@ -1290,7 +1316,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             let mut owner = flight.owner.lock();
+             owner.pending -= 1;
+-            if owner.pending == 0 {
++            if owner.pending == 0 && crate::module_parameters::event_affinity.value() < 2 {
+                 owner.events = None;
+             }
+             drop(owner);
+@@ -1742,7 +1768,7 @@ pub(crate) fn submit_render(
+             timestamps,
+             dependencies,
+         );
+-        if queue.pending == 0 {
++        if queue.pending == 0 && crate::module_parameters::event_affinity.value() < 2 {
+             queue.events = None;
+         }
+         result
+@@ -2368,7 +2394,7 @@ pub(crate) fn submit_compute(
+             timestamps,
+             dependencies,
+         );
+-        if queue.pending == 0 {
++        if queue.pending == 0 && crate::module_parameters::event_affinity.value() < 2 {
+             queue.events = None;
+         }
+         result

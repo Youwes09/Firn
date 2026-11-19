@@ -1,0 +1,398 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 14 Sep 2026 18:51:28 -0400
+Subject: [PATCH] drm/asahi: handle M4 firmware counter rollover
+
+Wrap firmware-width stamps and metadata without imposing a device lifetime submission limit. Initialize completion destinations to the target predecessor so zero and high stamps cannot complete prematurely. Keep compute context identity separate from the wrapping low counter word.
+
+Validated with host encoder and timeline regression tests and accelerated hardware qualification across signed, stamp, and metadata boundaries.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 1ab42a3a62f629b08cb874bf19f49a990e8c764b)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  5 ++
+ drivers/gpu/drm/asahi/g16.rs         |  4 +-
+ drivers/gpu/drm/asahi/g16_compute.rs | 21 +++----
+ drivers/gpu/drm/asahi/g16_render.rs  | 17 +++---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 91 ++++++++++++++++++----------
+ drivers/gpu/drm/asahi/g16_stamp.rs   | 23 +++++++
+ 6 files changed, 105 insertions(+), 56 deletions(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_stamp.rs
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 4c0680f5bc51..94c21acb6e7d 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -13,6 +13,7 @@
+ mod g16_platform;
+ mod g16_power;
+ mod g16_render;
++mod g16_stamp;
+ mod g16_tvb;
+ mod g16_vm;
+ #[path = "m4_mem.rs"]
+@@ -108,6 +109,10 @@ fn probe(
+     description: "Apple M4 GPU driver",
+     license: "GPL v2",
+     params: {
++        fw_counter_start: u64 {
++            default: 0,
++            description: "Initial submission counters for firmware rollover qualification (normally 0)",
++        },
+         fw_trace: u32 {
+             default: 0,
+             description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies",
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index cd32fc99b493..d4f0bce6c9c2 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -658,11 +658,11 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+             core_mask: platform.core_mask,
+             maximum_frequency_khz: platform.freq_a[10] * 1000,
+             tvb_pools: KVec::new(),
+-            render_publication: 0,
++            render_publication: *crate::module_parameters::fw_counter_start.value(),
+             next_work_va: 0xffff_fc22_0000_0000,
+             work_arenas: [0..0, 0..0],
+             free_work: [KVec::new(), KVec::new()],
+-            compute_publication: 0,
++            compute_publication: *crate::module_parameters::fw_counter_start.value(),
+             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
+             render_failed: false,
+             flights: KVec::new(),
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index 2fa121d9aa04..da6ccd06fd90 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -102,12 +102,11 @@ pub(crate) struct Addresses {
+ }
+ 
+ impl Addresses {
+-    /// All Work storage is freshly allocated and retained by its owner.
+-    pub(crate) fn publication(index: u64, ordinal: u64, work: u64, alias: u64) -> Option<Self> {
+-        if index > 0x00ff_fff0 || ordinal > u32::MAX as u64 {
+-            return None;
+-        }
+-        Some(Self {
++    /// Work storage is retained by its owner. Firmware-width fields wrap
++    /// independently of the full software publication and queue counters.
++    pub(crate) fn publication(index: u64, ordinal: u64, work: u64, alias: u64) -> Self {
++        let count = index.wrapping_add(1);
++        Self {
+             work,
+             microsequence: work + 0x1000,
+             register_table: alias + 0x20,
+@@ -121,15 +120,15 @@ pub(crate) fn publication(index: u64, ordinal: u64, work: u64, alias: u64) -> Op
+             timestamp_start: work + 0x1700,
+             timestamp_end: work + 0x1708,
+             context: 1,
+-            identity: (1u64 << 32) + 1 + index,
++            identity: (1u64 << 32) | u64::from(count as u32),
+             register_identity: (1u64 << 32) + 1,
+-            counter: index + 1,
+-            event_generation: (index + 1) as u32,
+-            stamp: ((index + 1) * 0x100) as u32,
++            counter: count,
++            event_generation: count as u32,
++            stamp: crate::g16_stamp::value(ordinal, 0x100),
+             event: 4,
+             ordinal: ordinal as u32,
+             cdm_entry: None,
+-        })
++        }
+     }
+ 
+     pub(crate) fn notifier(&self, count: u32) -> [u8; 0x100] {
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index 9add118a80e9..c913be4924ce 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -1108,17 +1108,14 @@ pub(crate) fn private_page(&self, address: u64, out: &mut [u8]) -> Option<()> {
+ pub(crate) const SUPPORT_BASE: u64 = 0xffff_fc20_c300_0000;
+ 
+ impl Addresses {
+-    pub(crate) fn publication(&self, ordinal: u64) -> Option<Self> {
+-        if ordinal > 0x00ff_fff0 {
+-            return None;
+-        }
++    pub(crate) fn publication(&self, ordinal: u64) -> Self {
+         let mut a = *self;
+-        a.tiling_counter += ordinal * 2;
+-        a.fragment_counter += ordinal * 2;
+-        a.tiling_stamp += ordinal * 0x100;
+-        a.fragment_stamp += ordinal * 0x100;
+-        a.buffer_thing = (self.buffer_thing & !0x3fff) + ((ordinal + 1) % 80) * 0x80;
+-        Some(a)
++        a.tiling_counter = a.tiling_counter.wrapping_add(ordinal.wrapping_mul(2));
++        a.fragment_counter = a.fragment_counter.wrapping_add(ordinal.wrapping_mul(2));
++        a.tiling_stamp = u64::from(crate::g16_stamp::value(ordinal, self.tiling_stamp as u32));
++        a.fragment_stamp = u64::from(crate::g16_stamp::value(ordinal, self.fragment_stamp as u32));
++        a.buffer_thing = (self.buffer_thing & !0x3fff) + ((ordinal % 80 + 1) % 80) * 0x80;
++        a
+     }
+ }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 8310ae48aa76..93ff250e0097 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -6,7 +6,7 @@
+ 
+ use kernel::io::Io;
+ use super::Bootstrap;
+-use crate::{g16_compute as compute, g16_fw, g16_render as render, g16_vm};
++use crate::{g16_compute as compute, g16_fw, g16_render as render, g16_stamp, g16_vm};
+ use core::sync::atomic::{AtomicU64, Ordering};
+ use kernel::time::{Instant, Monotonic};
+ use kernel::{
+@@ -64,8 +64,8 @@ pub(crate) fn new(priority: u32) -> Self {
+             priority,
+             events: None,
+             pending: 0,
+-            render_count: 0,
+-            compute_count: 0,
++            render_count: *crate::module_parameters::fw_counter_start.value(),
++            compute_count: *crate::module_parameters::fw_counter_start.value(),
+             last: [None; 2],
+         }
+     }
+@@ -155,7 +155,7 @@ fn report_pressure(&self, bit: u64, resource: &str) {
+     }
+ 
+     /// Lease Work storage until notifier/driver stamps and transport retire.
+-    /// Backing stays mapped. Queue-owned monotonic stamps outlive reused Work,
++    /// Backing stays mapped. Queue-owned wrapping stamps outlive reused Work,
+     /// so a pending dependency never follows a recycled completion address.
+     fn allocate_work(&mut self, render: bool) -> Result<u64> {
+         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
+@@ -235,6 +235,15 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+                 }
+                 fw.write(lane.queue, &descriptor)?;
+                 fw.write(lane.pointers, &q::pointers(0x500, 0))?;
++                // A newly created timeline starts immediately before its first
++                // target. This also permits qualification near stamp rollover.
++                let (ordinal, first) = match stage {
++                    0 => (owner.render_count, 0xc00),
++                    1 => (owner.render_count, 0x100),
++                    _ => (owner.compute_count, 0x100),
++                };
++                let current = g16_stamp::previous(g16_stamp::value(ordinal, first));
++                fw.write_live(lane.firmware_stamp(), &current.to_le_bytes())?;
+             }
+             fw.write(jobs, &q::jobs(jobs))?;
+             fw.write(context, &q::context())?;
+@@ -477,7 +486,7 @@ pub(crate) fn poison(&mut self) {
+     fn stamps_done(&self, flight: &Flight) -> Result<bool> {
+         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+         for stamp in flight.stamps.iter().flatten() {
+-            if (fw.read_u32(stamp.address)?.wrapping_sub(stamp.value) as i32) < 0 {
++            if !g16_stamp::reached(fw.read_u32(stamp.address)?, stamp.value) {
+                 return Ok(false);
+             }
+         }
+@@ -522,16 +531,27 @@ fn trace_dependencies(
+             let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+             let mut unfinished = 0;
+             for dep in dependencies.iter().flatten() {
+-                unfinished += usize::from(fw.read_u32(dep.address)? != dep.value);
++                unfinished += usize::from(!g16_stamp::reached(fw.read_u32(dep.address)?, dep.value));
++            }
++            let flight = self.flights.iter().find(|flight| flight.id == id).ok_or(EIO)?;
++            let mut driver_values = [0; 2];
++            for (index, stamp) in flight.driver_stamps.iter().enumerate() {
++                if let Some(stamp) = stamp {
++                    driver_values[index] = fw.read_u32(stamp.address)?;
++                }
+             }
+             dev_info!(
+                 self.dev.as_ref(),
+-                "G16: staged {} {:#x} context={} dependencies={} unfinished={}\n",
++                "G16: staged {} {:#x} context={} dependencies={} unfinished={} stamps={:#x}/{:#x} driver_stamps={:#x}/{:#x}\n",
+                 kind,
+                 id,
+                 context,
+                 dependencies.iter().flatten().count(),
+-                unfinished
++                unfinished,
++                flight.stamps[0].map_or(0, |stamp| stamp.value),
++                flight.stamps[1].map_or(0, |stamp| stamp.value),
++                driver_values[0],
++                driver_values[1]
+             );
+         }
+         Ok(())
+@@ -672,7 +692,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             // The notifier pass drops embedded JobMeta references and cleans
+             // their cache lines before publishing these later driver stamps.
+             for stamp in flight.driver_stamps.iter().flatten() {
+-                done &= (fw.read_u32(stamp.address)?.wrapping_sub(stamp.value) as i32) >= 0;
++                done &= g16_stamp::reached(fw.read_u32(stamp.address)?, stamp.value);
+             }
+             // A reusable Work has its own notifier and exact submitted count.
+             // Removal must be visible before that storage can change queues.
+@@ -860,7 +880,9 @@ pub(crate) fn acquire_render_support(&mut self, pool: &render::OperandPool) -> R
+             slots: self.render_support.clone(),
+             index,
+             growth_base: pool.growth_base().ok_or(EINVAL)?,
+-            submissions: AtomicU64::new(0),
++            submissions: AtomicU64::new(
++                crate::module_parameters::fw_counter_start.value().wrapping_mul(2),
++            ),
+         };
+         let mut a = render::Addresses::bootstrap();
+         a.support = lease.address();
+@@ -1145,9 +1167,7 @@ fn submit_render_pool(
+         params.scene_slot = u64::from(scene);
+         params.cycle = 0x240000 + u64::from(scene) * 0x30;
+         let scratch = client.prepare_render(&mut params)?;
+-        let mut a = render::Addresses::bootstrap()
+-            .publication(self.render_publication)
+-            .ok_or(ENOSPC)?;
++        let mut a = render::Addresses::bootstrap().publication(self.render_publication);
+         pool.work_addresses(&mut a, scene);
+         // Keep profiling storage private to the Work. Public timestamp BOs
+         // are written by the firmware through its separate user destinations.
+@@ -1161,12 +1181,12 @@ fn submit_render_pool(
+         a.tiling_status_page = params.ta_status & !0x3fff;
+         a.fragment_status_page = params.fragment_status & !0x3fff;
+         let queue_ordinal = queue.render_count;
+-        a.fragment_counter = queue_ordinal * 2;
+-        a.tiling_counter = queue_ordinal * 2 + 1;
++        a.fragment_counter = queue_ordinal.wrapping_mul(2);
++        a.tiling_counter = a.fragment_counter.wrapping_add(1);
+         // Firmware's dependency graph requires consecutive stamp updates
+         // within each lane, even when other queues publish between them.
+-        a.fragment_stamp = 0x100 + queue_ordinal * 0x100;
+-        a.tiling_stamp = 0xc00 + queue_ordinal * 0x100;
++        a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
++        a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
+         let va = self.allocate_work(true)?;
+         a.tiling_shared_tail = va + 0x10000;
+         a.fragment_shared_tail = va + 0x14000;
+@@ -1230,8 +1250,9 @@ fn submit_render_pool(
+         // The shared count covers individual Work items, not render pairs.
+         // Firmware retires one tiling and one fragment item per submission.
+         let submitted = support.submissions.load(Ordering::Relaxed);
+-        let next_submitted = submitted.checked_add(2).ok_or(ENOSPC)?;
+-        let use_count = u32::try_from(next_submitted).map_err(|_| ENOSPC)?;
++        let next_submitted = submitted.wrapping_add(2);
++        // Firmware observes the low word of this cumulative count.
++        let use_count = next_submitted as u32;
+         // From here an error conservatively quarantines the client root.
+         self.render_failed = true;
+         self._firmware_space
+@@ -1242,8 +1263,8 @@ fn submit_render_pool(
+             self.publish_render(&a, &ta, &frag, queue, initbm, pool.blocks, dependencies)?;
+         pool.initialized = true;
+         support.submissions.store(next_submitted, Ordering::Relaxed);
+-        self.render_publication += 1;
+-        queue.render_count = queue_ordinal + 1;
++        self.render_publication = self.render_publication.wrapping_add(1);
++        queue.render_count = queue_ordinal.wrapping_add(1);
+         let lanes = queue.lanes.as_mut().ok_or(EIO)?;
+         for stage in 0..2 {
+             lanes[stage].head = heads[stage];
+@@ -1335,8 +1356,14 @@ fn publish_render(
+         fw.write_live(a.event_control + 0x10, &0x50u32.to_le_bytes())?;
+         fw.write_live(a.event_control + 0x24, &(a.context_id as u32).to_le_bytes())?;
+         fw.write_live(a.event_count_array, &2u32.to_le_bytes())?;
+-        fw.write_live(a.tiling_driver_stamp, &0u32.to_le_bytes())?;
+-        fw.write_live(a.fragment_driver_stamp, &0u32.to_le_bytes())?;
++        fw.write_live(
++            a.tiling_driver_stamp,
++            &g16_stamp::previous(a.tiling_stamp as u32).to_le_bytes(),
++        )?;
++        fw.write_live(
++            a.fragment_driver_stamp,
++            &g16_stamp::previous(a.fragment_stamp as u32).to_le_bytes(),
++        )?;
+         // The queue lanes persist independently of the physical work channel.
+         for stage in 0..2 {
+             let Lane { ring, .. } = lanes[stage];
+@@ -1407,7 +1434,7 @@ fn publish_render(
+                 } else {
+                     a.fragment_event
+                 } as u32,
+-                publication + 1,
++                publication.wrapping_add(1),
+             )?;
+         }
+         Ok((heads, epochs))
+@@ -1516,13 +1543,11 @@ fn submit_compute_queue(
+             .map_work_alias(alias, pa)?;
+         client.map_work_alias(alias, pa)?;
+         fw.zero_live(work + 0x2000, 0x2000)?;
+-        let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias)
+-            .ok_or(ENOSPC)?;
++        let mut a = compute::Addresses::publication(self.compute_publication, ordinal, work, alias);
+         a.queue = lane.queue;
+         a.driver_stamp = work + 0x4000;
+         a.firmware_stamp = lane.firmware_stamp();
+         a.event = queue.event(2)?;
+-        a.stamp = u32::try_from((ordinal + 1) * 0x100).map_err(|_| ENOSPC)?;
+         self._address_space.as_ref().ok_or(EIO)?.sync();
+         fw.sync();
+         client.sync();
+@@ -1538,8 +1563,8 @@ fn submit_compute_queue(
+         // object aperture. Firmware writes nanoseconds directly, as on M1/M2.
+         // The pointer pair is private to this Work and may be consumed/reset.
+         let user_timestamps = a.work + 0x17c0;
+-        let count = self.compute_publication.checked_add(1).ok_or(ENOSPC)?;
+-        let count32 = u32::try_from(count).map_err(|_| ENOSPC)?;
++        let count = self.compute_publication.wrapping_add(1);
++        let count32 = count as u32;
+ 
+         let first = lane.head;
+         let head = (first + 1 + dependencies.iter().flatten().count() as u32) % 0x500;
+@@ -1559,7 +1584,7 @@ fn submit_compute_queue(
+         fw.write_live(a.notifier, &notifier[..0x14])?;
+         fw.write_live(a.notifier + 0x24, &notifier[0x24..0x28])?;
+         fw.write_live(a.threshold, &1u32.to_le_bytes())?;
+-        fw.write_live(a.driver_stamp, &0u32.to_le_bytes())?;
++        fw.write_live(a.driver_stamp, &g16_stamp::previous(a.stamp).to_le_bytes())?;
+         let mut pos = first;
+         for (index, dep) in dependencies.iter().flatten().enumerate() {
+             // Between the threshold/timestamps and the CDM entry trampoline.
+@@ -1582,9 +1607,9 @@ fn submit_compute_queue(
+         let mut pending_lane = lane;
+         pending_lane.head = head;
+         let epoch =
+-            self.stage_queue(channel, pending_lane, a.event, self.compute_publication + 1)?;
+-        self.compute_publication += 1;
+-        queue.compute_count = ordinal + 1;
++            self.stage_queue(channel, pending_lane, a.event, count)?;
++        self.compute_publication = count;
++        queue.compute_count = ordinal.wrapping_add(1);
+         let lane = &mut queue.lanes.as_mut().ok_or(EIO)?[2];
+         lane.head = head;
+         lane.new = false;
+diff --git a/drivers/gpu/drm/asahi/g16_stamp.rs b/drivers/gpu/drm/asahi/g16_stamp.rs
+new file mode 100644
+index 000000000000..a06650e58f6e
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_stamp.rs
+@@ -0,0 +1,23 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++//! Wrapping firmware completion stamps, independent of software sequence counts.
++
++const STEP: u32 = 0x100;
++
++/// The first command has ordinal zero. Only the firmware stamp wraps; callers
++/// retain the full software ordinal for accounting and command identities.
++pub(crate) fn value(ordinal: u64, first: u32) -> u32 {
++    first.wrapping_add((ordinal as u32).wrapping_mul(STEP))
++}
++
++/// Initialize a private completion destination to an uncompleted value. Zero
++/// cannot serve as a sentinel: it is a valid stamp and sorts after high stamps.
++pub(crate) fn previous(target: u32) -> u32 {
++    target.wrapping_sub(STEP)
++}
++
++/// Queue admission bounds outstanding work to much less than half the stamp
++/// range, making this signed modular comparison unambiguous across rollover.
++pub(crate) fn reached(current: u32, target: u32) -> bool {
++    (current.wrapping_sub(target) as i32) >= 0
++}

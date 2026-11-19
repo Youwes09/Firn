@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:12:32 -0400
+Subject: [PATCH] drm/asahi: G16: print failed-event flights once
+
+K13: dump_hang_state already prints up to 24 flights, stamps, ring cursors and channels. Add the stage event ID there and drop the second, shorter 16-flight dump from report_failed_event. Retain the full hang report and render/history dumps.
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 19 ++-----------------
+ 1 file changed, 2 insertions(+), 17 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 06c5446d2b0c..0774478cf238 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1356,8 +1356,8 @@ fn dump_hang_state(&self) -> Result {
+                      comm_str(&flight.comm));
+             for (stage, stamp) in flight.stamps.iter().enumerate() {
+                 if let Some(stamp) = stamp {
+-                    dev_err!(self.dev.as_ref(), "G16:   stage {} fw stamp {:#x}={:#x} want {:#x}\n",
+-                             stage, stamp.address, word(stamp.address), stamp.value);
++                    dev_err!(self.dev.as_ref(), "G16:   stage {} event {} fw stamp {:#x}={:#x} want {:#x}\n",
++                             stage, stamp.event, stamp.address, word(stamp.address), stamp.value);
+                 }
+             }
+             for stamp in flight.driver_stamps.iter().flatten() {
+@@ -1401,21 +1401,6 @@ fn report_failed_event(&self, base: u64, kind: u32, cursor: u32) -> Result {
+                      offset, fw.read_u64(base + offset)?);
+         }
+         let _ = self.dump_hang_state();
+-        for flight in self.flights.iter().take(16) {
+-            dev_err!(self.dev.as_ref(), "G16: pending Work={:#x} context={} age_ms={} render={}\n",
+-                     flight.id, flight.context, self.flight_ms(flight, Instant::now()),
+-                     flight.render.is_some());
+-            for (stage, stamp) in flight.stamps.iter().enumerate() {
+-                if let Some(stamp) = stamp {
+-                    let (pointers, head) = flight.queues[stage];
+-                    dev_err!(self.dev.as_ref(),
+-                             "G16: stage={} event={} stamp={:#x} actual={:#x} expected={:#x} pointers={:#x} read={} done={} target={}\n",
+-                             stage, stamp.event, stamp.address, fw.read_u32(stamp.address)?,
+-                             stamp.value, pointers, fw.read_u32(pointers)?,
+-                             fw.read_u32(pointers + 0x30)?, head);
+-                }
+-            }
+-        }
+         Ok(())
+     }
+ 

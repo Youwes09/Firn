@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:30:01 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the dep_elide switch
+
+dep_elide was a bitmask of redundant firmware dependency items to drop:
+1 items on the same lane's earlier Work, 2 items already reached at
+publish, 4 items this lane's previous Work already waited on. Production
+runs 6, which is now fixed: reached and repeated items are dropped, and
+same-lane items are kept and counted. The asahi_m4/dep_elide debugfs
+toggle, one of the perf A/B switches, is gone, and dep_stats no longer
+prints the mode.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  6 +-----
+ drivers/gpu/drm/asahi/g16_drm.rs      |  1 -
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 17 +++++++++--------
+ drivers/gpu/drm/asahi/g16_timeline.rs | 16 ++++------------
+ 4 files changed, 14 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 16a4908a9c0c..60f49aa813c2 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -223,11 +223,7 @@ fn probe<'bound>(
+         },
+         read_opt: u32 {
+             default: 1,
+-            description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, dep_elide's reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+-        },
+-        dep_elide: u32 {
+-            default: 6,
+-            description: "Bitmask: drop firmware dependency items that are redundant: 1 on the same lane's earlier Work, 2 already reached at publish, 4 already waited on by this lane's previous Work. Counters in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/dep_elide",
++            description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, the dependency-item reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+         },
+         timeline_records: u32 {
+             default: 131072,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index bc841fd0fd13..cd8a6d0e06c2 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -232,7 +232,6 @@ pub(crate) fn register<'a>(
+     use crate::g16_timeline::FlagKnob;
+     let knobs = [
+         (c_str!("profile"), FlagKnob::PROFILE, crate::module_parameters::profile.value()),
+-        (c_str!("dep_elide"), FlagKnob::DEP_ELIDE, crate::module_parameters::dep_elide.value()),
+         (c_str!("read_opt"), FlagKnob::READ_OPT, crate::module_parameters::read_opt.value()),
+         (c_str!("safety_poll_ms"), FlagKnob::SAFETY_POLL_MS, crate::module_parameters::safety_poll_ms.value()),
+         (c_str!("scratch_zero"), FlagKnob::SCRATCH_ZERO, crate::module_parameters::scratch_zero.value()),
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 048432f81435..8a26b5bf60b2 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -34,7 +34,7 @@ pub(crate) struct FirmwareQueues {
+     notified_works: u32,
+     pub(crate) last: [Option<Stamp>; 2],
+     /// Per lane (TA, 3D, compute), the latest stamps its published Works
+-    /// waited on as firmware items, keyed by address (dep_elide bit 4).
++    /// waited on as firmware items, keyed by address.
+     waited: [[Option<Stamp>; 2]; 3],
+     /// read_opt: the last (read, done) cursors admission read per lane;
+     /// u32::MAX until read. Cursors only advance, so a stale view
+@@ -2088,22 +2088,25 @@ fn drain_trace_rx(&mut self) -> Result {
+     /// let the worker retry after the next completion. The render then
+     /// reaches the firmware with no dependency items; its internal TA-to-3D
+     /// link is unchanged. render_deps=0 keeps the items.
+-    /// dep_elide: count the item and decide whether to drop it.
++    /// Count a firmware dependency item and decide whether to drop it as
++    /// redundant: when this lane's previous Work already waited on that stamp
++    /// or a later one (Works on a lane start in order), or when the stamp has
++    /// already been reached at publish. An item on the same lane's earlier
++    /// Work is only counted: lane order implies it, but it is kept.
+     fn elide_item(&self, queue: &FirmwareQueues, lane: usize, dep: &Stamp, same_lane: bool) -> Result<bool> {
+         use crate::g16_timeline as t;
+-        let mode = t::DEP_ELIDE.load(Ordering::Relaxed);
+         t::DEP_ITEMS.fetch_add(1, Ordering::Relaxed);
+         let drop = if same_lane {
+             t::DEP_SAME_LANE.fetch_add(1, Ordering::Relaxed);
+-            mode & 1 != 0
++            false
+         } else if queue.waited[lane]
+             .iter()
+             .flatten()
+             .any(|w| w.address == dep.address && g16_stamp::reached(w.value, dep.value))
+         {
+             t::DEP_REPEAT.fetch_add(1, Ordering::Relaxed);
+-            mode & 4 != 0
+-        } else if mode & 2 != 0 {
++            true
++        } else {
+             let before = t::reads();
+             let now = if t::read_opt() {
+                 // The last retire scan's value: stamps only advance, so a
+@@ -2118,8 +2121,6 @@ fn elide_item(&self, queue: &FirmwareQueues, lane: usize, dep: &Stamp, same_lane
+                 t::DEP_REACHED.fetch_add(1, Ordering::Relaxed);
+             }
+             reached
+-        } else {
+-            false
+         };
+         if drop {
+             t::DEP_DROPPED.fetch_add(1, Ordering::Relaxed);
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 3cea3f07179e..0d789becd0ea 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -356,7 +356,6 @@ pub(crate) fn init(&self, value: u32) {
+     }
+ 
+     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
+-    pub(crate) const DEP_ELIDE: Self = Self { cell: &DEP_ELIDE, name: "dep_elide", max: 7 };
+     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
+     pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
+     pub(crate) const SCRATCH_ZERO: Self = Self { cell: &SCRATCH_ZERO, name: "scratch_zero", max: 2 };
+@@ -380,14 +379,8 @@ fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Resu
+     }
+ }
+ 
+-/// Firmware dependency-item elision (asahi_m4.dep_elide, runtime: debugfs
+-/// `asahi_m4/dep_elide`), a bitmask. An item is redundant when:
+-/// 1: it waits on the same lane's earlier Work (lane order implies it);
+-/// 2: its stamp has already been reached at publish (costs a firmware read);
+-/// 4: this lane's previous Work already waited on that stamp or a later one
+-///    (Works on a lane start in order).
+-/// Counters in debugfs `asahi_m4/dep_stats` (category 2 only while bit 2 is set).
+-pub(crate) static DEP_ELIDE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++/// Firmware dependency-item counters (see elide_item), in debugfs
++/// `asahi_m4/dep_stats`.
+ pub(crate) static DEP_ITEMS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static DEP_SAME_LANE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static DEP_REACHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+@@ -403,7 +396,7 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         use core::sync::atomic::Ordering::Relaxed;
+         writeln!(
+             f,
+-            "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\ndep_elide {}\npoll_timeouts {}\npoll_retired {}\n\
++            "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\npoll_timeouts {}\npoll_retired {}\n\
+              tvb_requests {}\ntvb_grown {}\ntvb_refused {}\ntvb_memory_limit {}\npartial_renders {}",
+             DEP_WORKS.load(Relaxed),
+             DEP_ITEMS.load(Relaxed),
+@@ -411,7 +404,6 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+             DEP_REPEAT.load(Relaxed),
+             DEP_REACHED.load(Relaxed),
+             DEP_DROPPED.load(Relaxed),
+-            DEP_ELIDE.load(Relaxed),
+             POLL_TIMEOUTS.load(Relaxed),
+             POLL_RETIRED.load(Relaxed),
+             TVB_REQUESTS.load(Relaxed),
+@@ -429,7 +421,7 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ ///   they show no room (cursors only advance, so a stale view is conservative);
+ /// - retirement reads the shared render-notifier count through the scan
+ ///   snapshot;
+-/// - dep_elide's already-reached test uses the last retire scan's values and
++/// - the dependency-item already-reached test uses the last retire scan's values and
+ ///   keeps the item when the stamp wasn't seen there, with no read.
+ pub(crate) static READ_OPT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+ 

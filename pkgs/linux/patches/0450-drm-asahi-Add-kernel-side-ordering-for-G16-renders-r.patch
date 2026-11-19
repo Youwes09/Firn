@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 04:51:46 -0400
+Subject: [PATCH] drm/asahi: Add kernel-side ordering for G16 renders
+ (render_deps)
+
+The remaining Dota 2 stall (7.3 #26, live run 3) is a render Work that
+carries firmware dependency items (a render stamp exactly reached and a
+compute stamp satisfied): its fragment lane stops at the Work's first
+entry with every wait met. It's the same shape as the compute stall that
+kernel-side ordering fixed. Metal's renders carry no dependency items;
+only the internal TA-to-3D link.
+
+render_deps=1 (default 0) resolves render dependencies at admission.
+- A fragment-stage wait on the queue's own fragment lane
+  (VDM_BARRIER_FRAGMENT) is ordered by the lane.
+- Every other awaited stamp must be reached before the render is
+  admitted: compute and other queues, and the previous fragment stamp
+  that a tiling stage must wait for when it reads earlier fragment
+  output (the vertex-consumer case).
+- Until then submit_render returns EBUSY, and the worker retries after
+  the next completion.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit cb61a8c39fa03c07184719ba2b60fe835e3bf075)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 +++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 38 ++++++++++++++++++++++++++++
+ 2 files changed, 42 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 85ac52adfa59..40ddf472f8a5 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -120,6 +120,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump",
+         },
++        render_deps: u32 {
++            default: 0,
++            description: "Experiment: 1 orders renders in the kernel (waits for other queues and for the previous fragment stamp a tiling stage needs, then submits with no firmware dependency items); 0 encodes firmware dependency items",
++        },
+         compute_deps: u32 {
+             default: 1,
+             description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 6103191403cd..23d50e27c0bd 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1528,6 +1528,42 @@ fn drain_trace_rx(&mut self) -> Result {
+ 
+     /// The caller retains all client mappings throughout this call. On failure
+     /// after publication it must quarantine those mappings until reset.
++    /// Experiment (render_deps=1): order a render against earlier work in the
++    /// kernel instead of with firmware dependency items, as for compute. A
++    /// render waiting on this queue's own fragment lane from its fragment
++    /// stage (VDM_BARRIER_FRAGMENT) is ordered by that lane. Every other
++    /// awaited stamp, including the previous render's fragment stamp that a
++    /// tiling stage must wait for when the render reads earlier fragment
++    /// output, must be reached before admission; until then return EBUSY and
++    /// let the worker retry after the next completion. The render then
++    /// reaches the firmware with no dependency items; its internal TA-to-3D
++    /// link is unchanged. render_deps=0 keeps the items.
++    fn resolve_render_dependencies(
++        &self,
++        queue: &FirmwareQueues,
++        params: &render::Parameters,
++        dependencies: &[Option<Stamp>; 2],
++    ) -> Result<[Option<Stamp>; 2]> {
++        if crate::module_parameters::render_deps.value() == 0 {
++            return Ok(*dependencies);
++        }
++        let fragment_stage = params.vdm_barrier_fragment
++            || crate::module_parameters::render_barrier.value() & 1 != 0;
++        let own_fragment = queue.lanes.as_ref().map(|lanes| lanes[1].firmware_stamp());
++        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++        for (slot, dep) in dependencies.iter().enumerate() {
++            let Some(dep) = dep else { continue };
++            // Slot 0 is the render dependency: on the fragment stage with a
++            // fragment barrier, else on the tiling stage. Slot 1 (compute) is
++            // always a tiling-stage wait.
++            let lane_ordered = slot == 0 && fragment_stage && own_fragment == Some(dep.address);
++            if !lane_ordered && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value) {
++                return Err(EBUSY);
++            }
++        }
++        Ok([None; 2])
++    }
++
+     pub(crate) fn submit_render(
+         &mut self,
+         queues: Arc<Mutex<FirmwareQueues>>,
+@@ -1538,6 +1574,8 @@ pub(crate) fn submit_render(
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
++        let resolved = self.resolve_render_dependencies(&queue, params, dependencies)?;
++        let dependencies = &resolved;
+         let root = owner.lock().roots().low;
+         let initbm = !self
+             .tvb_pools

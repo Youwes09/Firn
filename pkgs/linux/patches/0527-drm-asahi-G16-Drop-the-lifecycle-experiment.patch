@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:23:57 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the lifecycle experiment
+
+lifecycle=1 gave each render unique lifecycle words and Work uuids from
+two device-wide counters, as Metal does. Production never set it and
+every render keeps the original constant lifecycle words and uuids.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ----
+ drivers/gpu/drm/asahi/g16_runtime.rs | 13 -------------
+ 2 files changed, 17 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 9d9aad3af534..0c59bb55d2c0 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -165,10 +165,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "A4 wedge handling: 0 logs the detection only; 1 also re-kicks the stuck 3D lane (R1), then every render queue's TA and 3D lanes (R2), one rung per wedge_ms window, before the 10 s watchdog",
+         },
+-        lifecycle: u32 {
+-            default: 0,
+-            description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
+-        },
+         compute_deps: u32 {
+             default: 2,
+             description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts); 2 as 1, but waits on the same queue's own render lanes stay firmware items (in-submission render -> compute edges without a host round trip)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 32bb32a9189a..8443e6e761ad 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -2380,19 +2380,6 @@ fn submit_render_pool(
+         a.fragment_user_timestamp_end = timestamps[3];
+         // From here any publication failure quarantines the roots.
+         self.render_failed = true;
+-        if crate::module_parameters::lifecycle.value() != 0 {
+-            // Metal never repeats these: each render takes the next value of
+-            // two device-wide counters, keeping the tag in the top byte. Our
+-            // original constants gave every render of every client the same
+-            // identity.
+-            let n = self.render_publication as u32;
+-            let high = 0x0800_0000 | (0x9f52u32.wrapping_add(n) & 0xffff);
+-            let low = 0x0900_0000 | (0xa6bau32.wrapping_add(n.wrapping_mul(2)) & 0xfffe);
+-            params.fragment_lifecycle = (u64::from(high) << 32) | u64::from(low);
+-            params.tiling_lifecycle = (u64::from(high) << 32) | u64::from(low + 1);
+-            a.fragment_uuid = u64::from(low);
+-            a.tiling_uuid = u64::from(low + 1);
+-        }
+         // Heap buffers: two copies of each encoding on this frame would
+         // exceed the kernel stack together with the job worker's own frame.
+         let mut ta = KVec::new();

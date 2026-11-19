@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 11 Nov 2026 22:08:36 -0600
+Subject: [PATCH] drm/asahi: Adjust for 7.4-rc1
+
+drm::Registration::new() now returns an initialiser and takes no flags,
+so the platform driver data pins the registration in a box. Resource
+sizes are ResourceSize, which converts with From and TryFrom rather than
+as.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ++--
+ drivers/gpu/drm/asahi/g16.rs      | 4 ++--
+ drivers/gpu/drm/asahi/g16_drm.rs  | 8 ++++----
+ 3 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 54ba894bac83..a2335ec6462b 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -44,7 +44,7 @@
+ 
+ struct M4GpuData<'bound> {
+     _sgx: Option<DevresIoMem<SGX_SIZE>>,
+-    _drm: Option<drm::Registration<'bound, g16_drm::Driver>>,
++    _drm: Option<Pin<KBox<drm::Registration<'bound, g16_drm::Driver>>>>,
+ }
+ 
+ kernel::of_device_table!(
+@@ -74,7 +74,7 @@ fn probe<'bound>(
+         if module_parameters::probe_only.value() == 0 {
+             return Ok(M4GpuData {
+                 _sgx: None,
+-                _drm: Some(g16_drm::register(pdev)?),
++                _drm: Some(KBox::pin_init(g16_drm::register(pdev)?, GFP_KERNEL)?),
+             });
+         }
+         let request = pdev.io_request_by_name(c_str!("sgx")).ok_or(EINVAL)?;
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 7954da434cfd..46d951b123b6 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -49,7 +49,7 @@ pub(crate) fn validate_boot_resources(pdev: &platform::Device<Core<'_>>) -> Resu
+     ] {
+         let res = node.reserved_mem_region_to_resource_byname(name)?;
+         let base = res.start() as u64;
+-        let size = res.size() as u64;
++        let size = u64::from(res.size());
+         let end = base.checked_add(size).ok_or(EINVAL)?;
+         if base == 0 || size < min_size || (base | size) & (PAGE_SIZE - 1) != 0 {
+             dev_err!(
+@@ -118,7 +118,7 @@ fn shmem_map(&self, iova: usize, size: usize) -> Result<KBox<dyn rtkit::Buffer>>
+         let node = self.dev.as_ref().of_node().ok_or(EINVAL)?;
+         let res = node.reserved_mem_region_to_resource_byname(c_str!("firmware"))?;
+         let offset = iova.checked_sub(res.start() as usize).ok_or(EINVAL)?;
+-        if offset.checked_add(size).ok_or(EINVAL)? > res.size() as usize {
++        if offset.checked_add(size).ok_or(EINVAL)? > usize::try_from(res.size())? {
+             return Err(EINVAL);
+         }
+         // SAFETY: The loader reserved this RAM for the already loaded GPU
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 8fa9148eff07..fa014600c8ac 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -348,7 +348,7 @@ fn drop(&mut self) {
+ 
+ pub(crate) fn register<'a>(
+     pdev: &'a platform::Device<Core<'_>>,
+-) -> Result<drm::Registration<'a, Driver>> {
++) -> Result<impl PinInit<drm::Registration<'a, Driver>, Error> + 'a> {
+     use kernel::dma::{Device as _, DmaMask};
+     // SAFETY: This is the initial probe, before bootstrap, DRM registration
+     // or any client DMA, so no DMA allocation or mapping runs concurrently
+@@ -458,9 +458,9 @@ pub(crate) fn register<'a>(
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     let bound: &'a platform::Device<Bound> = pdev;
+     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
+-    unsafe {
+-        drm::Registration::new(pdev.as_ref(), device, Ok::<_, Error>(RegData { pdev: bound }), 0)
+-    }
++    Ok(unsafe {
++        drm::Registration::new(pdev.as_ref(), device, Ok::<_, Error>(RegData { pdev: bound }))
++    })
+ }
+ 
+ /// Put the firmware to sleep while the GPU is still bound. Clients that keep

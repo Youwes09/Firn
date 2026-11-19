@@ -1,0 +1,454 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 18:27:16 -0600
+Subject: [PATCH] drm/asahi: Use the mainline dma_fence abstraction
+
+Completion fences now come from one FenceContext in the device data,
+built with new_unordered() so that each submission keeps a timeline of
+its own as before. The execution holds the signaling side behind a lock
+and signals it once, from whichever path finishes the job first.
+
+Waits use Fence::wait_timeout() and timeline points come from
+drm::syncobj::FenceChain.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs        | 98 ++++++++++++-------------
+ drivers/gpu/drm/asahi/g16_drm_pump.rs   | 37 ++++------
+ drivers/gpu/drm/asahi/g16_drm_submit.rs | 43 +++++------
+ 3 files changed, 79 insertions(+), 99 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index fa014600c8ac..554e3e9daf27 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -13,13 +13,13 @@
+     ops::Range,
+     sync::atomic::{AtomicBool, AtomicU64, Ordering},
+ };
+-use kernel::dma_fence::{self, RawDmaFence};
++use kernel::dma_buf::{DriverFence, Fence, FenceContext, FenceContextOps};
+ use kernel::drm::sched;
+ use kernel::drm::{
+     gem::{shmem, BaseObject, DriverObject},
+     ioctl,
+ };
+-use kernel::sync::{Arc, CondVar, Mutex, MutexGuard};
++use kernel::sync::{Arc, CondVar, Mutex, MutexGuard, SpinLock, UniqueArc};
+ use kernel::error::to_result;
+ use kernel::sync::aref::ARef;
+ use kernel::uaccess::{UserPtr, UserSlice};
+@@ -126,7 +126,7 @@ struct Deferred {
+     id: u64,
+     /// Keeps the object (and so its pages) alive until the unmap.
+     _obj: ARef<Object>,
+-    fences: KVec<dma_fence::Fence>,
++    fences: KVec<ARef<Fence>>,
+ }
+ 
+ /// Deferred close ids; never LIVE.
+@@ -146,7 +146,7 @@ struct Vm {
+     /// the mappings change, so a submit costs one reference, not one per
+     /// mapping.
+     snapshot: Option<Arc<KVVec<Mapping>>>,
+-    pending: KVec<dma_fence::Fence>,
++    pending: KVec<ARef<Fence>>,
+     // Count overlapping drains. Submit to this VM sleeps until all finish;
+     // unrelated file ioctls and other VMs can still acquire file state.
+     draining: u32,
+@@ -210,7 +210,7 @@ pub(crate) struct Data {
+     maximum_frequency_khz: u32,
+     scheduler: sched::Scheduler<SubmissionJob>,
+     #[pin]
+-    admission: Mutex<KVec<dma_fence::Fence>>,
++    admission: Mutex<KVec<ARef<Fence>>>,
+     failed: AtomicBool,
+     notifications: Arc<crate::g16::Notifications>,
+     /// Debug view of the firmware's memory; declared before `runtime` so it
+@@ -236,6 +236,9 @@ pub(crate) struct Data {
+     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
++    /// Last, so that everything that can still signal a fence goes first.
++    #[pin]
++    fences: FenceContext<Timelines>,
+ }
+ 
+ #[vtable]
+@@ -454,7 +457,8 @@ pub(crate) fn register<'a>(
+         _native_mesh_attribute: native_mesh_attribute,
+         _dep_stats: dep_stats,
+         _lane_cap: lane_cap,
+-        _debugfs: dir, });
++        _debugfs: dir,
++        fences <- FenceContext::new_unordered(c_str!("asahi"), c_str!("m4-execution"), Timelines), });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     let bound: &'a platform::Device<Bound> = pdev;
+     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
+@@ -530,10 +534,7 @@ fn close(obj: &Object, file: &DrmFile) {
+                 // the stall (every handle is closed on exit).
+                 continue;
+             }
+-            if exiting && vm.pending.iter().any(|f| {
+-                // SAFETY: The vector retains a live reference while queried.
+-                !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-            }) {
++            if exiting && vm.pending.iter().any(|f| !f.is_signaled()) {
+                 // DRM closes every handle before the file's teardown, which
+                 // destroys the queues (cancelling dependency-blocked jobs)
+                 // and then waits once. Don't wait here: keep the mappings
+@@ -545,10 +546,7 @@ fn close(obj: &Object, file: &DrmFile) {
+             // PTEs (its pages are already kept by the queued submissions)
+             // until everything pending now has completed, then the reaper
+             // unmaps them. Nothing new may use them meanwhile (closing).
+-            vm.pending.retain(|f| {
+-                // SAFETY: The vector owns each fence reference during the query.
+-                !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-            });
++            vm.pending.retain(|f| !f.is_signaled());
+             if !vm.pending.is_empty() && crate::g16_deferred::admit(vm.deferred.len()) {
+                 let mut fences = KVec::new();
+                 let object = vm.mappings.iter()
+@@ -574,10 +572,7 @@ fn close(obj: &Object, file: &DrmFile) {
+                         // (store buffering), so one side always sees the other.
+                         inner.reaper.armed.store(true, Ordering::SeqCst);
+                         core::sync::atomic::fence(Ordering::SeqCst);
+-                        let done = vm.deferred.last().is_some_and(|e| crate::g16_deferred::ready(e.fences.iter().map(|f| {
+-                            // SAFETY: The entry owns each fence reference during the query.
+-                            unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-                        })));
++                        let done = vm.deferred.last().is_some_and(|e| crate::g16_deferred::ready(e.fences.iter().map(|f| f.is_signaled())));
+                         if done {
+                             let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
+                         }
+@@ -607,10 +602,7 @@ fn close(obj: &Object, file: &DrmFile) {
+                 let comm = crate::util::task_comm(&task);
+                 // Where the unfinished work is: in the pump (issued or held on
+                 // a stamp) or still in drm_sched waiting for its input fences.
+-                let unsignaled = vm.pending.iter().filter(|f| {
+-                    // SAFETY: The vector retains a live reference while queried.
+-                    !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-                }).count();
++                let unsignaled = vm.pending.iter().filter(|f| !f.is_signaled()).count();
+                 let (mut pumped, mut issued) = (0usize, 0usize);
+                 {
+                     let engine = inner.device.engine.lock();
+@@ -766,10 +758,7 @@ fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
+     for vm in state.vms.iter_mut() {
+         let mut index = 0;
+         while index < vm.deferred.len() {
+-            let done = crate::g16_deferred::ready(vm.deferred[index].fences.iter().map(|f| {
+-                // SAFETY: The entry owns each fence reference during the query.
+-                unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-            }));
++            let done = crate::g16_deferred::ready(vm.deferred[index].fences.iter().map(|f| f.is_signaled()));
+             if !done {
+                 left = true;
+                 index += 1;
+@@ -857,7 +846,18 @@ fn drop(self: Pin<&mut Self>) {
+     }
+ }
+ 
+-static FENCE_KEY: Pin<&kernel::sync::LockClassKey> = kernel::static_lock_class!();
++/// Completion fences. Render and compute work on one queue can finish out of
++/// order, so each submission's fence is a timeline of its own: a later
++/// completion must never stand in for an earlier dependency.
++struct Timelines;
++
++impl FenceContextOps for Timelines {
++    type FenceDataType = ();
++}
++
++/// The completion fence's signaling side lives as long as the device data that
++/// holds its context.
++type CompletionFence = DriverFence<'static, Timelines>;
+ 
+ /// SUBMIT rejections logged per boot; all are counted in dep_stats
+ /// (submit_rejected).
+@@ -912,7 +912,7 @@ fn since_ms(start: &kernel::time::Instant<kernel::time::Monotonic>) -> i64 {
+ /// and failing a live client's VM because of SIGIO or a timer would break a
+ /// healthy process.
+ fn drain_within(
+-    pending: &mut KVec<dma_fence::Fence>,
++    pending: &mut KVec<ARef<Fence>>,
+     ms: u32,
+     cap_ms: i64,
+     killable: bool,
+@@ -921,10 +921,7 @@ fn drain_within(
+     let start = kernel::time::Instant::<kernel::time::Monotonic>::now();
+     let mut clock = Clock::new(pending.len(), ms, cap_ms);
+     let result = loop {
+-        pending.retain(|f| {
+-            // SAFETY: The vector owns each fence reference during the query.
+-            !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-        });
++        pending.retain(|f| !f.is_signaled());
+         let left = match clock.update(since_ms(&start), pending.len()) {
+             Verdict::Done => break Ok(()),
+             Verdict::NoProgress | Verdict::Capped => break Err(ETIMEDOUT),
+@@ -934,13 +931,10 @@ fn drain_within(
+         // signal first) and for a fatal signal every 100 ms.
+         let step = kernel::time::msecs_to_jiffies(left.min(if killable { 100 } else { 1000 }) as u32);
+         let Some(fence) = pending.first() else { break Ok(()) };
+-        // SAFETY: The vector owns the fence reference throughout the wait.
+-        let result = unsafe { bindings::dma_fence_wait_timeout(fence.raw(), false, step.max(1) as _) };
+-        if result < 0 {
+-            break Err(Error::from_errno(result as i32));
+-        }
+-        if result == 0 && killable && fatal_signal_pending() {
+-            break Err(EINTR);
++        match fence.wait_timeout(false, step.max(1)) {
++            Err(error) => break Err(error),
++            Ok(0) if killable && fatal_signal_pending() => break Err(EINTR),
++            Ok(_) => {}
+         }
+     };
+     (result, clock.stats())
+@@ -974,10 +968,7 @@ fn drain_vm<'a>(
+         let Some(vm) = state.vms.iter_mut().find(|vm| vm.id == id) else {
+             break Err(ENOENT);
+         };
+-        vm.pending.retain(|f| {
+-            // SAFETY: The vector owns each fence reference during the query.
+-            !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-        });
++        vm.pending.retain(|f| !f.is_signaled());
+         let remaining = vm.pending.len();
+         let clock = clock.get_or_insert_with(|| Clock::new(remaining, ms, crate::g16_drain::CAP_MS));
+         let left = match clock.update(since_ms(&start), remaining) {
+@@ -992,14 +983,12 @@ fn drain_vm<'a>(
+         // signal first) and for a fatal signal every 100 ms.
+         let step = kernel::time::msecs_to_jiffies(left.min(if killable { 100 } else { 1000 }) as u32);
+         drop(state);
+-        // SAFETY: The local clone owns the fence throughout the unlocked wait.
+-        let result = unsafe { bindings::dma_fence_wait_timeout(fence.raw(), false, step.max(1) as _) };
++        let result = fence.wait_timeout(false, step.max(1));
+         state = mutex.lock();
+-        if result < 0 {
+-            break Err(Error::from_errno(result as i32));
+-        }
+-        if result == 0 && killable && fatal_signal_pending() {
+-            break Err(EINTR);
++        match result {
++            Err(error) => break Err(error),
++            Ok(0) if killable && fatal_signal_pending() => break Err(EINTR),
++            Ok(_) => {}
+         }
+     };
+     let stats = clock.map_or_else(Stats::default, |c| c.stats());
+@@ -1044,6 +1033,10 @@ fn current_exiting() -> bool {
+ /// can publish pending fences while the current job executes.
+ #[pin_data(PinnedDrop)]
+ struct Execution {
++    /// Taken when the completion is signaled. Declared first so that it drops
++    /// before `device`, which keeps its fence context alive.
++    #[pin]
++    signal: SpinLock<Option<CompletionFence>>,
+     id: u64,
+     firmware: Arc<Mutex<crate::g16::FirmwareQueues>>,
+     // UAPI subqueue indices, resolved against previous submissions and this batch.
+@@ -1058,7 +1051,7 @@ struct Execution {
+     support: Option<Arc<crate::g16::Support>>,
+     parameters: KVec<Parameters>,
+     timestamps: KVec<[u64; 4]>,
+-    completion: dma_fence::Fence,
++    completion: ARef<Fence>,
+     started: AtomicBool,
+     /// timeline=1: CNTVCT at the ioctl and when the scheduler ran the job,
+     /// the public queue, and input fences in total and still pending then.
+@@ -1232,10 +1225,9 @@ struct SubmissionJob {
+     history: Option<[KVec<Option<crate::g16::Stamp>>; 2]>,
+ }
+ 
+-struct Completion;
+ struct OutputSync {
+     object: drm::syncobj::SyncObj,
+-    chain: Option<dma_fence::FenceChain>,
++    chain: Option<drm::syncobj::FenceChain>,
+     point: u64,
+ }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_drm_pump.rs b/drivers/gpu/drm/asahi/g16_drm_pump.rs
+index 760007cea84d..0953bb5944c9 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_pump.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_pump.rs
+@@ -64,10 +64,7 @@ pub(super) fn signal_finished(&self, job: Running) {
+         if let Some(ring) = &self.device.timeline {
+             trace_record(ring, &job);
+         }
+-        if let Some(error) = job.error {
+-            job.execution.completion.set_error(error);
+-        }
+-        let _ = job.execution.completion.signal();
++        job.execution.complete(job.error.map_or(Ok(()), Err));
+         // A deferred GEM close of this file may wait for this fence. Pairs
+         // with the SeqCst store in Object::close.
+         let reaper = &job.execution.reaper;
+@@ -75,6 +72,14 @@ pub(super) fn signal_finished(&self, job: Running) {
+             let _ = workqueue::system_dfl().enqueue(reaper.clone());
+         }
+     }
++
++    /// Signal the completion fence. Only the first call has an effect.
++    pub(super) fn complete(&self, result: Result) {
++        let fence = self.signal.lock().take();
++        if let Some(fence) = fence {
++            fence.signal(result);
++        }
++    }
+ }
+ 
+ impl WorkItem for Execution {
+@@ -377,8 +382,7 @@ fn run(this: Arc<Self>) {
+                 // Quarantined context roots remain installed and retained;
+                 // a failed fence never authorizes reuse of their backing.
+                 for job in Iterator::chain(jobs.drain_all(), queued) {
+-                    job.execution.completion.set_error(error);
+-                    let _ = job.execution.completion.signal();
++                    job.execution.complete(Err(error));
+                 }
+                 return;
+             }
+@@ -429,14 +433,13 @@ fn drop(self: Pin<&mut Self>) {
+         // An entity can discard a job still waiting for its dependencies.
+         // Such a job never published to firmware, but its fence must finish.
+         if !self.started.load(Ordering::Acquire) {
+-            self.completion.set_error(ECANCELED);
+-            let _ = self.completion.signal();
++            self.complete(Err(ECANCELED));
+         }
+     }
+ }
+ 
+ impl sched::JobImpl for SubmissionJob {
+-    fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
++    fn run(job: &mut sched::Job<Self>) -> Result<Option<ARef<Fence>>> {
+         // SUBMIT allocated it; run_job runs once per job.
+         let history = job.history.take();
+         let execution = &job.execution;
+@@ -471,8 +474,7 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+         // JOB_CREDITS capacity: drm_sched never runs more jobs than that at once.
+         if let Err(error) = running.and_then(|r| inbox.jobs.push_within_capacity(r).map_err(|_| EIO)) {
+             drop(inbox);
+-            execution.completion.set_error(error);
+-            let _ = execution.completion.signal();
++            execution.complete(Err(error));
+             return Err(error);
+         }
+         if !inbox.running {
+@@ -496,18 +498,7 @@ fn timed_out(job: &mut sched::Job<Self>) -> sched::Status {
+ 
+     fn cancel(job: &mut sched::Job<Self>) {
+         if !job.execution.started.load(Ordering::Acquire) {
+-            job.execution.completion.set_error(ECANCELED);
+-            let _ = job.execution.completion.signal();
++            job.execution.complete(Err(ECANCELED));
+         }
+     }
+ }
+-
+-#[vtable]
+-impl dma_fence::FenceOps for Completion {
+-    fn get_driver_name<'a>(self: &'a dma_fence::FenceObject<Self>) -> &'a kernel::str::CStr {
+-        c_str!("asahi")
+-    }
+-    fn get_timeline_name<'a>(self: &'a dma_fence::FenceObject<Self>) -> &'a kernel::str::CStr {
+-        c_str!("m4-execution")
+-    }
+-}
+diff --git a/drivers/gpu/drm/asahi/g16_drm_submit.rs b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+index 344608a30dfd..95a31ad5bc8f 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_submit.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+@@ -117,7 +117,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                         object,
+                         point,
+                         chain: if kind == 1 {
+-                            Some(dma_fence::FenceChain::new()?)
++                            Some(drm::syncobj::FenceChain::new()?)
+                         } else {
+                             None
+                         },
+@@ -127,7 +127,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+             } else {
+                 let fence = object.fence_get().ok_or_else(|| reject(format_args!("in-sync {} (handle {}) has no fence: waited before any signal was submitted", index, handle)))?;
+                 let fence = if kind == 1 {
+-                    fence.chain_find_seqno(point)?
++                    drm::syncobj::FenceChain::find_seqno(fence, point)?
+                 } else {
+                     Some(fence)
+                 };
+@@ -143,8 +143,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+             trace.inputs = dependencies.len() as u32;
+             trace.pending = dependencies
+                 .iter()
+-                // SAFETY: The vector holds a live reference to each fence.
+-                .filter(|f| !unsafe { bindings::dma_fence_is_signaled(f.raw()) })
++                .filter(|f| !f.is_signaled())
+                 .count() as u32;
+         }
+         let inner = file.inner();
+@@ -173,21 +172,14 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+             // Reacquire in admission -> state order and re-find both IDs.
+         };
+         // Completed records no longer need lifetime bookkeeping.
+-        admission.retain(|f| {
+-            // SAFETY: The vector retains a live reference while queried.
+-            !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-        });
++        admission.retain(|f| !f.is_signaled());
+         admission.reserve(1, GFP_KERNEL)?;
+         let queue = state
+             .queues
+             .iter()
+             .find(|q| q.id == data.queue_id)
+             .ok_or(ENOENT)?;
+-        // Render and compute on even one public queue may complete out of
+-        // order. Give each submission its own timeline: a later independent
+-        // completion must never subsume an earlier dependency in DRM.
+-        let unique = dma_fence::FenceContexts::new(1, c_str!("asahi_m4"), FENCE_KEY)?
+-            .new_fence(0, Completion)?;
++        let fence = device.fences.new_fence_allocation(())?;
+         // A queue that has failed work stays failed: refuse new work instead
+         // of accepting jobs that can only complete with ECANCELED.
+         if queue.firmware.lock().rejected {
+@@ -354,24 +346,29 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+             _mappings: mappings,
+             _timestamps: timestamp_bindings,
+         };
+-        vm.pending.retain(|f| {
+-            // SAFETY: Each entry owns its live fence reference.
+-            !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
+-        });
++        vm.pending.retain(|f| !f.is_signaled());
+         vm.pending.reserve(1, GFP_KERNEL)?;
+-        let completion = dma_fence::Fence::from_fence(&unique);
++        let slot = UniqueArc::new_uninit(GFP_KERNEL)?;
++        // Nothing fails between creating the fence and handing it to the
++        // execution, which signals it.
++        let fence = fence.new_fence();
++        // SAFETY: The context lives in the device data. The execution keeps a
++        // device reference and drops it only after this fence.
++        let fence = unsafe { core::mem::transmute::<DriverFence<'_, Timelines>, CompletionFence>(fence) };
++        let completion = ARef::from(fence.as_fence());
+         let worker_completion = completion.clone();
+-        let execution = Arc::pin_init(
+-            try_pin_init!(Execution {
++        let execution: Arc<Execution> = slot
++            .write_pin_init(pin_init!(Execution {
++                signal <- kernel::new_spinlock!(Some(fence)),
+                 id: NEXT_EXECUTION.fetch_add(1, Ordering::Relaxed), firmware, barriers,
+                 device: device.into(), _owner: inner.state.clone(), reaper: inner.reaper.clone(),
+                 render_space: vm.space.clone(), space: vm.compute_space.clone(), _bindings: bindings,
+                 support: vm.render_support.clone(),
+                 parameters, timestamps, completion: worker_completion,
+                 started: AtomicBool::new(false), trace, work <- new_work!("m4-execution"),
+-            }),
+-            GFP_KERNEL,
+-        )?;
++            }))
++            .map(Into::into)
++            .unwrap_or_else(|never| match never {});
+         state.vms[index]
+             .pending
+             .push(completion.clone(), GFP_KERNEL)?;

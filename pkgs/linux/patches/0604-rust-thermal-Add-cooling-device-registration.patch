@@ -1,0 +1,281 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 10:43:09 -0600
+Subject: [PATCH] rust: thermal: Add cooling device registration
+
+Let Rust drivers register a cooling device with the thermal core, bound
+to the zones whose cooling maps name the device's node. A device that
+implements the optional power callbacks is a power actor, so the power
+allocator governor can budget it.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/bindings/bindings_helper.h |   1 +
+ rust/kernel/lib.rs              |   2 +
+ rust/kernel/thermal.rs          | 231 ++++++++++++++++++++++++++++++++
+ 3 files changed, 234 insertions(+)
+ create mode 100644 rust/kernel/thermal.rs
+
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index d7f2c94127e1..e8ad0335d3e8 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -98,6 +98,7 @@
+ #include <linux/soc/apple/rtkit.h>
+ #include <linux/sys_soc.h>
+ #include <linux/task_work.h>
++#include <linux/thermal.h>
+ #include <linux/tracepoint.h>
+ #include <linux/usb.h>
+ #include <linux/wait.h>
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index 397dded6454e..f38be416068a 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -140,6 +140,8 @@
+ pub mod str;
+ pub mod sync;
+ pub mod task;
++#[cfg(CONFIG_THERMAL_OF)]
++pub mod thermal;
+ pub mod time;
+ pub mod tracepoint;
+ pub mod transmute;
+diff --git a/rust/kernel/thermal.rs b/rust/kernel/thermal.rs
+new file mode 100644
+index 000000000000..4db07f1d484c
+--- /dev/null
++++ b/rust/kernel/thermal.rs
+@@ -0,0 +1,231 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! Thermal cooling devices.
++//!
++//! C header: [`include/linux/thermal.h`](srctree/include/linux/thermal.h)
++
++use crate::{
++    bindings,
++    device::{
++        Bound,
++        Device, //
++    },
++    error::{
++        from_err_ptr,
++        from_result,
++        VTABLE_DEFAULT_ERROR, //
++    },
++    ffi::{
++        c_int,
++        c_ulong, //
++    },
++    prelude::*,
++};
++use core::ptr::NonNull;
++
++/// The callbacks of a cooling device.
++///
++/// Cooling states run from 0, no cooling, to [`CoolingDevice::max_state`].
++///
++/// A device that also implements the three power callbacks is a power actor:
++/// the power allocator governor budgets it in mW.
++#[vtable]
++pub trait CoolingDevice: Send + Sync {
++    /// The highest cooling state.
++    fn max_state(&self) -> Result<u64>;
++
++    /// The current cooling state.
++    fn cur_state(&self) -> Result<u64>;
++
++    /// Change the cooling state.
++    fn set_cur_state(&self, state: u64) -> Result;
++
++    /// The power in mW the device would consume now without cooling.
++    fn requested_power(&self) -> Result<u32> {
++        build_error!(VTABLE_DEFAULT_ERROR)
++    }
++
++    /// The most power in mW the device consumes in `state`.
++    fn state_to_power(&self, _state: u64) -> Result<u32> {
++        build_error!(VTABLE_DEFAULT_ERROR)
++    }
++
++    /// The least cooling state in which the device consumes at most `power` mW.
++    fn power_to_state(&self, _power: u32) -> Result<u64> {
++        build_error!(VTABLE_DEFAULT_ERROR)
++    }
++}
++
++/// A cooling device registered with the thermal core, bound to the thermal
++/// zones whose cooling maps name its device's node.
++///
++/// It is unregistered when dropped.
++///
++/// # Invariants
++///
++/// `cdev` is a registered cooling device whose `devdata` points to `data`.
++pub struct Registration<T: CoolingDevice> {
++    cdev: NonNull<bindings::thermal_cooling_device>,
++    data: Pin<KBox<T>>,
++}
++
++// SAFETY: The registration only holds a pointer the thermal core owns and the
++// callbacks' data, which is `Send`.
++unsafe impl<T: CoolingDevice> Send for Registration<T> {}
++// SAFETY: A shared registration gives access to nothing but `data`, which is
++// `Sync`.
++unsafe impl<T: CoolingDevice> Sync for Registration<T> {}
++
++impl<T: CoolingDevice> Registration<T> {
++    const OPS: bindings::thermal_cooling_device_ops = bindings::thermal_cooling_device_ops {
++        get_max_state: Some(Self::get_max_state),
++        get_cur_state: Some(Self::get_cur_state),
++        set_cur_state: Some(Self::set_cur_state),
++        get_requested_power: if T::HAS_REQUESTED_POWER {
++            Some(Self::get_requested_power)
++        } else {
++            None
++        },
++        state2power: if T::HAS_STATE_TO_POWER {
++            Some(Self::state2power)
++        } else {
++            None
++        },
++        power2state: if T::HAS_POWER_TO_STATE {
++            Some(Self::power2state)
++        } else {
++            None
++        },
++    };
++
++    /// Register `data` as cooling device `id` of `dev`'s device tree node,
++    /// named `name`.
++    pub fn new(
++        dev: &Device<Bound>,
++        id: u32,
++        name: &CStr,
++        data: impl PinInit<T, Error>,
++    ) -> Result<Self> {
++        let data = KBox::pin_init(data, GFP_KERNEL)?;
++        let devdata: *const T = &*data;
++        // SAFETY: `dev` is a valid, bound device, so its node is valid or null.
++        let np = unsafe { (*dev.as_raw()).of_node };
++        // SAFETY: `name` is copied by the thermal core. `OPS` is static, and
++        // `devdata` stays valid until `drop` has unregistered the device.
++        let cdev = from_err_ptr(unsafe {
++            bindings::thermal_of_cooling_device_register(
++                np,
++                id,
++                name.as_char_ptr(),
++                devdata.cast_mut().cast(),
++                &Self::OPS,
++            )
++        })?;
++        // INVARIANT: `cdev` was just registered with `data` as its devdata.
++        Ok(Self {
++            cdev: NonNull::new(cdev).ok_or(EINVAL)?,
++            data,
++        })
++    }
++
++    /// The callbacks' data.
++    pub fn data(&self) -> &T {
++        &self.data
++    }
++
++    /// # Safety
++    ///
++    /// `cdev` must be a cooling device registered by a [`Registration<T>`].
++    unsafe fn data_of<'a>(cdev: *mut bindings::thermal_cooling_device) -> &'a T {
++        // SAFETY: By the type invariant, `devdata` points to a `T`, which the
++        // registration keeps alive while the thermal core can call back.
++        unsafe { &*(*cdev).devdata.cast::<T>() }
++    }
++
++    extern "C" fn get_max_state(
++        cdev: *mut bindings::thermal_cooling_device,
++        state: *mut c_ulong,
++    ) -> c_int {
++        from_result(|| {
++            // SAFETY: The thermal core calls back only with its registered device.
++            let max = unsafe { Self::data_of(cdev) }.max_state()?;
++            // SAFETY: `state` points to writable storage.
++            unsafe { *state = c_ulong::try_from(max)? };
++            Ok(0)
++        })
++    }
++
++    extern "C" fn get_cur_state(
++        cdev: *mut bindings::thermal_cooling_device,
++        state: *mut c_ulong,
++    ) -> c_int {
++        from_result(|| {
++            // SAFETY: The thermal core calls back only with its registered device.
++            let cur = unsafe { Self::data_of(cdev) }.cur_state()?;
++            // SAFETY: `state` points to writable storage.
++            unsafe { *state = c_ulong::try_from(cur)? };
++            Ok(0)
++        })
++    }
++
++    extern "C" fn set_cur_state(
++        cdev: *mut bindings::thermal_cooling_device,
++        state: c_ulong,
++    ) -> c_int {
++        from_result(|| {
++            // SAFETY: The thermal core calls back only with its registered device.
++            unsafe { Self::data_of(cdev) }.set_cur_state(state as u64)?;
++            Ok(0)
++        })
++    }
++
++    extern "C" fn get_requested_power(
++        cdev: *mut bindings::thermal_cooling_device,
++        power: *mut u32,
++    ) -> c_int {
++        from_result(|| {
++            // SAFETY: The thermal core calls back only with its registered device.
++            let requested = unsafe { Self::data_of(cdev) }.requested_power()?;
++            // SAFETY: `power` points to writable storage.
++            unsafe { *power = requested };
++            Ok(0)
++        })
++    }
++
++    extern "C" fn state2power(
++        cdev: *mut bindings::thermal_cooling_device,
++        state: c_ulong,
++        power: *mut u32,
++    ) -> c_int {
++        from_result(|| {
++            // SAFETY: The thermal core calls back only with its registered device.
++            let mw = unsafe { Self::data_of(cdev) }.state_to_power(state as u64)?;
++            // SAFETY: `power` points to writable storage.
++            unsafe { *power = mw };
++            Ok(0)
++        })
++    }
++
++    extern "C" fn power2state(
++        cdev: *mut bindings::thermal_cooling_device,
++        power: u32,
++        state: *mut c_ulong,
++    ) -> c_int {
++        from_result(|| {
++            // SAFETY: The thermal core calls back only with its registered device.
++            let least = unsafe { Self::data_of(cdev) }.power_to_state(power)?;
++            // SAFETY: `state` points to writable storage.
++            unsafe { *state = c_ulong::try_from(least)? };
++            Ok(0)
++        })
++    }
++}
++
++impl<T: CoolingDevice> Drop for Registration<T> {
++    fn drop(&mut self) {
++        // SAFETY: By the type invariant, `cdev` is registered. Once this
++        // returns, the thermal core makes no more callbacks, so `data` may
++        // drop after it.
++        unsafe { bindings::thermal_cooling_device_unregister(self.cdev.as_ptr()) };
++    }
++}

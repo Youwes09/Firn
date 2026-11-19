@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 13:29:21 -0400
+Subject: [PATCH] drm/asahi: G16: Read lane stamps once per retirement scan;
+ default fw_cache_maint=0
+
+retire() reread every outstanding flight's stage and driver stamps and
+lane cursors on each pass: ~88 firmware reads per Work in start_lat, and
+O(outstanding) per pass under game queue depths. Flights on a lane share
+its stamp address with rising values, so take one snapshot of each word
+per scan and judge all flights against it, the shape of upstream's
+per-queue event check. G16's completion message carries no event slot,
+so the scan still visits every flight, but reads each lane once.
+
+fw_cache_maint now defaults to 0 (candidate): the #158 Air smoke showed
+no faults and halved publish cost; 1 restores the maintenance.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 +--
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 41 +++++++++++++++++++++++----
+ drivers/gpu/drm/asahi/g16_timeline.rs |  2 +-
+ 3 files changed, 39 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index b9d5e2d2ac35..d57893da2821 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -286,8 +286,8 @@ fn probe<'bound>(
+             description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
+         },
+         fw_cache_maint: u32 {
+-            default: 1,
+-            description: "Experiment: 0 skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
++            default: 0,
++            description: "1 restores CPU data-cache maintenance; 0 (default) skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
+         },
+         timeline_records: u32 {
+             default: 131072,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index ccf243083edc..5b7d622bb6c0 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -190,6 +190,24 @@ fn event(&self, stage: u32) -> Result<u32> {
+     }
+ }
+ 
++/// Firmware words read once per retirement scan (per-lane stamps and ring
++/// cursors are shared by every flight on the lane).
++#[derive(Default)]
++struct WordSnapshot {
++    words: KVec<(u64, u32)>,
++}
++
++impl WordSnapshot {
++    fn read(&mut self, fw: &g16_vm::FirmwareSpace, address: u64) -> Result<u32> {
++        if let Some(&(_, value)) = self.words.iter().find(|(a, _)| *a == address) {
++            return Ok(value);
++        }
++        let value = fw.read_u32(address)?;
++        self.words.push((address, value), GFP_KERNEL)?;
++        Ok(value)
++    }
++}
++
+ #[derive(Clone, Copy)]
+ pub(crate) struct Stamp {
+     pub(crate) address: u64,
+@@ -1315,20 +1333,33 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             guard.try_read32(0xd640c0)? == tail && guard.try_read32(0xd640c8)? == tail
+         };
+         self.retired.reserve(self.flights.len(), GFP_KERNEL)?;
++        // Like upstream's per-queue event check, read each lane's stamp and
++        // ring cursors once per scan and judge every flight on that lane
++        // against the same snapshot: flights share a lane's stamp address
++        // with rising values. A completion after the read is retired by the
++        // pass its own notification triggers.
++        let mut snapshot = WordSnapshot::default();
+         let mut index = self.flights.len();
+         while index > 0 {
+             index -= 1;
+             let flight = &self.flights[index];
+-            if !self.stamps_done(flight)? {
++            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++            let mut reached_all = true;
++            for stamp in flight.stamps.iter().flatten() {
++                if !g16_stamp::reached(snapshot.read(fw, stamp.address)?, stamp.value) {
++                    reached_all = false;
++                    break;
++                }
++            }
++            if !reached_all {
+                 continue;
+             }
+-            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+             let mut done = true;
+             let mut blocked = 0u32;
+             // The notifier pass drops embedded JobMeta references and cleans
+             // their cache lines before publishing these later driver stamps.
+             for stamp in flight.driver_stamps.iter().flatten() {
+-                done &= g16_stamp::reached(fw.read_u32(stamp.address)?, stamp.value);
++                done &= g16_stamp::reached(snapshot.read(fw, stamp.address)?, stamp.value);
+             }
+             blocked |= u32::from(!done);
+             // A reusable Work has its own notifier and exact submitted count.
+@@ -1355,8 +1386,8 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             if done {
+                 for &(pointers, head) in &flight.queues {
+                     if pointers != 0 {
+-                        let lane = reached(fw.read_u32(pointers)?, head, 0x500)
+-                            && reached(fw.read_u32(pointers + 0x30)?, head, 0x500);
++                        let lane = reached(snapshot.read(fw, pointers)?, head, 0x500)
++                            && reached(snapshot.read(fw, pointers + 0x30)?, head, 0x500);
+                         blocked |= u32::from(!lane) << 2;
+                         done &= lane;
+                     }
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index b45f058f044b..b826118984fe 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -206,7 +206,7 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ /// `asahi_m4/fw_cache_maint` for same-boot A/B. Maintenance uses clean+invalidate
+ /// (`dc civac`), so switching it back on never discards lines written while it
+ /// was off.
+-pub(crate) static FW_CACHE_MAINT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
++pub(crate) static FW_CACHE_MAINT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+ 
+ #[inline(always)]
+ pub(crate) fn fw_cache_maint() -> bool {

@@ -1,0 +1,333 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 24 Oct 2026 20:42:55 -0400
+Subject: [PATCH] drm/asahi: G16: count dependency stats on publication, and
+ deferrals
+
+dep_stats works, items, same_lane, repeat, reached and dropped were counted
+while resolving a command's dependencies, before flight reservation. A
+command deferred after that (EBUSY) was resolved and counted again on each
+retry: Zink on Honeykrisp showed 13.2 works per frame for 6 commands
+(Luanti on the mini). Tally them per attempt and count them once the
+command has published.
+
+The deferrals themselves are a cost: a deferred command waits for a
+retirement. dep_stats appends deferred (EBUSY retries) and its reasons,
+per reporting site, by the backpressure bit that deferred it: asids,
+channel, scenes, events, queue, lane entries, Work storage, flights. One
+attempt can report more than one reason, so CPU-held dependencies (a
+compute waiting on another queue's stamp, a native render waiting for its
+producers) are counted where they return EBUSY, as deferred_cpu_hold.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs              |  1 +
+ drivers/gpu/drm/asahi/g16_runtime.rs          | 69 +++++++++++++++----
+ drivers/gpu/drm/asahi/g16_timeline.rs         | 28 +++++++-
+ .../gpu/asahi/test-dep-stats-published.py     | 30 ++++++++
+ .../drivers/gpu/asahi/test-submit-reasons.py  |  4 +-
+ 5 files changed, 116 insertions(+), 16 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-dep-stats-published.py
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 675e26722707..328e712c8528 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -2195,6 +2195,7 @@ fn run(this: Arc<Self>) {
+                         let receipt = match receipt {
+                             Ok(receipt) => receipt,
+                             Err(EBUSY) if !runtime.render_failed() => {
++                                crate::g16_timeline::DEFERRED.fetch_add(1, Ordering::Relaxed);
+                                 if crate::module_parameters::timeline.value() != 0 {
+                                     job.busy += 1;
+                                     job.why |= match runtime.take_pressure() {
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 4841e493d027..172c46287103 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -288,6 +288,31 @@ pub(super) struct Flight {
+     lane_items: [u32; 2],
+ }
+ 
++/// Dependency items of one submission attempt, counted into dep_stats only
++/// when it publishes: a deferred (EBUSY) command is resolved again on its
++/// next try.
++#[derive(Default)]
++struct DepTally {
++    items: u64,
++    same_lane: u64,
++    repeat: u64,
++    reached: u64,
++    dropped: u64,
++}
++
++impl DepTally {
++    fn publish(&self) {
++        use crate::g16_timeline as t;
++        use core::sync::atomic::Ordering::Relaxed;
++        t::DEP_WORKS.fetch_add(1, Relaxed);
++        t::DEP_ITEMS.fetch_add(self.items, Relaxed);
++        t::DEP_SAME_LANE.fetch_add(self.same_lane, Relaxed);
++        t::DEP_REPEAT.fetch_add(self.repeat, Relaxed);
++        t::DEP_REACHED.fetch_add(self.reached, Relaxed);
++        t::DEP_DROPPED.fetch_add(self.dropped, Relaxed);
++    }
++}
++
+ /// Per-lane totals of the unretired flights on that lane.
+ struct LaneBook {
+     pointers: u64,
+@@ -519,6 +544,9 @@ pub(crate) fn take_pressure(&self) -> u64 {
+ 
+     fn report_pressure(&self, bit: u64, resource: &str) {
+         self.diagnostics.pressure_seen.fetch_or(bit, Ordering::Relaxed);
++        if let Some(count) = crate::g16_timeline::DEFERRED_BY.get(bit.trailing_zeros() as usize) {
++            count.fetch_add(1, Ordering::Relaxed);
++        }
+         // Every resource here is released when work retires. Backpressure with
+         // nothing in flight can therefore never clear: it means an accounting
+         // leak, and submission stalls indefinitely with an idle GPU. Always
+@@ -2193,18 +2221,25 @@ fn drain_trace_rx(&mut self) -> Result {
+     /// or a later one (Works on a lane start in order), or when the stamp has
+     /// already been reached at publish. An item on the same lane's earlier
+     /// Work is only counted: lane order implies it, but it is kept.
+-    fn elide_item(&self, queue: &FirmwareQueues, lane: usize, dep: &Stamp, same_lane: bool) -> Result<bool> {
++    fn elide_item(
++        &self,
++        queue: &FirmwareQueues,
++        lane: usize,
++        dep: &Stamp,
++        same_lane: bool,
++        tally: &mut DepTally,
++    ) -> Result<bool> {
+         use crate::g16_timeline as t;
+-        t::DEP_ITEMS.fetch_add(1, Ordering::Relaxed);
++        tally.items += 1;
+         let drop = if same_lane {
+-            t::DEP_SAME_LANE.fetch_add(1, Ordering::Relaxed);
++            tally.same_lane += 1;
+             false
+         } else if queue.waited[lane]
+             .iter()
+             .flatten()
+             .any(|w| w.address == dep.address && g16_stamp::reached(w.value, dep.value))
+         {
+-            t::DEP_REPEAT.fetch_add(1, Ordering::Relaxed);
++            tally.repeat += 1;
+             true
+         } else {
+             let before = t::reads();
+@@ -2218,12 +2253,12 @@ fn elide_item(&self, queue: &FirmwareQueues, lane: usize, dep: &Stamp, same_lane
+             t::attribute(&t::P_RD_ELIDE, before);
+             let reached = now.is_some_and(|v| g16_stamp::reached(v, dep.value));
+             if reached {
+-                t::DEP_REACHED.fetch_add(1, Ordering::Relaxed);
++                tally.reached += 1;
+             }
+             reached
+         };
+         if drop {
+-            t::DEP_DROPPED.fetch_add(1, Ordering::Relaxed);
++            tally.dropped += 1;
+         }
+         Ok(drop)
+     }
+@@ -2239,15 +2274,15 @@ fn resolve_render_dependencies(
+         queue: &mut FirmwareQueues,
+         params: &render::Parameters,
+         dependencies: &[Option<Stamp>; 2],
++        tally: &mut DepTally,
+     ) -> Result<[Option<Stamp>; 2]> {
+-        crate::g16_timeline::DEP_WORKS.fetch_add(1, Ordering::Relaxed);
+         let own_fragment = queue.lanes.as_ref().map(|lanes| lanes[1].firmware_stamp());
+         let mut kept = *dependencies;
+         for (slot, dep) in dependencies.iter().enumerate() {
+             let Some(dep) = dep else { continue };
+             let lane = Self::render_item_lane(params, slot);
+             let same_lane = lane == 1 && own_fragment == Some(dep.address);
+-            if self.elide_item(queue, lane, dep, same_lane)? {
++            if self.elide_item(queue, lane, dep, same_lane, tally)? {
+                 kept[slot] = None;
+             }
+         }
+@@ -2277,6 +2312,7 @@ pub(crate) fn submit_render(
+             let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+             for dep in dependencies.iter().flatten() {
+                 if !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value) {
++                    crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
+                     return Err(EBUSY);
+                 }
+             }
+@@ -2297,7 +2333,8 @@ pub(crate) fn submit_render(
+             params
+         };
+         let mut queue = queues.lock();
+-        let resolved = self.resolve_render_dependencies(&mut queue, params, dependencies)?;
++        let mut tally = DepTally::default();
++        let resolved = self.resolve_render_dependencies(&mut queue, params, dependencies, &mut tally)?;
+         let dependencies = &resolved;
+         let root = owner.lock().roots().low;
+         let initbm = !self
+@@ -2327,6 +2364,9 @@ pub(crate) fn submit_render(
+         if queue.pending == 0 {
+             queue.events = None;
+         }
++        if result.is_ok() {
++            tally.publish();
++        }
+         result
+     }
+ 
+@@ -2836,6 +2876,7 @@ fn resolve_compute_dependencies(
+         &self,
+         queue: &mut FirmwareQueues,
+         dependencies: &[Option<Stamp>; 2],
++        tally: &mut DepTally,
+     ) -> Result<[Option<Stamp>; 2]> {
+         let own_lane = queue.lanes.as_ref().map(|lanes| lanes[2].firmware_stamp());
+         // A wait on this queue's own render lanes (the
+@@ -2848,11 +2889,10 @@ fn resolve_compute_dependencies(
+             .map(|lanes| [lanes[0].firmware_stamp(), lanes[1].firmware_stamp()]);
+         let mut kept = [None; 2];
+         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+-        crate::g16_timeline::DEP_WORKS.fetch_add(1, Ordering::Relaxed);
+         for (slot, dep) in dependencies.iter().enumerate() {
+             let Some(dep) = dep else { continue };
+             if own_render.is_some_and(|r| r.contains(&dep.address)) {
+-                if !self.elide_item(queue, 2, dep, false)? {
++                if !self.elide_item(queue, 2, dep, false, tally)? {
+                     kept[slot] = Some(*dep);
+                 }
+                 continue;
+@@ -2864,6 +2904,7 @@ fn resolve_compute_dependencies(
+                 if !done {
+                     queue.deps.compute_held += 1;
+                     queue.deps.defer();
++                    crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
+                     return Err(EBUSY);
+                 }
+             }
+@@ -2883,7 +2924,8 @@ pub(crate) fn submit_compute(
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_COMPUTE);
+         let mut queue = queues.lock();
+         let mut client = owner.lock();
+-        let resolved = self.resolve_compute_dependencies(&mut queue, dependencies)?;
++        let mut tally = DepTally::default();
++        let resolved = self.resolve_compute_dependencies(&mut queue, dependencies, &mut tally)?;
+         let dependencies = &resolved;
+         self.reserve_flight(
+             &queue,
+@@ -2904,6 +2946,9 @@ pub(crate) fn submit_compute(
+         if queue.pending == 0 {
+             queue.events = None;
+         }
++        if result.is_ok() {
++            tally.publish();
++        }
+         result
+     }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index e189ac3cfd0e..421b147c8981 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -429,7 +429,10 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+             f,
+             "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\npoll_timeouts {}\npoll_retired {}\n\
+              tvb_requests {}\ntvb_grown {}\ntvb_refused {}\ntvb_memory_limit {}\npartial_renders {}\n\
+-             tvb_refused_cap {}\ntvb_refused_va {}\ntvb_refused_memory {}\nsubmit_rejected {}",
++             tvb_refused_cap {}\ntvb_refused_va {}\ntvb_refused_memory {}\nsubmit_rejected {}\n\
++             deferred {}\ndeferred_asids {}\ndeferred_channel {}\ndeferred_scenes {}\ndeferred_events {}\n\
++             deferred_queue {}\ndeferred_lane_entries {}\ndeferred_work_storage {}\ndeferred_flights {}\n\
++             deferred_cpu_hold {}",
+             DEP_WORKS.load(Relaxed),
+             DEP_ITEMS.load(Relaxed),
+             DEP_SAME_LANE.load(Relaxed),
+@@ -446,7 +449,17 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+             TVB_REFUSED_CAP.load(Relaxed),
+             TVB_REFUSED_VA.load(Relaxed),
+             TVB_REFUSED_MEMORY.load(Relaxed),
+-            SUBMIT_REJECTED.load(Relaxed)
++            SUBMIT_REJECTED.load(Relaxed),
++            DEFERRED.load(Relaxed),
++            DEFERRED_BY[0].load(Relaxed),
++            DEFERRED_BY[1].load(Relaxed),
++            DEFERRED_BY[2].load(Relaxed),
++            DEFERRED_BY[3].load(Relaxed),
++            DEFERRED_BY[4].load(Relaxed),
++            DEFERRED_BY[5].load(Relaxed),
++            DEFERRED_BY[6].load(Relaxed),
++            DEFERRED_BY[7].load(Relaxed),
++            DEFERRED_CPU_HOLD.load(Relaxed)
+         )
+     }
+ }
+@@ -495,6 +508,17 @@ pub(crate) fn read_opt() -> bool {
+ /// DRM_IOCTL_ASAHI_SUBMIT calls rejected with EINVAL or ENOTSUPP; each names
+ /// its check in the kernel log, up to a per-boot budget.
+ pub(crate) static SUBMIT_REJECTED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++/// Commands deferred (EBUSY) and retried after a retirement, and the
++/// backpressure that deferred them, by report_pressure bit: ASIDs, channel,
++/// scenes, events, queue entries, lane entries, Work storage, flights. The
++/// reasons count per reporting site, and one attempt can report more than
++/// one, so they may sum to more than `deferred`.
++pub(crate) static DEFERRED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static DEFERRED_BY: [core::sync::atomic::AtomicU64; 8] =
++    [const { core::sync::atomic::AtomicU64::new(0) }; 8];
++/// Deferrals for a dependency held on the CPU, a host round trip each: a
++/// compute waiting on another queue's stamp, or a native render's producers.
++pub(crate) static DEFERRED_CPU_HOLD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ 
+ /// Debug: read-only view of the firmware regions that live as long as the
+ /// firmware (debugfs `asahi_m4/fw_mem`), for sampling the firmware's own
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-dep-stats-published.py b/tools/testing/selftests/drivers/gpu/asahi/test-dep-stats-published.py
+new file mode 100755
+index 000000000000..b02fca06143b
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-dep-stats-published.py
+@@ -0,0 +1,30 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host checks: dep_stats dependency counters count published commands only,
++and every deferral (EBUSY retry) is counted, by backpressure reason."""
++from pathlib import Path
++import re
++
++root = next(p for p in Path(__file__).resolve().parents
++            if (p / 'drivers/gpu/drm/asahi/g16_runtime.rs').exists())
++driver = root / 'drivers/gpu/drm/asahi'
++runtime = (driver / 'g16_runtime.rs').read_text()
++drm = (driver / 'g16_drm.rs').read_text()
++timeline = (driver / 'g16_timeline.rs').read_text()
++
++# No DEP_* counter outside DepTally::publish: resolution only tallies.
++publish = runtime[runtime.index('    fn publish(&self) {'):]
++publish = publish[:publish.index('\n    }\n')]
++for name in ('DEP_WORKS', 'DEP_ITEMS', 'DEP_SAME_LANE', 'DEP_REPEAT', 'DEP_REACHED', 'DEP_DROPPED'):
++    assert runtime.count(f't::{name}.fetch_add') == 1 and f't::{name}.fetch_add' in publish, name
++    assert f'crate::g16_timeline::{name}.fetch_add' not in runtime, name
++# Published only: both submit paths commit the tally on an Ok result.
++assert runtime.count('if result.is_ok() {\n            tally.publish();\n        }') == 2
++# Deferrals: the total where the pump retries, and the reason per pressure bit.
++assert re.search(r'Err\(EBUSY\) if !runtime\.render_failed\(\) => \{\s*crate::g16_timeline::DEFERRED\.fetch_add\(1, Ordering::Relaxed\);', drm)
++assert 'crate::g16_timeline::DEFERRED_BY.get(bit.trailing_zeros() as usize)' in runtime
++assert re.search(r'deferred \{\}\\ndeferred_asids \{\}', timeline)
++# CPU holds are counted where they return EBUSY, not inferred.
++assert runtime.count('crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);\n') == 2
++assert 'deferred_cpu_hold {}' in timeline
++print('dep_stats published: ok')
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-submit-reasons.py b/tools/testing/selftests/drivers/gpu/asahi/test-submit-reasons.py
+index 49a4bcb6f408..11cb67fea81d 100755
+--- a/tools/testing/selftests/drivers/gpu/asahi/test-submit-reasons.py
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-submit-reasons.py
+@@ -40,8 +40,8 @@ checks += 1
+ assert 'const REJECT_LOG: u64 = 32;' in drm
+ # Every rejection is counted in dep_stats (review R2), appended last.
+ timeline = (root / 'drivers/gpu/drm/asahi/g16_timeline.rs').read_text()
+-assert re.search(r'tvb_refused_memory \{\}\\nsubmit_rejected \{\}"', timeline)
+-assert re.search(r'TVB_REFUSED_MEMORY\.load\(Relaxed\),\s*SUBMIT_REJECTED\.load\(Relaxed\)\s*\)', timeline)
++assert re.search(r'tvb_refused_memory \{\}\\nsubmit_rejected \{\}(?:"|\\n)', timeline)
++assert re.search(r'TVB_REFUSED_MEMORY\.load\(Relaxed\),\s*SUBMIT_REJECTED\.load\(Relaxed\)\s*[,)]', timeline)
+ assert 'let n = crate::g16_timeline::SUBMIT_REJECTED.fetch_add(1, Ordering::Relaxed);' in drm
+ # Docs stay with their items (review R1).
+ assert re.search(r"/// The calling process's name, for hang reports\.\nfn current_comm\(\)", drm)

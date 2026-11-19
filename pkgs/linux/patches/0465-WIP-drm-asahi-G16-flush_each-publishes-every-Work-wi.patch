@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 15:10:57 -0400
+Subject: [PATCH] WIP drm/asahi: G16 flush_each publishes every Work with its
+ own kick
+
+The worker stages up to 64 admitted Works and flushes once, so a burst of
+renders on one queue reaches firmware as a single channel message per
+lane whose head jumps by several Works. A4 stalls start at such a burst
+(Dota renders 30 us apart, the first completing and the next never
+starting). flush_each=1 flushes after every admitted Work instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs  | 5 +++++
+ 2 files changed, 9 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index e84c275964a9..d1576cd31632 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -164,6 +164,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Experiment: firmware event indices of idle queues. 0: an idle queue releases its index and takes the lowest free one when it next submits. 1: it retakes its previous index if free, else the next free index after the last one handed out (so a just-released index is not immediately given to another queue). 2: as 1, and a queue keeps its index while idle, for its whole lifetime (risks event exhaustion with more than 32 live queues; see backpressure logs)",
+         },
++        flush_each: u32 {
++            default: 0,
++            description: "Experiment: 1 publishes every admitted Work with its own channel message and kick, instead of batching all Works admitted in one worker pass into one message per lane",
++        },
+         lifecycle: u32 {
+             default: 0,
+             description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index ee5bd5231221..fc62f4d865ca 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -1252,6 +1252,11 @@ fn run(this: Arc<Self>) {
+                         engine.cursor = index + 1;
+                         progress = true;
+                         admitted += 1;
++                        if crate::module_parameters::flush_each.value() != 0 {
++                            // Experiment: one channel message per Work
++                            // instead of one per lane for the whole pass.
++                            runtime.flush()?;
++                        }
+                         if admitted == 64 {
+                             break;
+                         }

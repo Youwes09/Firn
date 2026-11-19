@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 25 Oct 2026 00:17:07 -0400
+Subject: [PATCH] drm/asahi: G16: SAFETY comments for the remaining unsafe
+ sites
+
+Document the AnyBitPattern contract and give the random seed read, both
+context-table writes and the page-table borrow their own SAFETY comments.
+The page-table comment now sits directly above its unsafe block.
+No code change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16.rs        | 5 +++++
+ drivers/gpu/drm/asahi/g16_drm.rs    | 4 +++-
+ drivers/gpu/drm/asahi/m4_pgtable.rs | 4 ++--
+ drivers/gpu/drm/asahi/m4_util.rs    | 7 +++++++
+ 4 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 9800f745bc7f..b391dc1a2c87 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -393,6 +393,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+         validate_boot_resources(pdev)?;
+         let platform = crate::g16_platform::Platform::new(pdev.as_ref())?;
+         // All board inputs are checked before any firmware is started.
++        // SAFETY: get_random_u32 has no preconditions.
+         let mut bundle = platform.bundle(unsafe { kernel::bindings::get_random_u32() })?;
+         // The firmware Timestamp handler accepts user destinations only in
+         // this 64 MiB aperture, based at header+0x28.
+@@ -939,6 +940,8 @@ fn open_control(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
+             .reserved_mem_region_to_resource_byname(c_str!("ttbs"))?;
+         // SAFETY: This is the loader's validated context table reservation.
+         let ttbs = unsafe { io::mem::Mem::try_new(res, io::mem::MemFlag::WB.into())? };
++        // SAFETY: Offsets 16 and 24 are context one's two roots, inside the
++        // mapped table page, and the cache clean covers that line.
+         unsafe {
+             // Context one has ASID one, with independently allocated roots.
+             ttbs.ptr()
+@@ -1073,6 +1076,8 @@ fn publish(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
+         drop(sgx_guard);
+         // Slot zero's high root is empty. Firmware keeps using its separate
+         // bootstrap root from the loader reservation, not this context entry.
++        // SAFETY: Offsets 0 and 8 are slot zero's two roots, inside the
++        // mapped context table, and the cache clean covers that line.
+         unsafe {
+             ttbs.ptr()
+                 .cast::<u64>()
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index fb49db0a0521..21395406c3fb 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -248,7 +248,9 @@ pub(crate) fn register<'a>(
+     pdev: &'a platform::Device<Core<'_>>,
+ ) -> Result<drm::Registration<'a, Driver>> {
+     use kernel::dma::{Device as _, DmaMask};
+-    // SAFETY: G16's hardware output address width was validated at bootstrap.
++    // SAFETY: This is the initial probe, before bootstrap, DRM registration
++    // or any client DMA, so no DMA allocation or mapping runs concurrently
++    // with the mask change. T8132's GPU addresses 42 bits.
+     unsafe {
+         pdev.dma_set_mask_and_coherent(DmaMask::try_new(42)?)?;
+     }
+diff --git a/drivers/gpu/drm/asahi/m4_pgtable.rs b/drivers/gpu/drm/asahi/m4_pgtable.rs
+index d1ea8f9304bc..f652876375be 100644
+--- a/drivers/gpu/drm/asahi/m4_pgtable.rs
++++ b/drivers/gpu/drm/asahi/m4_pgtable.rs
+@@ -464,11 +464,11 @@ fn with_pages<F>(&mut self, iova_range: Range<u64>, walk: Walk, mut cb: F) -> Re
+                 count,
+                 iova
+             );
+-            // SAFETY: Page table addresses are either allocated by us, or
+-            // firmware-managed and safe to borrow a struct page from.
+             if write {
+                 self.mark_dirty(phys)?;
+             }
++            // SAFETY: Page table addresses are either allocated by us, or
++            // firmware-managed and safe to borrow a struct page from.
+             let pt = unsafe { Page::borrow_phys_unchecked(&phys) };
+             pt.with_pointer_into_page(idx * PTE_SIZE, count * PTE_SIZE, |p| {
+                 let ptep = p as *const _ as *const Pte;
+diff --git a/drivers/gpu/drm/asahi/m4_util.rs b/drivers/gpu/drm/asahi/m4_util.rs
+index 940d3d078af2..f1aa44519e1f 100644
+--- a/drivers/gpu/drm/asahi/m4_util.rs
++++ b/drivers/gpu/drm/asahi/m4_util.rs
+@@ -28,6 +28,13 @@ pub(crate) fn align<T>(a: T, b: T) -> T
+     (a + b - one) & !(b - one)
+ }
+ 
++/// Types for which every bit pattern is a valid value, so `Reader` may build
++/// them from untrusted bytes.
++///
++/// # Safety
++///
++/// Implementors must be plain data: integers, integer arrays and structs of
++/// them, with no padding-sensitive invariants, references, enums or bools.
+ pub(crate) unsafe trait AnyBitPattern: Default + Sized + Copy + 'static {}
+ 
+ pub(crate) struct Reader<'a> {

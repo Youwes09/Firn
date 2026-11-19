@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 02:37:47 -0400
+Subject: [PATCH] drm/asahi: G16: fault_control parameter; advertise soft
+ faults at 3
+
+region C +0xe28 is the firmware fault control word; macOS writes 3 and so
+did this driver. Make it a parameter (0 for hard faults) and report
+DRM_ASAHI_FEATURE_SOFT_FAULTS when it is 3, pending the OOB validation.
+
+[Niklas: ported to v7.3: module parameter .value() returns the value, not a reference;
+ soft-fault advertising is behind a new soft_faults parameter (default 0), so the
+ defaults match #26: fault control 3, SOFT_FAULTS not advertised]
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 06b88e38b6aacf3aeffe8324b98fd96e1423d3b4)
+(cherry picked from commit 29b0c11574e04124da31b0ea6d383b40c6c89050)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     | 8 ++++++++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 9 ++++++++-
+ drivers/gpu/drm/asahi/g16_platform.rs | 2 +-
+ 3 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index febd5fbbd6d2..3105cf1d6490 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -264,5 +264,13 @@ fn probe<'bound>(
+             default: 1,
+             description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",
+         },
++        fault_control: u32 {
++            default: 3,
++            description: "Firmware fault control word (region C +0xe28): 3 as macOS; 0 hard faults",
++        },
++        soft_faults: u32 {
++            default: 0,
++            description: "Debug: 1 advertises soft faults to userspace (needs fault_control=3)",
++        },
+     },
+ }
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 48c55b0a0cf7..e3b7d290eba5 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -488,7 +488,14 @@ fn get_params(
+         }
+         let mut params = uapi::drm_asahi_params_global {
+             features: u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_BARRIER)
+-                | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES),
++                | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES)
++                | if crate::module_parameters::fault_control.value() == 3
++                    && crate::module_parameters::soft_faults.value() != 0
++                {
++                    u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SOFT_FAULTS)
++                } else {
++                    0
++                },
+             gpu_generation: 16,
+             gpu_variant: b'G' as u32,
+             gpu_revision: device.gpu_revision,
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index ba1b82d32a2d..7e1c04fb1252 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -364,7 +364,7 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+             (0x78, 1),
+             (0x7ec, 1),
+             (0x7f0, 1),
+-            (0xe28, 3),
++            (0xe28, crate::module_parameters::fault_control.value()),
+             (0xe2c, 1),
+             (0x24, 4096),
+             (0x998, 32),

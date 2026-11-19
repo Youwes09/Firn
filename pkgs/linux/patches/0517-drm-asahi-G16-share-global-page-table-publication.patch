@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:12:47 -0400
+Subject: [PATCH] drm/asahi: G16: share global page-table publication
+
+K12: replace the five identical clean/barrier, global range invalidation, completion barrier and clear sequences with UatPageTable::publish. Leave the per-ASID publication paths alone: they must invalidate both roots before clearing either range list.
+---
+ drivers/gpu/drm/asahi/g16_vm.rs     | 25 +++++--------------------
+ drivers/gpu/drm/asahi/m4_pgtable.rs |  8 ++++++++
+ 2 files changed, 13 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index d3b96eaf2e7b..c513e78ddb69 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -510,10 +510,7 @@ pub(crate) fn map_external(
+ 
+     pub(crate) fn unmap_external(&mut self, range: core::ops::Range<u64>) -> Result {
+         self.table.unmap_pages(range.clone())?;
+-        self.table.sync();
+-        self.table.invalidate(None);
+-        crate::mem::sync();
+-        self.table.clear_invalidations();
++        self.table.publish();
+         self.external
+             .retain(|r| r.start < range.start || r.end > range.end);
+         Ok(())
+@@ -582,10 +579,7 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+                 if v != va {
+                     self.table.unmap_pages(va..v)?;
+                 }
+-                self.table.sync();
+-                self.table.invalidate(None);
+-                crate::mem::sync();
+-                self.table.clear_invalidations();
++                self.table.publish();
+                 self.dirty_regions.get_mut().pop();
+                 self.regions.remove(&va);
+                 return Err(e);
+@@ -848,10 +842,7 @@ pub(crate) fn region_pages(&self, va: u64) -> Result<KVec<(u64, kernel::addr::Ph
+     pub(crate) fn release_region(&mut self, va: u64) -> Result {
+         let size = self.regions.get(&va).ok_or(EINVAL)?.pages.len() * UAT_PGSZ;
+         self.table.unmap_pages(va..va + size as u64)?;
+-        self.table.sync();
+-        self.table.invalidate(None);
+-        crate::mem::sync();
+-        self.table.clear_invalidations();
++        self.table.publish();
+         self.dirty_regions
+             .get_mut()
+             .retain(|pending| *pending != va);
+@@ -890,10 +881,7 @@ pub(crate) fn sync(&self) {
+                 }
+             }
+         }
+-        self.table.sync();
+-        self.table.invalidate(None);
+-        crate::mem::sync();
+-        self.table.clear_invalidations();
++        self.table.publish();
+     }
+ 
+     /// Find the preceding allocation in logarithmic time, then validate the
+@@ -936,10 +924,7 @@ fn drop(&mut self) {
+         for range in &self.external {
+             let _ = self.table.unmap_pages(range.clone());
+         }
+-        self.table.sync();
+-        self.table.invalidate(None);
+-        crate::mem::sync();
+-        self.table.clear_invalidations();
++        self.table.publish();
+     }
+ }
+ 
+diff --git a/drivers/gpu/drm/asahi/m4_pgtable.rs b/drivers/gpu/drm/asahi/m4_pgtable.rs
+index 6973874cd56c..d1ea8f9304bc 100644
+--- a/drivers/gpu/drm/asahi/m4_pgtable.rs
++++ b/drivers/gpu/drm/asahi/m4_pgtable.rs
+@@ -269,6 +269,14 @@ pub(crate) fn sync(&self) {
+         crate::mem::sync();
+     }
+ 
++    /// Publish changed global mappings, then forget the completed ranges.
++    pub(crate) fn publish(&self) {
++        self.sync();
++        self.invalidate(None);
++        crate::mem::sync();
++        self.clear_invalidations();
++    }
++
+     /// Record before editing so an allocation failure cannot hide a changed
+     /// mapping. Adjacent edits share one invalidation interval.
+     fn changed(&mut self, range: Range<u64>) -> Result {

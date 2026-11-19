@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 25 Oct 2026 00:19:53 -0400
+Subject: [PATCH] drm/asahi: G16: fix stale, orphaned and misplaced doc
+ comments
+
+elide_item's doc still carried the retired render_deps experiment and a
+sentence from a function that no longer exists. The comm_str doc had been
+left behind in g16_runtime.rs when the function moved to m4_util.rs, and
+the first two lines of report_pressure's doc sat on top of hold_check's.
+No code change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 18 ++----------------
+ drivers/gpu/drm/asahi/m4_util.rs     |  1 +
+ 2 files changed, 3 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 39c6b2f8724b..3780ea22349d 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -439,8 +439,6 @@ fn ring_room(tail: u32, read: u32, done: u32, entries: u32, capacity: u32) -> bo
+ 
+ 
+ impl Bootstrap {
+-    /// Report each exhausted resource once, without logging every retry or
+-    /// enabling firmware KTrace (which changes command execution timing).
+     /// A Work held on a stamp waits for a completion to advance it. With no
+     /// Work in flight anywhere nothing can write that stamp, so the hold
+     /// would never clear and the pump would keep the job forever with an
+@@ -492,6 +490,8 @@ pub(crate) fn take_pressure(&self) -> u64 {
+         self.diagnostics.pressure_seen.swap(0, Ordering::Relaxed)
+     }
+ 
++    /// Report each exhausted resource once, without logging every retry or
++    /// enabling firmware KTrace (which changes command execution timing).
+     fn report_pressure(&self, bit: u64, resource: &str) {
+         self.diagnostics.pressure_seen.fetch_or(bit, Ordering::Relaxed);
+         if let Some(count) = crate::g16_timeline::DEFERRED_BY.get(bit.trailing_zeros() as usize) {
+@@ -2146,18 +2146,6 @@ fn drain_trace_rx(&mut self) -> Result {
+         Ok(())
+     }
+ 
+-    /// The caller retains all client mappings throughout this call. On failure
+-    /// after publication it must quarantine those mappings until reset.
+-    /// Experiment (render_deps=1): order a render against earlier work in the
+-    /// kernel instead of with firmware dependency items, as for compute. A
+-    /// render waiting on this queue's own fragment lane from its fragment
+-    /// stage (VDM_BARRIER_FRAGMENT) is ordered by that lane. Every other
+-    /// awaited stamp, including the previous render's fragment stamp that a
+-    /// tiling stage must wait for when the render reads earlier fragment
+-    /// output, must be reached before admission; until then return EBUSY and
+-    /// let the worker retry after the next completion. The render then
+-    /// reaches the firmware with no dependency items; its internal TA-to-3D
+-    /// link is unchanged. render_deps=0 keeps the items.
+     /// Count a firmware dependency item and decide whether to drop it as
+     /// redundant: when this lane's previous Work already waited on that stamp
+     /// or a later one (Works on a lane start in order), or when the stamp has
+@@ -3249,8 +3237,6 @@ pub(crate) fn report_vm_detach(&mut self, vm_root: u64) {
+     }
+ }
+ 
+-/// Diagnostics: a process name from a NUL-padded comm.
+-
+ /// Diagnostics: one retired Work, kept to explain later reuse of its slot
+ /// and its Work memory in hang reports.
+ #[derive(Clone, Copy)]
+diff --git a/drivers/gpu/drm/asahi/m4_util.rs b/drivers/gpu/drm/asahi/m4_util.rs
+index f1aa44519e1f..f74040ef2b4e 100644
+--- a/drivers/gpu/drm/asahi/m4_util.rs
++++ b/drivers/gpu/drm/asahi/m4_util.rs
+@@ -90,6 +90,7 @@ pub(crate) fn put64(out: &mut [u8], offset: usize, value: u64) {
+     core::array::from_fn(|i| comm[i] as u8)
+ }
+ 
++/// Diagnostics: a process name from a NUL-padded comm.
+ pub(crate) fn comm_str(comm: &[u8; 16]) -> &str {
+     let len = comm.iter().position(|&c| c == 0).unwrap_or(16);
+     core::str::from_utf8(&comm[..len]).unwrap_or("?")

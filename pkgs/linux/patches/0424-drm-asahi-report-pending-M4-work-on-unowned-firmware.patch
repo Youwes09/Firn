@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 14 Sep 2026 16:39:42 -0400
+Subject: [PATCH] drm/asahi: report pending M4 work on unowned firmware events
+
+Record the failing event and outstanding queue, stamp, and cursor identities before rejecting the event. This preserves the diagnostics from the saved desktop driver.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 2a8d511f64eaf70aa1099ac352e4a9e95d8418e5)
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 42 ++++++++++++++++++++++------
+ 1 file changed, 33 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 519f84b0074e..8310ae48aa76 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -537,6 +537,35 @@ fn trace_dependencies(
+         Ok(())
+     }
+ 
++    /// Preserve the event and unfinished queue identities before poisoning the
++    /// device. Firmware timeout events name a stamp slot, which can be shared
++    /// by several in-flight Works from the same userspace queue.
++    fn report_failed_event(&self, base: u64, kind: u32, cursor: u32) -> Result {
++        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++        dev_err!(self.dev.as_ref(), "G16: failed Event kind={} cursor={} flights={}\n",
++                 kind, cursor, self.flights.len());
++        for offset in (0..0x48).step_by(8) {
++            dev_err!(self.dev.as_ref(), "G16: Event +{:#x}={:#018x}\n",
++                     offset, fw.read_u64(base + offset)?);
++        }
++        for flight in self.flights.iter().take(16) {
++            dev_err!(self.dev.as_ref(), "G16: pending Work={:#x} context={} age_ms={} render={}\n",
++                     flight.id, flight.context, flight.started.elapsed().as_millis(),
++                     flight.render.is_some());
++            for (stage, stamp) in flight.stamps.iter().enumerate() {
++                if let Some(stamp) = stamp {
++                    let (pointers, head) = flight.queues[stage];
++                    dev_err!(self.dev.as_ref(),
++                             "G16: stage={} event={} stamp={:#x} actual={:#x} expected={:#x} pointers={:#x} read={} done={} target={}\n",
++                             stage, stamp.event, stamp.address, fw.read_u32(stamp.address)?,
++                             stamp.value, pointers, fw.read_u32(pointers)?,
++                             fw.read_u32(pointers + 0x30)?, head);
++                }
++            }
++        }
++        Ok(())
++    }
++
+     /// Dispatch events by the outstanding Work identity, never by the most
+     /// recently submitted job. Completion notifications are hints; stamps and
+     /// ring retirement remain authoritative even if event bits coalesce.
+@@ -594,15 +623,10 @@ fn service_flights(&mut self) -> Result {
+                     }
+                 }
+             }
+-            let index = selected.ok_or_else(|| {
+-                dev_err!(
+-                    self.dev.as_ref(),
+-                    "G16: unowned Event kind {} cursor {}\n",
+-                    kind,
+-                    cursor
+-                );
+-                EIO
+-            })?;
++            let Some(index) = selected else {
++                self.report_failed_event(base, kind, cursor)?;
++                return Err(EIO);
++            };
+             let mut render = self.flights[index].render.take().ok_or(EIO)?;
+             let pool_index = self
+                 .tvb_pools

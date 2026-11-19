@@ -1,0 +1,332 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 10:43:13 -0600
+Subject: [PATCH] drm/asahi: G16: Register the GPU as a cooling device
+
+The firmware holds the GPU's die at 110 C, but nothing limits it for the
+chassis, which reached 48 C under GPU load while the CPUs are held to
+45 C. Register the GPU as a cooling device so a thermal zone can cap it.
+
+Each cooling state lowers the performance-state cap in region C +0x98 by
+one state. The firmware rereads the cap by itself, without a control
+message, so the driver writes it before its next publication; on the
+J713 a cap of 3 drops vkmark's GPU-bound effect2d scene from 5460 to
+3260 FPS, and lifting it restores the rate.
+
+So the power allocator governor can share a zone's budget between the
+GPU and the CPUs, power at each state is modelled as dynamic power,
+frequency times the square of the core voltage, scaled to the device
+tree's maximum power. Requested power is that maximum times the share
+of time with work in flight.
+
+The cap's meaning and its lack of a control message are from interface
+notes by Ibrahim Syed <ibrahim.syed787b@gmail.com>, written from macOS's
+GPU driver.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs            |   1 +
+ drivers/gpu/drm/asahi/g16.rs                 |   6 +
+ drivers/gpu/drm/asahi/g16_cooling.rs         | 147 +++++++++++++++++++
+ drivers/gpu/drm/asahi/g16_drm.rs             |  13 +-
+ drivers/gpu/drm/asahi/g16_fw.rs              |   2 +
+ drivers/gpu/drm/asahi/g16_platform.rs        |   5 +
+ drivers/gpu/drm/asahi/g16_runtime_publish.rs |  13 ++
+ 7 files changed, 186 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_cooling.rs
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index a2335ec6462b..7a8ed53fb96e 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -9,6 +9,7 @@
+ mod g16;
+ mod g16_alloc;
+ mod g16_compute;
++mod g16_cooling;
+ mod g16_deferred;
+ mod g16_drain;
+ mod g16_drm;
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 12c7a9077b83..c44ed3b2bb4f 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -284,6 +284,10 @@ pub(crate) struct Bootstrap {
+     batch_works: usize,
+     /// Submissions started since boot, mirrored in region C.
+     submissions: u32,
++    /// The cooling device's state, and the performance-state cap last
++    /// written to region C.
++    pub(crate) cooling: kernel::sync::Arc<crate::g16_cooling::Cooling>,
++    applied_cap: u32,
+     context_roots: [Option<crate::g16_vm::Roots>; 64],
+     context_users: [u32; 64],
+     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
+@@ -860,6 +864,8 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             progress: None,
+             batch_works: 0,
+             submissions: 0,
++            cooling: crate::g16_cooling::Cooling::new(&platform)?,
++            applied_cap: platform.max_pstate(),
+             context_roots: [None; 64],
+             context_users: [0; 64],
+             render_support: kernel::sync::Arc::new(
+diff --git a/drivers/gpu/drm/asahi/g16_cooling.rs b/drivers/gpu/drm/asahi/g16_cooling.rs
+new file mode 100644
+index 000000000000..a8f8fc16898e
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_cooling.rs
+@@ -0,0 +1,147 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++//! The GPU as a thermal cooling device.
++//!
++//! Cooling state `n` caps the firmware at `n` performance states below the
++//! top, through region C's performance-state cap. The firmware rereads the
++//! cap by itself, so the driver writes it before its next publication. The
++//! lowest cap is state 1, the slowest state above off.
++//!
++//! The power callbacks let the power allocator governor budget the GPU with
++//! the CPUs. Power at each state follows dynamic power, frequency times the
++//! square of the core voltage, scaled to the device tree's maximum power.
++//! Requested power is that maximum times the share of time the GPU had work
++//! in flight.
++
++use core::sync::atomic::{AtomicU32, Ordering};
++use kernel::{
++    new_spinlock,
++    prelude::*,
++    sync::{Arc, SpinLock},
++    thermal,
++    time::{Instant, Monotonic},
++};
++
++/// Time with work in flight, sampled by `requested_power`.
++struct Busy {
++    /// Start of the current busy period, if work is in flight.
++    since: Option<Instant<Monotonic>>,
++    /// Busy time before `since`, in ns.
++    total: i64,
++    /// The previous sample: when, and `total` then.
++    sampled: Instant<Monotonic>,
++    sampled_total: i64,
++}
++
++#[pin_data]
++pub(crate) struct Cooling {
++    /// The top performance state.
++    top: u32,
++    /// Power in mW at each performance state, from off to the top.
++    power: KVec<u32>,
++    /// The cooling state the thermal core set.
++    state: AtomicU32,
++    #[pin]
++    busy: SpinLock<Busy>,
++}
++
++impl Cooling {
++    pub(crate) fn new(platform: &crate::g16_platform::Platform) -> Result<Arc<Self>> {
++        let top = platform.max_pstate();
++        let (frequency, voltage) = (&platform.freq_a, platform.core_voltage());
++        if voltage.len() != frequency.len() || top == 0 {
++            return Err(EINVAL);
++        }
++        let dynamic = |state: usize| u64::from(frequency[state]) * u64::from(voltage[state]).pow(2);
++        let full = dynamic(top as usize);
++        let mut power = KVec::with_capacity(frequency.len(), GFP_KERNEL)?;
++        for state in 0..frequency.len() {
++            power.push(
++                (u64::from(platform.maximum_power) * dynamic(state) / full) as u32,
++                GFP_KERNEL,
++            )?;
++        }
++        let now = Instant::now();
++        Arc::pin_init(
++            pin_init!(Self {
++                top,
++                power,
++                state: AtomicU32::new(0),
++                busy <- new_spinlock!(Busy { since: None, total: 0, sampled: now, sampled_total: 0 }),
++            }),
++            GFP_KERNEL,
++        )
++    }
++
++    /// The performance-state cap the current cooling state asks for.
++    pub(crate) fn cap(&self) -> u32 {
++        self.top - self.state.load(Ordering::Relaxed)
++    }
++
++    /// Note that work went in flight, or that the last of it retired.
++    pub(crate) fn set_busy(&self, busy: bool) {
++        let now = Instant::now();
++        let mut record = self.busy.lock();
++        match (record.since, busy) {
++            (None, true) => record.since = Some(now),
++            (Some(since), false) => {
++                record.total += (now - since).as_nanos();
++                record.since = None;
++            }
++            _ => {}
++        }
++    }
++}
++
++/// The registered device's callbacks.
++pub(crate) struct Device(pub(crate) Arc<Cooling>);
++
++#[vtable]
++impl thermal::CoolingDevice for Device {
++    fn max_state(&self) -> Result<u64> {
++        Ok(u64::from(self.0.top - 1))
++    }
++
++    fn cur_state(&self) -> Result<u64> {
++        Ok(u64::from(self.0.state.load(Ordering::Relaxed)))
++    }
++
++    fn set_cur_state(&self, state: u64) -> Result {
++        if state >= u64::from(self.0.top) {
++            return Err(EINVAL);
++        }
++        self.0.state.store(state as u32, Ordering::Relaxed);
++        Ok(())
++    }
++
++    fn requested_power(&self) -> Result<u32> {
++        let now = Instant::now();
++        let mut record = self.0.busy.lock();
++        let total = record.total + record.since.map_or(0, |since| (now - since).as_nanos());
++        let busy = total - record.sampled_total;
++        let elapsed = (now - record.sampled).as_nanos();
++        record.sampled = now;
++        record.sampled_total = total;
++        drop(record);
++        if elapsed <= 0 {
++            return Ok(0);
++        }
++        let full = i64::from(self.0.power[self.0.top as usize]);
++        Ok((full * busy.clamp(0, elapsed) / elapsed) as u32)
++    }
++
++    fn state_to_power(&self, state: u64) -> Result<u32> {
++        if state >= u64::from(self.0.top) {
++            return Err(EINVAL);
++        }
++        Ok(self.0.power[(u64::from(self.0.top) - state) as usize])
++    }
++
++    fn power_to_state(&self, power: u32) -> Result<u64> {
++        let top = self.0.top;
++        Ok((0..top - 1)
++            .find(|&state| self.0.power[(top - state) as usize] <= power)
++            .unwrap_or(top - 1)
++            .into())
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 554e3e9daf27..61308545d106 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -213,6 +213,8 @@ pub(crate) struct Data {
+     admission: Mutex<KVec<ARef<Fence>>>,
+     failed: AtomicBool,
+     notifications: Arc<crate::g16::Notifications>,
++    /// The GPU's cooling device, unregistered before `runtime` goes.
++    _cooling: Option<kernel::thermal::Registration<crate::g16_cooling::Device>>,
+     /// Debug view of the firmware's memory; declared before `runtime` so it
+     /// is removed before the firmware regions can be freed.
+     _fw_mem: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FwMem>>>,
+@@ -430,6 +432,15 @@ pub(crate) fn register<'a>(
+         ),
+         GFP_KERNEL,
+     )?;
++    let bound: &'a platform::Device<Bound> = pdev;
++    let cooling = kernel::thermal::Registration::new(
++        bound.as_ref(),
++        0,
++        c_str!("gpu"),
++        Ok::<_, Error>(crate::g16_cooling::Device(runtime.cooling.clone())),
++    )
++    .inspect_err(|e| dev_warn!(pdev.as_ref(), "G16: no cooling device: {:?}\n", e))
++    .ok();
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+@@ -437,6 +448,7 @@ pub(crate) fn register<'a>(
+         admission <- kernel::new_mutex!(KVec::new()),
+         failed: AtomicBool::new(false),
+         notifications: runtime.notifications.clone(),
++        _cooling: cooling,
+         _fw_mem: fw_mem,
+         runtime <- kernel::new_mutex!(runtime),
+         engine <- kernel::new_mutex!(Engine {
+@@ -460,7 +472,6 @@ pub(crate) fn register<'a>(
+         _debugfs: dir,
+         fences <- FenceContext::new_unordered(c_str!("asahi"), c_str!("m4-execution"), Timelines), });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+-    let bound: &'a platform::Device<Bound> = pdev;
+     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
+     Ok(unsafe {
+         drm::Registration::new(pdev.as_ref(), device, Ok::<_, Error>(RegData { pdev: bound }))
+diff --git a/drivers/gpu/drm/asahi/g16_fw.rs b/drivers/gpu/drm/asahi/g16_fw.rs
+index d5e852bd3f42..c52dc07302de 100644
+--- a/drivers/gpu/drm/asahi/g16_fw.rs
++++ b/drivers/gpu/drm/asahi/g16_fw.rs
+@@ -25,6 +25,8 @@
+ /// flight, and every submission started since boot.
+ pub(crate) const REGION_C_ACTIVE: u64 = 0x7c;
+ pub(crate) const REGION_C_STARTED: u64 = 0x80;
++/// Region C performance-state cap, in hundredths of a state.
++pub(crate) const REGION_C_PSTATE_CAP: u64 = 0x98;
+ 
+ /// Control message releasing firmware's GPU context ID binding for a context
+ /// object. The fields are copied from bytes firmware maintains in the context.
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 414e896e06cc..404cd1236fcf 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -448,6 +448,11 @@ pub(crate) fn states(&self) -> usize {
+         self.freq_a.len()
+     }
+ 
++    /// Core voltage in mV at each performance state.
++    pub(crate) fn core_voltage(&self) -> &[u32] {
++        &self.core_voltage
++    }
++
+     /// Index of the top performance state.
+     pub(crate) fn max_pstate(&self) -> u32 {
+         (self.states() - 1) as u32
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_publish.rs b/drivers/gpu/drm/asahi/g16_runtime_publish.rs
+index f14a62dfe22a..a9c7b410e4a9 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_publish.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_publish.rs
+@@ -256,6 +256,13 @@ pub(crate) fn flush(&mut self) -> Result {
+         self.render_failed = true;
+         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
++        // The firmware rereads its performance-state cap by itself.
++        let cap = self.cooling.cap();
++        if cap != self.applied_cap {
++            let region_c = g16_fw::RootPointers::bootstrap().region_c;
++            fw.write_live(region_c + g16_fw::REGION_C_PSTATE_CAP, &(cap * 100).to_le_bytes())?;
++            self.applied_cap = cap;
++        }
+         let mut tails: [Option<u32>; 12] = [None; 12];
+         let mut kicks = 0u32;
+         // Fragment transports must precede tiling, matching normal publication.
+@@ -326,6 +333,12 @@ pub(crate) fn flush(&mut self) -> Result {
+     /// submissions in flight, and a count of every one started.
+     pub(super) fn count_submissions(&mut self, started: u32) -> Result {
+         self.submissions = self.submissions.wrapping_add(started);
++        // Work went in flight, or the last of it retired.
++        match (started, self.flights.len()) {
++            (1, 1) => self.cooling.set_busy(true),
++            (0, 0) => self.cooling.set_busy(false),
++            _ => {}
++        }
+         let region_c = g16_fw::RootPointers::bootstrap().region_c;
+         let words = [
+             (g16_fw::REGION_C_ACTIVE, (self.flights.len() as u32).to_le_bytes()),

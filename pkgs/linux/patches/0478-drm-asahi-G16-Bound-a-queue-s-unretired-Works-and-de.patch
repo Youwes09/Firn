@@ -1,0 +1,87 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 9 Oct 2026 18:05:42 -0400
+Subject: [PATCH] drm/asahi: G16: Bound a queue's unretired Works and
+ dependency items; default compute_deps=2
+
+The firmware stops completing a lane's Works beyond a 128-Work window
+when dependency items are in use (native Dota replay: k24-cap127 clean,
+k24-cap129 stalled; 10/10 uncapped stalls with items, 0/5 capped).
+max_lane_works counts Works per lane only. compute_deps=2 adds firmware
+dependency items, so max_queue_entries (96) also bounds the whole
+queue's unretired Works plus their dependency items.
+
+(The k69/k70 #108/#114 hangs first blamed on this were A4 from the
+breakpad fork, wedged ~5 s after a minidump; the bound stays because
+the replay window stall is fork-independent.)
+
+Folded in:
+- WIP drm/asahi: G16 bound a queue's unretired Works and dependency items
+- WIP drm/asahi: G16 default compute_deps=2 with the queue-entry bound
+
+[WIP drm/asahi: G16 default compute_deps=2 with the queue-entry bound]
+Same-queue render -> compute edges stay firmware items (Lethal R->C
+0.44 -> 0.07 ms per edge, 29.9 -> 36.3 fps on #107/#108). The mode 2
+hangs on #108/#114 were A4 from the breakpad fork, now fixed in Mesa
+(MADV_DONTFORK). Requires max_lane_works <= 64 and max_queue_entries.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  6 +++++-
+ drivers/gpu/drm/asahi/g16_runtime.rs | 24 ++++++++++++++++++++++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 162da80a1527..1d05e7ed5a92 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -193,9 +193,13 @@ fn probe<'bound>(
+             description: "Experiment: 1 orders renders in the kernel (waits for other queues and for the previous fragment stamp a tiling stage needs, then submits with no firmware dependency items); 0 encodes firmware dependency items",
+         },
+         compute_deps: u32 {
+-            default: 1,
++            default: 2,
+             description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts); 2 as 1, but waits on the same queue's own render lanes stay firmware items (in-submission render -> compute edges without a host round trip)",
+         },
++        max_queue_entries: u32 {
++            default: 96,
++            description: "Maximum unretired Works plus their firmware dependency items per queue (all lanes together) before submissions back off; 0: unlimited. Keeps the firmware's per-queue completion window (about 128) from overflowing",
++        },
+         max_lane_works: u32 {
+             default: 64,
+             description: "Maximum unretired Works per firmware lane (render TA/3D and compute) before submissions back off; 0: unlimited. The firmware stops completing Works past a 128-Work window per lane, so keep this at 127 or less; Metal keeps at most 64 command buffers in flight per queue",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index f9bddeff56de..b63464d5e0bf 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -697,6 +697,30 @@ fn reserve_flight(
+             self.report_pressure(1, "ASIDs");
+             return Err(EBUSY);
+         }
++        // The firmware stops completing a queue's Works (its shared notifier
++        // stalls with the stamps already past, blocked=0x2) when too many
++        // are outstanding: k24-cap129 (129 Works on a lane) and k69 on #108,
++        // whose compute_deps=2 adds firmware dependency items. Bound the
++        // whole queue's unretired Works plus their dependency items.
++        let cap = crate::module_parameters::max_queue_entries.value() as usize;
++        if cap != 0 {
++            if let Some(lanes) = &queue.lanes {
++                let ours = |f: &&Flight| {
++                    f.queues.iter().any(|&(p, _)| lanes.iter().any(|l| l.pointers == p))
++                };
++                let outstanding: usize = self
++                    .flights
++                    .iter()
++                    .filter(ours)
++                    .map(|f| 1 + f.dependencies.iter().flatten().count())
++                    .sum();
++                let new = entries.iter().copied().max().unwrap_or(1) as usize;
++                if outstanding + new > cap {
++                    self.report_pressure(16, "queue entries");
++                    return Err(EBUSY);
++                }
++            }
++        }
+         let stages: &[usize] = if render { &[0, 1] } else { &[2] };
+         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
+         let guard = self._sgx.try_access().ok_or(ENODEV)?;

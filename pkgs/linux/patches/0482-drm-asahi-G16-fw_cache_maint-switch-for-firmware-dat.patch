@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 12:50:29 -0400
+Subject: [PATCH] drm/asahi: G16: fw_cache_maint switch for firmware data-cache
+ maintenance
+
+The M4 path inherited per-write dc ivac/cvac from the m1n1 Python shim,
+which reached target memory through the proxy. Upstream G13/G14 shares
+firmware objects coherently and orders them with barriers only, and G16
+already relies on coherency for writeback user BOs. fw_cache_maint=0
+skips data-line maintenance on firmware live writes and reads, write_low
+and page initialization, keeping every barrier; page-table, TTB and
+handoff cleans are unchanged. Default 1 keeps the current behaviour.
+
+Folded in:
+- WIP drm/asahi: G16 fw_cache_maint switch for firmware data cache maintenance
+- WIP drm/asahi: G16 runtime fw_cache_maint toggle in debugfs
+
+[WIP drm/asahi: G16 runtime fw_cache_maint toggle in debugfs]
+asahi_m4/fw_cache_maint (0/1) overrides the boot parameter for
+same-boot A/B; the write paths read it each time. Maintenance now
+invalidates with dc civac, identical for clean lines and safe for lines
+left dirty while maintenance was off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 +++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 22 ++++++++++----
+ drivers/gpu/drm/asahi/g16_timeline.rs | 41 +++++++++++++++++++++++++++
+ drivers/gpu/drm/asahi/g16_vm.rs       | 19 ++++++++++---
+ 4 files changed, 76 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 120cd17e8f8c..b9d5e2d2ac35 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -285,6 +285,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
+         },
++        fw_cache_maint: u32 {
++            default: 1,
++            description: "Experiment: 0 skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
++        },
+         timeline_records: u32 {
+             default: 131072,
+             description: "Debug: timeline ring capacity in records (160 bytes each), allocated at probe only when timeline is nonzero",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index bec9eda98065..0d4e5f6f1ec4 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -151,7 +151,8 @@ pub(crate) struct Data {
+     /// directory).
+     timeline: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Ring>>>>,
+     _profile: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Profile>>>>,
+-    _debugfs: Option<kernel::debugfs::Dir>,
++    _maint: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::MaintKnob>>>,
++    _debugfs: kernel::debugfs::Dir,
+ }
+ 
+ #[vtable]
+@@ -196,8 +197,16 @@ pub(crate) fn register<'a>(
+         pdev.dma_set_mask_and_coherent(DmaMask::try_new(42)?)?;
+     }
+     let runtime = crate::g16::Bootstrap::new(pdev)?;
+-    let (timeline, profile, debugfs) = if crate::module_parameters::timeline.value() != 0 {
+-        let dir = kernel::debugfs::Dir::new(c_str!("asahi_m4"));
++    crate::g16_timeline::FW_CACHE_MAINT.store(
++        crate::module_parameters::fw_cache_maint.value(),
++        Ordering::Relaxed,
++    );
++    let dir = kernel::debugfs::Dir::new(c_str!("asahi_m4"));
++    let maint = KBox::pin_init(
++        dir.read_write_file(c_str!("fw_cache_maint"), crate::g16_timeline::MaintKnob),
++        GFP_KERNEL,
++    )?;
++    let (timeline, profile) = if crate::module_parameters::timeline.value() != 0 {
+         let ring = crate::g16_timeline::Ring::new(
+             crate::module_parameters::timeline_records.value() as usize,
+         )?;
+@@ -206,9 +215,9 @@ pub(crate) fn register<'a>(
+             dir.read_only_file(c_str!("publish_profile"), crate::g16_timeline::Profile),
+             GFP_KERNEL,
+         )?;
+-        (Some(file), Some(profile), Some(dir))
++        (Some(file), Some(profile))
+     } else {
+-        (None, None, None)
++        (None, None)
+     };
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+@@ -221,7 +230,8 @@ pub(crate) fn register<'a>(
+         engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }),
+         timeline,
+         _profile: profile,
+-        _debugfs: debugfs, });
++        _maint: maint,
++        _debugfs: dir, });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     let bound: &'a platform::Device<Bound> = pdev;
+     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 857f5438275f..b45f058f044b 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -201,3 +201,44 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         Ok(())
+     }
+ }
++
++/// Runtime copy of `fw_cache_maint`, writable from debugfs
++/// `asahi_m4/fw_cache_maint` for same-boot A/B. Maintenance uses clean+invalidate
++/// (`dc civac`), so switching it back on never discards lines written while it
++/// was off.
++pub(crate) static FW_CACHE_MAINT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
++
++#[inline(always)]
++pub(crate) fn fw_cache_maint() -> bool {
++    FW_CACHE_MAINT.load(core::sync::atomic::Ordering::Relaxed) != 0
++}
++
++/// The debugfs view of `FW_CACHE_MAINT` (accepts 0 or 1).
++pub(crate) struct MaintKnob;
++
++impl kernel::debugfs::Writer for MaintKnob {
++    fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        writeln!(f, "{}", FW_CACHE_MAINT.load(core::sync::atomic::Ordering::Relaxed))
++    }
++}
++
++impl kernel::debugfs::Reader for MaintKnob {
++    fn read_from_slice(&self, reader: &mut kernel::uaccess::UserSliceReader) -> Result {
++        let mut buf = [0u8; 8];
++        let n = reader.len();
++        if n == 0 || n > buf.len() {
++            return Err(EINVAL);
++        }
++        reader.read_slice(&mut buf[..n])?;
++        let value = match core::str::from_utf8(&buf[..n]).map_err(|_| EINVAL)?.trim() {
++            "0" => 0,
++            "1" => 1,
++            _ => return Err(EINVAL),
++        };
++        // Order earlier maintained writes before later unmaintained ones.
++        crate::mem::sync();
++        FW_CACHE_MAINT.store(value, core::sync::atomic::Ordering::Relaxed);
++        pr_info!("G16: fw_cache_maint={}\n", value);
++        Ok(())
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 7f406362016e..caae05baa06e 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -691,6 +691,7 @@ fn update_live(
+         mut update: impl FnMut(*mut u8, usize, usize),
+     ) -> Result {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_LIVE);
++        let maint = crate::g16_timeline::fw_cache_maint();
+         let region = self.region(va, size)?;
+         if size == 0 {
+             return Ok(());
+@@ -701,7 +702,7 @@ fn update_live(
+         let last = (end - 1) / UAT_PGSZ;
+         for index in first..=last {
+             // Unpublished initialization is still authoritative in CPU cache.
+-            if region.dirty_pages[index].get() {
++            if region.dirty_pages[index].get() || !maint {
+                 continue;
+             }
+             let base = index * UAT_PGSZ;
+@@ -710,7 +711,7 @@ fn update_live(
+             region.pages[index].with_page_mapped(|p| {
+                 for off in (within & !63..limit).step_by(64) {
+                     // SAFETY: These cache lines lie within the mapped page.
+-                    unsafe { core::arch::asm!("dc ivac, {addr}", addr = in(reg) p.add(off)) };
++                    unsafe { core::arch::asm!("dc civac, {addr}", addr = in(reg) p.add(off)) };
+                 }
+             });
+         }
+@@ -727,7 +728,9 @@ fn update_live(
+                 unsafe { update(p.add(within), base + within - start, limit - within) };
+                 // Publish all initialization on a dirty page, including zeros
+                 // outside this write. Published pages need only touched lines.
+-                let lines = if dirty {
++                let lines = if !maint {
++                    0..0
++                } else if dirty {
+                     0..UAT_PGSZ
+                 } else {
+                     (within & !63)..limit
+@@ -774,7 +777,10 @@ pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
+             // SAFETY: The aligned word lies in this owned mapped page.
+             // Firmware owns it and all CPU writes have reached PoC.
+             unsafe {
+-                core::arch::asm!("dc ivac, {addr}", "dsb sy", addr = in(reg) p);
++                if crate::g16_timeline::fw_cache_maint() {
++                    core::arch::asm!("dc civac, {addr}", addr = in(reg) p);
++                }
++                core::arch::asm!("dsb sy");
+                 Ok(u32::from_le(p.cast::<u32>().read_volatile()))
+             }
+         })
+@@ -845,6 +851,11 @@ fn drop(&mut self) {
+ }
+ 
+ fn clean_page(page: &Page) {
++    // fw_cache_maint=0: rely on G16 coherency for shared memory, as for
++    // writeback user BOs; callers keep their barriers.
++    if !(crate::g16_timeline::fw_cache_maint()) {
++        return;
++    }
+     page.with_page_mapped(|p| {
+         for off in (0..UAT_PGSZ).step_by(64) {
+             // SAFETY: The cache line lies inside this owned page.

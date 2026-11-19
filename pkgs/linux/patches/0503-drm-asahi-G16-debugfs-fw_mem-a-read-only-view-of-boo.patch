@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 12 Oct 2026 20:47:17 -0400
+Subject: [PATCH] drm/asahi: G16: debugfs fw_mem, a read-only view of bootstrap
+ firmware memory (#186)
+
+Debug only, no uapi: asahi_m4/fw_mem reads the firmware regions that are
+allocated at bootstrap and never released (root, bundle, shared extent,
+private heaps, shared pages, compute queue). File offset is the firmware
+VA minus 0xffff_fc00_0000_0000, in whole words. Reads take no driver lock
+and do no cache maintenance. For sampling the firmware's power and
+performance controller state under load.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16.rs          | 103 +++++++++++++++++---------
+ drivers/gpu/drm/asahi/g16_drm.rs      |  11 +++
+ drivers/gpu/drm/asahi/g16_timeline.rs |  67 +++++++++++++++++
+ drivers/gpu/drm/asahi/g16_vm.rs       |  11 +++
+ 4 files changed, 157 insertions(+), 35 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index b6f1e4a6f55b..6c0afa448c9c 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -297,6 +297,45 @@ pub(crate) struct Bootstrap {
+ // RTKit callbacks access only their independently synchronized callback data.
+ unsafe impl Send for Bootstrap {}
+ 
++/// Firmware-private heaps allocated at bootstrap, never released.
++const FIRMWARE_HEAPS: [(u64, usize); 18] = [
++    (0xffff_fc20_c002_0000, 0x8c000),
++    (0xffff_fc20_c00b_0000, 0xc0000),
++    (0xffff_fc20_c017_8000, 0x94000),
++    (0xffff_fc20_c021_0000, 0x84000),
++    (0xffff_fc20_c029_8000, 0xac000),
++    (0xffff_fc20_c034_8000, 0x4000),
++    (0xffff_fc20_c035_0000, 0x4000),
++    (0xffff_fc20_c035_8000, 0x8000),
++    (0xffff_fc20_c036_8000, 0x8000),
++    (0xffff_fc20_c037_8000, 0xc000),
++    (0xffff_fc20_c038_8000, 0x34000),
++    (0xffff_fc20_c03c_0000, 0xc4000),
++    (0xffff_fc20_c048_8000, 0x34000),
++    (0xffff_fc20_c04c_0000, 0x10000),
++    (0xffff_fc20_c051_0000, 0x4000),
++    (0xffff_fc20_c053_0000, 0x4000),
++    (0xffff_fc20_c05e_8000, 0x4000),
++    (0xffff_fc20_c05e_c000, 0x4000),
++];
++
++/// Shared single pages allocated at bootstrap, never released.
++const SHARED_PAGES: [u64; 13] = [
++    0xffff_fc20_0011_0000,
++    0xffff_fc20_0011_8000,
++    0xffff_fc20_0012_0000,
++    0xffff_fc20_0012_8000,
++    0xffff_fc20_0013_0000,
++    0xffff_fc20_0015_0000,
++    0xffff_fc20_0014_0000,
++    0xffff_fc20_001b_0000,
++    0xffff_fc20_001c_0000,
++    0xffff_fc20_001c_4000,
++    0xffff_fc20_001c_8000,
++    0xffff_fc20_001c_c000,
++    0xffff_fc20_c052_4000,
++];
++
+ impl Drop for Bootstrap {
+     fn drop(&mut self) {
+         if let Err(e) = self._rtkit.as_mut().shutdown() {
+@@ -315,6 +354,33 @@ fn drop(&mut self) {
+ }
+ 
+ impl Bootstrap {
++    /// Debug (debugfs `fw_mem`): pages of the firmware regions allocated at
++    /// bootstrap and never released, sorted by VA.
++    pub(crate) fn firmware_pages(&self) -> Result<KVec<(u64, kernel::addr::PhysicalAddr)>> {
++        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++        let pointers = crate::g16_fw::RootPointers::bootstrap();
++        let mut pages = KVec::new();
++        let fixed = [
++            crate::g16_fw::ROOT_ADDRESS,
++            crate::g16_fw::BUNDLE_ADDRESS,
++            0xffff_fc20_0003_0000,
++            pointers.region_a,
++            pointers.region_c,
++            0xffff_fc20_c050_0000,
++            0xffff_fc20_001b_8000,
++            crate::g16_compute::QUEUE,
++            crate::g16_compute::SHARED,
++        ];
++        let heaps = FIRMWARE_HEAPS.iter().map(|(va, _)| *va);
++        for va in Iterator::chain(Iterator::chain(fixed.into_iter(), heaps), SHARED_PAGES) {
++            for page in fw.region_pages(va)? {
++                pages.push(page, GFP_KERNEL)?;
++            }
++        }
++        pages.sort_unstable_by_key(|p| p.0);
++        Ok(pages)
++    }
++
+     pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+         validate_boot_resources(pdev)?;
+         let platform = crate::g16_platform::Platform::new(pdev.as_ref())?;
+@@ -501,43 +567,10 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             PAGE_SIZE as usize,
+             crate::pgtable::prot::PROT_FW_SHARED_RW,
+         )?;
+-        for (va, size) in [
+-            (0xffff_fc20_c002_0000, 0x8c000),
+-            (0xffff_fc20_c00b_0000, 0xc0000),
+-            (0xffff_fc20_c017_8000, 0x94000),
+-            (0xffff_fc20_c021_0000, 0x84000),
+-            (0xffff_fc20_c029_8000, 0xac000),
+-            (0xffff_fc20_c034_8000, 0x4000),
+-            (0xffff_fc20_c035_0000, 0x4000),
+-            (0xffff_fc20_c035_8000, 0x8000),
+-            (0xffff_fc20_c036_8000, 0x8000),
+-            (0xffff_fc20_c037_8000, 0xc000),
+-            (0xffff_fc20_c038_8000, 0x34000),
+-            (0xffff_fc20_c03c_0000, 0xc4000),
+-            (0xffff_fc20_c048_8000, 0x34000),
+-            (0xffff_fc20_c04c_0000, 0x10000),
+-            (0xffff_fc20_c051_0000, 0x4000),
+-            (0xffff_fc20_c053_0000, 0x4000),
+-            (0xffff_fc20_c05e_8000, 0x4000),
+-            (0xffff_fc20_c05e_c000, 0x4000),
+-        ] {
++        for (va, size) in FIRMWARE_HEAPS {
+             firmware_space.alloc(va, size, crate::pgtable::prot::PROT_FW_PRIV_RW)?;
+         }
+-        for va in [
+-            0xffff_fc20_0011_0000,
+-            0xffff_fc20_0011_8000,
+-            0xffff_fc20_0012_0000,
+-            0xffff_fc20_0012_8000,
+-            0xffff_fc20_0013_0000,
+-            0xffff_fc20_0015_0000,
+-            0xffff_fc20_0014_0000,
+-            0xffff_fc20_001b_0000,
+-            0xffff_fc20_001c_0000,
+-            0xffff_fc20_001c_4000,
+-            0xffff_fc20_001c_8000,
+-            0xffff_fc20_001c_c000,
+-            0xffff_fc20_c052_4000,
+-        ] {
++        for va in SHARED_PAGES {
+             firmware_space.alloc(
+                 va,
+                 PAGE_SIZE as usize,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index bfff1ec73da1..42946626e303 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -143,6 +143,9 @@ pub(crate) struct Data {
+     admission: Mutex<KVec<dma_fence::Fence>>,
+     failed: AtomicBool,
+     notifications: Arc<crate::g16::Notifications>,
++    /// Debug view of the firmware's memory; declared before `runtime` so it
++    /// is removed before the firmware regions can be freed.
++    _fw_mem: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FwMem>>>,
+     #[pin]
+     runtime: Mutex<crate::g16::Bootstrap>,
+     #[pin]
+@@ -305,6 +308,13 @@ pub(crate) fn register<'a>(
+         dir.read_only_file(c_str!("publish_profile"), crate::g16_timeline::Profile),
+         GFP_KERNEL,
+     )?);
++    let fw_mem = KBox::pin_init(
++        dir.read_binary_file(
++            c_str!("fw_mem"),
++            crate::g16_timeline::FwMem::new(runtime.firmware_pages()?),
++        ),
++        GFP_KERNEL,
++    )?;
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+@@ -312,6 +322,7 @@ pub(crate) fn register<'a>(
+         admission <- kernel::new_mutex!(KVec::new()),
+         failed: AtomicBool::new(false),
+         notifications: runtime.notifications.clone(),
++        _fw_mem: fw_mem,
+         runtime <- kernel::new_mutex!(runtime),
+         engine <- kernel::new_mutex!(Engine { cursor: 0, jobs: KVec::new(), issued: KVec::new() }),
+         inbox <- kernel::new_mutex!(Inbox { running: false, jobs: KVec::new() }),
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 6f99debfdb2e..a7630605a07d 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -477,3 +477,70 @@ pub(crate) fn read_opt() -> bool {
+ pub(crate) static TVB_REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static TVB_MEMORY_LIMIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static PARTIAL_RENDERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++
++/// Debug: read-only view of the firmware regions that live as long as the
++/// firmware (debugfs `asahi_m4/fw_mem`), for sampling the firmware's own
++/// state (power and performance controllers, statistics) while work runs.
++/// File offset = firmware VA - `FW_MEM_BASE`; offsets and lengths are whole
++/// 32-bit words, and a read stops at the first unmapped page (ENXIO if that
++/// is the first). Reads take no driver lock and do no cache maintenance
++/// (firmware memory is coherent; see `fw_cache_maint`).
++pub(crate) const FW_MEM_BASE: u64 = 0xffff_fc00_0000_0000;
++
++pub(crate) struct FwMem {
++    /// Page VA and backing page, sorted by VA.
++    pages: KVec<(u64, kernel::addr::PhysicalAddr)>,
++}
++
++impl FwMem {
++    /// The pages must stay allocated for as long as this view exists.
++    pub(crate) fn new(pages: KVec<(u64, kernel::addr::PhysicalAddr)>) -> Self {
++        Self { pages }
++    }
++}
++
++impl BinaryWriter for FwMem {
++    fn write_to_slice(
++        &self,
++        writer: &mut UserSliceWriter,
++        offset: &mut file::Offset,
++    ) -> Result<usize> {
++        const PGSZ: usize = crate::pgtable::UAT_PGSZ;
++        let start = u64::try_from(*offset).map_err(|_| EINVAL)?;
++        if start & 3 != 0 {
++            return Err(EINVAL);
++        }
++        let want = writer.len().min(0x40000) & !3;
++        let mut buf = crate::g16_platform::zeroed(want)?;
++        let mut va = FW_MEM_BASE.checked_add(start).ok_or(EINVAL)?;
++        let mut done = 0;
++        while done < want {
++            let page_va = va & !(PGSZ as u64 - 1);
++            let Ok(index) = self.pages.binary_search_by_key(&page_va, |p| p.0) else {
++                break;
++            };
++            let within = (va - page_va) as usize;
++            let n = (PGSZ - within).min(want - done);
++            // SAFETY: the page is one of the firmware's bootstrap regions,
++            // never released, and freed only after this file is removed.
++            let page = unsafe { kernel::page::Page::borrow_phys_unchecked(&self.pages[index].1) };
++            page.with_pointer_into_page(within, n, |p| {
++                for word in 0..n / 4 {
++                    // SAFETY: the aligned word lies in this mapped page;
++                    // firmware may write it concurrently, hence volatile.
++                    let value = unsafe { p.add(word * 4).cast::<u32>().read_volatile() };
++                    buf[done + word * 4..done + word * 4 + 4].copy_from_slice(&value.to_ne_bytes());
++                }
++                Ok(())
++            })?;
++            done += n;
++            va += n as u64;
++        }
++        if done == 0 && want != 0 {
++            return Err(ENXIO);
++        }
++        writer.write_slice(&buf[..done])?;
++        *offset += done as file::Offset;
++        Ok(done)
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 87b27c89104b..d3b96eaf2e7b 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -833,6 +833,17 @@ pub(crate) fn read_u64(&self, va: u64) -> Result<u64> {
+         Ok(u64::from(self.read_u32(va)?) | (u64::from(self.read_u32(va + 4)?) << 32))
+     }
+ 
++    /// Debug (debugfs `fw_mem`): the page-aligned VA and physical address of
++    /// each page of the region at `va`, which must be one never released.
++    pub(crate) fn region_pages(&self, va: u64) -> Result<KVec<(u64, kernel::addr::PhysicalAddr)>> {
++        let region = self.regions.get(&va).ok_or(EINVAL)?;
++        let mut pages = KVec::with_capacity(region.pages.len(), GFP_KERNEL)?;
++        for (i, page) in region.pages.iter().enumerate() {
++            pages.push((va + (i * UAT_PGSZ) as u64, page.phys()), GFP_KERNEL)?;
++        }
++        Ok(pages)
++    }
++
+     /// Called only after the context is drained and its hardware roots detached.
+     pub(crate) fn release_region(&mut self, va: u64) -> Result {
+         let size = self.regions.get(&va).ok_or(EINVAL)?.pages.len() * UAT_PGSZ;

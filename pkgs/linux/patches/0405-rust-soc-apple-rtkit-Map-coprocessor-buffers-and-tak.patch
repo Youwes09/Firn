@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 11 Nov 2026 22:04:30 -0600
+Subject: [PATCH] rust: soc: apple: rtkit: Map coprocessor buffers and take
+ early messages
+
+The M4 GPU firmware asks the host to map a crash buffer it placed in
+memory the bootloader reserved, and its driver looks at some messages in
+atomic context. Let a client map such buffers through
+Operations::shmem_map() and see messages early through
+recv_message_early(), and wait for a coprocessor that is already
+starting with Registration::boot().
+
+Registration::new_unbound() serves owners that cannot borrow the bound
+device, such as a DRM device's data. It holds a reference to the device
+instead, and leaves it to the caller to drop the registration before the
+mailbox can go away.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/soc/apple/rtkit.rs | 116 +++++++++++++++++++++++++++++++--
+ 1 file changed, 112 insertions(+), 4 deletions(-)
+
+diff --git a/rust/kernel/soc/apple/rtkit.rs b/rust/kernel/soc/apple/rtkit.rs
+index 0a4c51205a45..00bfc6f1bf4c 100644
+--- a/rust/kernel/soc/apple/rtkit.rs
++++ b/rust/kernel/soc/apple/rtkit.rs
+@@ -12,6 +12,7 @@
+     },
+     error::{
+         from_err_ptr,
++        from_result,
+         to_result, //
+     },
+     prelude::*,
+@@ -24,22 +25,45 @@
+     types::Opaque, //
+ };
+ use core::{
+-    ffi::c_void,
++    ffi::{
++        c_int,
++        c_void, //
++    },
+     marker::PhantomPinned,
+     ptr,
+     slice, //
+ };
+ 
++/// A buffer the coprocessor placed in memory, mapped for the host by [`Operations::shmem_map`].
++pub trait Buffer: Send {
++    /// Returns the buffer's contents, as normal kernel memory.
++    fn as_mut_slice(&mut self) -> &mut [u8];
++}
++
+ /// Callbacks for an RTKit client.
+ #[vtable]
+ pub trait Operations: Sync {
+     /// Called when the coprocessor has crashed, with its crash log if it sent one.
+     fn crashed(&self, _crashlog: Option<&[u8]>) {}
+ 
++    /// Called in atomic context for each message on an application endpoint, before
++    /// [`Operations::recv_message`]. Returns `true` if it handled the message.
++    fn recv_message_early(&self, _endpoint: u8, _message: u64) -> bool {
++        false
++    }
++
+     /// Called in process context for a message on an application endpoint.
+     ///
+     /// Messages are delivered one at a time, in the order they arrive.
+     fn recv_message(&self, _rtkit: &RtKit, _endpoint: u8, _message: u64) {}
++
++    /// Maps a buffer the coprocessor placed at `iova`, of `size` bytes.
++    ///
++    /// Without this, RTKit allocates the buffers the coprocessor asks for. With it, a request
++    /// for a buffer the host has to allocate fails.
++    fn shmem_map(&self, _iova: usize, _size: usize) -> Result<KBox<dyn Buffer>> {
++        Err(EINVAL)
++    }
+ }
+ 
+ /// An RTKit instance, `struct apple_rtkit`.
+@@ -147,9 +171,21 @@ impl<'a, T: Operations + 'a> Registration<'a, T> {
+         } else {
+             None
+         },
+-        recv_message_early: None,
+-        shmem_setup: None,
+-        shmem_destroy: None,
++        recv_message_early: if T::HAS_RECV_MESSAGE_EARLY {
++            Some(recv_message_early_callback::<T>)
++        } else {
++            None
++        },
++        shmem_setup: if T::HAS_SHMEM_MAP {
++            Some(shmem_setup_callback::<T>)
++        } else {
++            None
++        },
++        shmem_destroy: if T::HAS_SHMEM_MAP {
++            Some(shmem_destroy_callback::<T>)
++        } else {
++            None
++        },
+     };
+ 
+     /// Creates an RTKit client on the device's mailbox `mbox_name`, or its first mailbox.
+@@ -213,6 +249,12 @@ pub fn wake(self: Pin<&mut Self>) -> Result {
+         // changes exclusive.
+         to_result(unsafe { bindings::apple_rtkit_wake(self.rtk.load(Relaxed)) })
+     }
++
++    /// Waits for a coprocessor that is already starting to finish booting.
++    pub fn boot(self: Pin<&mut Self>) -> Result {
++        // SAFETY: As for `wake()`.
++        to_result(unsafe { bindings::apple_rtkit_boot(self.rtk.load(Relaxed)) })
++    }
+ }
+ 
+ #[pinned_drop]
+@@ -268,3 +310,69 @@ fn drop(self: Pin<&mut Self>) {
+     let rtkit = unsafe { RtKit::from_raw(rtk) };
+     reg.handler.recv_message(rtkit, endpoint, message);
+ }
++
++/// # Safety
++///
++/// `cookie` must be the pointer [`Registration::new`] passed to `apple_rtkit_init()`.
++unsafe extern "C" fn recv_message_early_callback<T: Operations>(
++    cookie: *mut c_void,
++    endpoint: u8,
++    message: u64,
++) -> bool {
++    // SAFETY: By the safety requirement, `cookie` points to a live `Registration<'_, T>`, whose
++    // handler is initialised before `apple_rtkit_init()` runs.
++    let reg = unsafe { &*cookie.cast::<Registration<'_, T>>() };
++
++    reg.handler.recv_message_early(endpoint, message)
++}
++
++/// # Safety
++///
++/// `cookie` must be the pointer [`Registration::new`] passed to `apple_rtkit_init()`, and `bfr`
++/// a buffer RTKit is setting up.
++unsafe extern "C" fn shmem_setup_callback<T: Operations>(
++    cookie: *mut c_void,
++    bfr: *mut bindings::apple_rtkit_shmem,
++) -> c_int {
++    // SAFETY: By the safety requirement, `cookie` points to a live `Registration<'_, T>`.
++    let reg = unsafe { &*cookie.cast::<Registration<'_, T>>() };
++    // SAFETY: By the safety requirement, `bfr` is valid and not used elsewhere during the call.
++    let bfr = unsafe { &mut *bfr };
++
++    from_result(|| {
++        // A zero IOVA asks the host to allocate the buffer, which a mapping client cannot do.
++        if bfr.iova == 0 {
++            return Err(EINVAL);
++        }
++
++        let mut buf = reg.handler.shmem_map(bfr.iova as usize, bfr.size)?;
++        let contents = buf.as_mut_slice();
++        if contents.len() < bfr.size {
++            return Err(ENOMEM);
++        }
++
++        bfr.buffer = contents.as_mut_ptr().cast();
++        bfr.iomem = ptr::null_mut();
++        bfr.is_mapped = true;
++        bfr.private = KBox::into_raw(KBox::new(buf, GFP_KERNEL)?).cast();
++        Ok(0)
++    })
++}
++
++/// # Safety
++///
++/// `bfr` must be a buffer [`shmem_setup_callback`] set up.
++unsafe extern "C" fn shmem_destroy_callback<T: Operations>(
++    _cookie: *mut c_void,
++    bfr: *mut bindings::apple_rtkit_shmem,
++) {
++    // SAFETY: By the safety requirement, `bfr` is valid.
++    let bfr = unsafe { &mut *bfr };
++
++    if !bfr.private.is_null() {
++        // SAFETY: `private` holds the box `shmem_setup_callback` leaked.
++        drop(unsafe { KBox::from_raw(bfr.private.cast::<KBox<dyn Buffer>>()) });
++    }
++    bfr.private = ptr::null_mut();
++    bfr.buffer = ptr::null_mut();
++}

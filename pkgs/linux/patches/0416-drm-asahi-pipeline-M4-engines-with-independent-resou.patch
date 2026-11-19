@@ -1,0 +1,1164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Mon, 14 Sep 2026 04:31:26 +0000
+Subject: [PATCH] drm/asahi: pipeline M4 engines with independent resource
+ admission
+
+(cherry picked from commit 2842e83ea4f8887a9dd8db9bcb73f26a6f3cfe60)
+(cherry picked from commit 037892793e680ef6783f2a12352fb687a0cdb33c)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |   2 +-
+ drivers/gpu/drm/asahi/g16.rs         |   8 +-
+ drivers/gpu/drm/asahi/g16_compute.rs |   4 +-
+ drivers/gpu/drm/asahi/g16_drm.rs     | 261 ++++++++++++---------------
+ drivers/gpu/drm/asahi/g16_render.rs  |  10 +-
+ drivers/gpu/drm/asahi/g16_runtime.rs | 224 ++++++++++++++---------
+ drivers/gpu/drm/asahi/g16_tvb.rs     |  25 ++-
+ drivers/gpu/drm/asahi/g16_vm.rs      |  41 +++++
+ 8 files changed, 337 insertions(+), 238 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 043e7356007c..8e4a0605fe7a 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -111,7 +111,7 @@ fn probe(
+     params: {
+         fw_trace: u32 {
+             default: 0,
+-            description: "Enable firmware KTrace records for command diagnostics",
++            description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation",
+         },
+         tvb_max_blocks: u32 {
+             default: 331,
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index fc3c36b0b6f2..60c0bc44fe4f 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -169,7 +169,7 @@ fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _log: Option<&[u8
+ /// No render node is published until the submission backend is available.
+ #[path = "g16_runtime.rs"]
+ mod render_runtime;
+-pub(crate) use render_runtime::{FirmwareQueues, Support};
++pub(crate) use render_runtime::{FirmwareQueues, Stamp, Support};
+ 
+ #[path = "g16_notify.rs"]
+ mod notify;
+@@ -209,7 +209,7 @@ pub(crate) struct Bootstrap {
+     flights: KVec<render_runtime::Flight>,
+     context_roots: [Option<crate::g16_vm::Roots>; 64],
+     context_users: [u32; 64],
+-    last_render: Option<render_runtime::Stamp>,
++    pressure_reported: core::sync::atomic::AtomicU64,
+     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
+ }
+ 
+@@ -661,13 +661,13 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+             flights: KVec::new(),
+             context_roots: [None; 64],
+             context_users: [0; 64],
+-            last_render: None,
++            pressure_reported: core::sync::atomic::AtomicU64::new(0),
+             render_support: kernel::sync::Arc::new(
+                 core::sync::atomic::AtomicU64::new(0),
+                 GFP_KERNEL,
+             )?,
+         };
+-        if *crate::module_parameters::fw_trace.value() != 0 {
++        if *crate::module_parameters::fw_trace.value() & 1 != 0 {
+             // Region C starts with the firmware KTrace mask, as in the shim.
+             session
+                 ._firmware_space
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index d1f317b5adbd..f76862acb193 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -8,7 +8,6 @@
+ pub(crate) const QUEUE: u64 = 0xffff_fc20_c500_0000;
+ pub(crate) const STATS: u64 = QUEUE + 0x8000;
+ pub(crate) const SHARED: u64 = 0xffff_fc20_0200_0000;
+-pub(crate) const PRIVATE_SIZE: usize = 0x24000;
+ 
+ // Fixed opening compute namespace used by the working shim. These pages
+ // belong to the device and are aliased into whichever client root is active.
+@@ -48,6 +47,9 @@
+     let mut out = [0; 0x100];
+     let pages = (BUFFER_COUNT * BUFFER_SIZE / 0x1000) as u32;
+     u64_at(&mut out, 0, 2);
++    // +8 selects the hardware FList slot; +0 is a separate pool identity.
++    // Sharing slot zero with render corrupts concurrently active pool state.
++    u32_at(&mut out, 8, 2);
+     u64_at(&mut out, 0x14, DIRECTORY);
+     u32_at(&mut out, 0x1c, (DIRECTORY_SIZE / 8) as u32);
+     u32_at(&mut out, 0x24, pages % (DIRECTORY_SIZE / 8) as u32);
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 9f84cce695cf..6b8e530e4787 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -82,9 +82,6 @@ struct Vm {
+     render_ready: bool,
+     compute_ready: bool,
+     render_broken: bool,
+-    scratch_next: u64,
+-    tilemap: (u64, usize),
+-    tpc: (u64, usize),
+ }
+ 
+ /// A submit-time view of bindings, pinned through actual hardware completion.
+@@ -146,7 +143,6 @@ struct Queue {
+     vm: u32,
+     entity: sched::Entity<SubmissionJob>,
+     firmware: Arc<Mutex<crate::g16::FirmwareQueues>>,
+-    fences: dma_fence::FenceContexts,
+ }
+ #[derive(Clone)]
+ struct TimestampBuffer {
+@@ -214,12 +210,12 @@ pub(crate) fn register(pdev: &platform::Device<Core>) -> Result<DeviceRef> {
+     let runtime = crate::g16::Bootstrap::new(pdev)?;
+     let data = try_pin_init!(Data {
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+-        scheduler: sched::Scheduler::new(pdev.as_ref(), 4, 16, 0, 30000, c_str!("asahi_m4"))?,
++        scheduler: sched::Scheduler::new(pdev.as_ref(), 4, 128, 0, 30000, c_str!("asahi_m4"))?,
+         admission <- kernel::new_mutex!(KVec::new()),
+         failed: AtomicBool::new(false),
+         notifications: runtime.notifications.clone(),
+         runtime <- kernel::new_mutex!(runtime),
+-        engine <- kernel::new_mutex!(Engine { running: false, jobs: KVec::new(), issued: KVec::new() }), });
++        engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }), });
+     let device = Device::new(pdev.as_ref(), data)?;
+     drm::driver::Registration::new_foreign_owned(&device, pdev.as_ref(), 0)?;
+     Ok(device)
+@@ -401,11 +397,6 @@ fn vm_create(
+                 render_ready: false,
+                 compute_ready: false,
+                 render_broken: false,
+-                scratch_next: data.kernel_start
+-                    + render::PRIVATE_SIZE as u64
+-                    + compute::PRIVATE_SIZE as u64,
+-                tilemap: (0, 0),
+-                tpc: (0, 0),
+             },
+             GFP_KERNEL,
+         )?;
+@@ -503,7 +494,6 @@ fn queue_create(
+             sched::Priority::Normal
+         };
+         let entity = sched::Entity::new(&device.scheduler, priority)?;
+-        let fences = dma_fence::FenceContexts::new(1, c_str!("asahi_m4"), FENCE_KEY)?;
+         state.queues.push(
+             Queue {
+                 firmware: Arc::pin_init(
+@@ -513,7 +503,6 @@ fn queue_create(
+                 id,
+                 vm: data.vm_id,
+                 entity,
+-                fences,
+             },
+             GFP_KERNEL,
+         )?;
+@@ -984,9 +973,8 @@ fn drain(pending: &mut KVec<dma_fence::Fence>) -> Result {
+ struct Execution {
+     id: u64,
+     firmware: Arc<Mutex<crate::g16::FirmwareQueues>>,
+-    // Compute metadata may itself have been produced by an earlier command.
+-    // Such CPU preparation waits for the explicitly declared batch barriers.
+-    prepare_after: KVec<bool>,
++    // UAPI subqueue indices, resolved against previous submissions and this batch.
++    barriers: KVec<[u16; 2]>,
+     device: DeviceRef,
+     _owner: Arc<Mutex<FileState>>,
+     render_space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+@@ -1008,6 +996,20 @@ struct Running {
+     next: usize,
+     pending: usize,
+     error: Option<Error>,
++    history: [KVec<Option<crate::g16::Stamp>>; 2],
++}
++
++fn resolve_barriers(
++    history: &[KVec<Option<crate::g16::Stamp>>; 2],
++    barriers: [u16; 2],
++) -> Result<[Option<crate::g16::Stamp>; 2]> {
++    let mut dependencies = [None; 2];
++    for (stage, barrier) in barriers.into_iter().enumerate() {
++        if barrier != 0xffff {
++            dependencies[stage] = *history[stage].get(barrier as usize).ok_or(EIO)?;
++        }
++    }
++    Ok(dependencies)
+ }
+ struct Issued {
+     id: u64,
+@@ -1015,6 +1017,7 @@ struct Issued {
+ }
+ struct Engine {
+     running: bool,
++    cursor: usize,
+     jobs: KVec<Running>,
+     issued: KVec<Issued>,
+ }
+@@ -1054,10 +1057,11 @@ fn run(this: Arc<Self>) {
+                     }
+                     progress = true;
+                 }
+-                for index in 0..engine.jobs.len() {
+-                    // A batch awaiting GPU-produced compute metadata must not
+-                    // stall independent public queues. Later submissions on
+-                    // its own queue still wait for all its commands to publish.
++                let start = engine.cursor;
++                for offset in 0..engine.jobs.len() {
++                    let index = (start + offset) % engine.jobs.len();
++                    // Preserve submit-relative barrier index zero: all earlier
++                    // submissions on this public queue must have published.
+                     if engine.jobs[..index].iter().any(|earlier| {
+                         earlier.error.is_none()
+                             && earlier.next < earlier.execution.parameters.len()
+@@ -1068,66 +1072,72 @@ fn run(this: Arc<Self>) {
+                     }) {
+                         continue;
+                     }
+-                    loop {
+-                        let job = &engine.jobs[index];
+-                        if job.error.is_some() || job.next == job.execution.parameters.len() {
+-                            break;
+-                        }
+-                        // A CPU CDM/resource read cannot be moved ahead of a
+-                        // batch dependency that might generate those bytes.
+-                        if job.execution.prepare_after[job.next] && job.pending != 0 {
+-                            break;
++                    let job = &mut engine.jobs[index];
++                    if job.error.is_some() || job.next == job.execution.parameters.len() {
++                        continue;
++                    }
++                    if job.history[0].is_empty() {
++                        let previous = job.execution.firmware.lock().last;
++                        for (history, stamp) in job.history.iter_mut().zip(previous) {
++                            history.push(stamp, GFP_KERNEL)?;
+                         }
+-                        engine.issued.reserve(1, GFP_KERNEL)?;
+-                        let job = &mut engine.jobs[index];
+-                        let execution = &job.execution;
+-                        crate::mem::sync();
+-                        let receipt = match &execution.parameters[job.next] {
+-                            Parameters::Render(p) => runtime.submit_render(
+-                                execution.firmware.clone(),
+-                                execution.render_space.clone(),
+-                                p,
+-                                execution.support.as_deref().ok_or(EIO)?,
+-                                execution.timestamps[job.next],
+-                            ),
+-                            Parameters::Compute(p) => runtime.submit_compute(
+-                                execution.firmware.clone(),
+-                                &mut execution.space.lock(),
+-                                p,
+-                                &execution.memory,
+-                                execution.timestamps[job.next],
+-                            ),
+-                        };
+-                        let receipt = match receipt {
+-                            Ok(receipt) => receipt,
+-                            Err(EBUSY) if !runtime.render_failed() => return Ok(progress),
+-                            Err(error) if !runtime.render_failed() => {
+-                                pr_err!(
+-                                    "G16: command {} preparation failed: {:?}\n",
+-                                    job.next,
+-                                    error
+-                                );
+-                                job.error = Some(error);
+-                                break;
+-                            }
+-                            Err(error) => {
+-                                pr_err!(
+-                                    "G16: command {} publication failed: {:?}\n",
+-                                    job.next,
+-                                    error
+-                                );
+-                                return Err(error);
+-                            }
+-                        };
+-                        let issued = Issued {
+-                            id: receipt.id,
+-                            owner: execution.id,
+-                        };
+-                        job.next += 1;
+-                        job.pending += 1;
+-                        engine.issued.push(issued, GFP_KERNEL)?;
+-                        progress = true;
+                     }
++                    let dependencies =
++                        resolve_barriers(&job.history, job.execution.barriers[job.next])?;
++                    let execution = job.execution.clone();
++                    let compute = matches!(execution.parameters[job.next], Parameters::Compute(_));
++                    // Wake on completion of explicitly declared dependencies.
++                    // NONE dependencies admit immediately; independent engines
++                    // and successive render stages can execute concurrently.
++                    if !runtime.dependencies_done(&dependencies)? {
++                        continue;
++                    }
++                    engine.issued.reserve(1, GFP_KERNEL)?;
++                    let job = &mut engine.jobs[index];
++                    crate::mem::sync();
++                    let receipt = match &execution.parameters[job.next] {
++                        Parameters::Render(p) => runtime.submit_render(
++                            execution.firmware.clone(),
++                            execution.render_space.clone(),
++                            p,
++                            execution.support.as_deref().ok_or(EIO)?,
++                            execution.timestamps[job.next],
++                        ),
++                        Parameters::Compute(p) => runtime.submit_compute(
++                            execution.firmware.clone(),
++                            &mut execution.space.lock(),
++                            p,
++                            &execution.memory,
++                            execution.timestamps[job.next],
++                        ),
++                    };
++                    let receipt = match receipt {
++                        Ok(receipt) => receipt,
++                        Err(EBUSY) if !runtime.render_failed() => continue,
++                        Err(error) if !runtime.render_failed() => {
++                            pr_err!(
++                                "G16: command {} preparation failed: {:?}\n",
++                                job.next,
++                                error
++                            );
++                            job.error = Some(error);
++                            progress = true;
++                            continue;
++                        }
++                        Err(error) => return Err(error),
++                    };
++                    job.history[usize::from(compute)].push(Some(receipt.stamp), GFP_KERNEL)?;
++                    let issued = Issued {
++                        id: receipt.id,
++                        owner: execution.id,
++                    };
++                    job.next += 1;
++                    job.pending += 1;
++                    engine.issued.push(issued, GFP_KERNEL)?;
++                    // Resume after the last admitted job when a scarce slot
++                    // becomes free, rather than repeatedly favoring index zero.
++                    engine.cursor = index + 1;
++                    progress = true;
+                 }
+                 Ok(progress)
+             })();
+@@ -1210,18 +1220,27 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+         }
+         let fence = execution.completion.clone();
+         let mut engine = execution.device.engine.lock();
+-        if let Err(error) = engine.jobs.push(
+-            Running {
+-                execution: execution.clone(),
+-                next: 0,
+-                pending: 0,
+-                error: None,
+-            },
+-            GFP_KERNEL,
+-        ) {
+-            execution.completion.set_error(error.into());
++        let result = (|| -> Result {
++            let mut history = [KVec::new(), KVec::new()];
++            for events in &mut history {
++                events.reserve(65, GFP_KERNEL)?;
++            }
++            engine.jobs.push(
++                Running {
++                    execution: execution.clone(),
++                    next: 0,
++                    pending: 0,
++                    error: None,
++                    history,
++                },
++                GFP_KERNEL,
++            )?;
++            Ok(())
++        })();
++        if let Err(error) = result {
++            execution.completion.set_error(error);
+             let _ = execution.completion.signal();
+-            return Err(error.into());
++            return Err(error);
+         }
+         if !engine.running {
+             engine.running = true;
+@@ -1284,7 +1303,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+         .reader()
+         .read_all(&mut bytes, GFP_KERNEL)?;
+         let mut commands = KVec::new();
+-        let mut prepare_after = KVec::new();
++        let mut barriers = KVec::new();
+         let mut attachments = KVec::new();
+         let mut offset = 0usize;
+         let mut renders = 0u16;
+@@ -1307,7 +1326,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+                     let command = crate::util::Reader::new(payload)
+                         .read_up_to::<uapi::drm_asahi_cmd_render>(payload.len())?;
+                     commands.push(Command::Render(command), GFP_KERNEL)?;
+-                    prepare_after.push(false, GFP_KERNEL)?;
++                    barriers.push([header.vdm_barrier, header.cdm_barrier], GFP_KERNEL)?;
+                     renders += 1;
+                 }
+                 uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
+@@ -1320,11 +1339,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+                     let command = crate::util::Reader::new(payload)
+                         .read_up_to::<uapi::drm_asahi_cmd_compute>(payload.len())?;
+                     commands.push(Command::Compute(command), GFP_KERNEL)?;
+-                    prepare_after.push(
+-                        (header.vdm_barrier != 0xffff && header.vdm_barrier != 0)
+-                            || (header.cdm_barrier != 0xffff && header.cdm_barrier != 0),
+-                        GFP_KERNEL,
+-                    )?;
++                    barriers.push([header.vdm_barrier, header.cdm_barrier], GFP_KERNEL)?;
+                     computes += 1;
+                 }
+                 uapi::drm_asahi_cmd_type_DRM_ASAHI_SET_VERTEX_ATTACHMENTS
+@@ -1415,9 +1430,11 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+             .iter()
+             .find(|q| q.id == data.queue_id)
+             .ok_or(ENOENT)?;
+-        // Different queues may execute out of submission order, so each
+-        // queue needs its own DMA-fence timeline/context.
+-        let unique = queue.fences.new_fence(0, Completion)?;
++        // Render and compute on even one public queue may complete out of
++        // order. Give each submission its own timeline: a later independent
++        // completion must never subsume an earlier dependency in DRM.
++        let unique = dma_fence::FenceContexts::new(1, c_str!("asahi_m4"), FENCE_KEY)?
++            .new_fence(0, Completion)?;
+         let vm_id = queue.vm;
+         let firmware = queue.firmware.clone();
+         let mut timestamps = KVec::new();
+@@ -1474,14 +1491,8 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+                 GFP_KERNEL,
+             )?;
+         }
+-        let mut needs_mapping =
++        let needs_mapping =
+             (renders != 0 && !vm.render_ready) || (computes != 0 && !vm.compute_ready);
+-        for p in &parameters {
+-            if let Parameters::Render(p) = p {
+-                let (tilemap, tpc) = p.scratch_sizes().ok_or(EINVAL)?;
+-                needs_mapping |= tilemap > vm.tilemap.1 || tpc > vm.tpc.1;
+-            }
+-        }
+         if needs_mapping {
+             // Match the shim: drain before modifying GPU-visible mappings.
+             // Already-initialized submissions do not wait for prior work.
+@@ -1497,10 +1508,6 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+                     .alloc_render_private(vm.kernel.start, vm.kernel.end)?;
+                 let pool =
+                     render::OperandPool::new(vm.kernel.start, vm.kernel.end).ok_or(EINVAL)?;
+-                vm.scratch_next = pool.growth_end().ok_or(EINVAL)?;
+-                if vm.scratch_next > vm.kernel.end.min(render::CONTEXT_BASE + (1 << 32)) {
+-                    return Err(ENOMEM);
+-                }
+                 vm.render_support = Some(Arc::new(
+                     runtime.acquire_render_support(&pool)?,
+                     GFP_KERNEL,
+@@ -1515,11 +1522,6 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+                 vm.render_broken = false;
+             }
+         }
+-        for p in &mut parameters {
+-            if let Parameters::Render(p) = p {
+-                vm.prepare_scratch(p)?;
+-            }
+-        }
+         let mut mappings = KVec::new();
+         for mapping in &vm.mappings {
+             mappings.push(mapping.clone(), GFP_KERNEL)?;
+@@ -1532,7 +1534,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+         let worker_completion = completion.clone();
+         let execution = Arc::pin_init(
+             try_pin_init!(Execution {
+-                id: NEXT_EXECUTION.fetch_add(1, Ordering::Relaxed), firmware, prepare_after,
++                id: NEXT_EXECUTION.fetch_add(1, Ordering::Relaxed), firmware, barriers,
+                 device: device.into(), _owner: inner.state.clone(),
+                 render_space: vm.space.clone(), space: vm.compute_space.clone(), memory,
+                 support: vm.render_support.clone(),
+@@ -1765,33 +1767,6 @@ fn render_parameters(&self, c: &uapi::drm_asahi_cmd_render) -> Result<render::Pa
+         }
+         Ok(p)
+     }
+-
+-    fn prepare_scratch(&mut self, p: &mut render::Parameters) -> Result {
+-        let (tilemap, tpc) = p.scratch_sizes().ok_or(EINVAL)?;
+-        let mut changed = false;
+-        for (current, needed) in [(&mut self.tilemap, tilemap), (&mut self.tpc, tpc)] {
+-            if current.1 < needed {
+-                let end = self.scratch_next.checked_add(needed as u64).ok_or(ENOMEM)?;
+-                if end > self.kernel.end {
+-                    return Err(ENOMEM);
+-                }
+-                self.space.lock().alloc_low(
+-                    self.scratch_next,
+-                    needed,
+-                    crate::pgtable::prot::PROT_GPU_SHARED_RW,
+-                )?;
+-                *current = (self.scratch_next, needed);
+-                self.scratch_next = end;
+-                changed = true;
+-            }
+-        }
+-        if changed {
+-            self.publish_mappings();
+-        }
+-        p.tilemap = self.tilemap.0;
+-        p.tpc = self.tpc.0;
+-        Ok(())
+-    }
+ }
+ 
+ // SAFETY: These UAPI structures contain only integers and integer arrays.
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index 5d8d18e4ebe2..308affd823eb 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -53,7 +53,7 @@ pub(crate) struct Parameters {
+     pub(crate) multisample_control: u64,
+     pub(crate) occlusion_query_base: u64,
+     pub(crate) ppp_control: u64,
+-    pub(crate) queue_item_index: u64,
++    pub(crate) scene_slot: u64,
+     pub(crate) samples: u64,
+     pub(crate) scissor_array: u64,
+     pub(crate) stencil_aux_buffer: u64,
+@@ -102,7 +102,7 @@ pub(crate) fn valid(&self) -> bool {
+             )
+             && matches!(self.samples, 1 | 2 | 4)
+             && self.tib_blocks <= 64
+-            && self.queue_item_index <= 0xffff
++            && self.scene_slot < 36
+             && (self.sampler_array == 0) == (self.sampler_count == 0)
+             && self.sampler_array & 7 == 0
+             && self.sampler_count < u32::MAX as u64
+@@ -180,7 +180,7 @@ fn geometry(&self) -> Geometry {
+             0x8000
+         };
+         let deflake_1 = self.ta_offset(self.deflake_1);
+-        let record_index = 0x80005 + self.queue_item_index * 4;
++        let record_index = 0x80001 + self.scene_slot * 4;
+         Some([
+             (0x01748, 1),
+             (0x10141, 512),
+@@ -840,6 +840,10 @@ pub(crate) fn growth_end(&self) -> Option<u64> {
+     pub(crate) fn support(&self, id: u64, shared: u64) -> [u8; 0x100] {
+         let mut out = [0; 0x100];
+         u64_at(&mut out, 0, id);
++        // Render leases use slots 3..59, distinct from opening and compute.
++        // The native driver assigns +8 before publication; firmware programs
++        // this slot into the accelerator's private-memory pool selector.
++        u32_at(&mut out, 8, id as u32);
+         u64_at(&mut out, 0x14, self.directory);
+         u32_at(&mut out, 0x1c, 0x400000 / 8);
+         u32_at(&mut out, 0x24, 24 * 512);
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 74f8ac8d60a2..1e0a718ea4d4 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -14,8 +14,6 @@
+     sync::{Arc, Mutex},
+ };
+ 
+-pub(crate) const MAX_FLIGHTS: usize = 16;
+-
+ /// One userspace queue's three firmware workqueues. Channel rings remain
+ /// device-wide transports; their messages select these independent queues.
+ /// Firmware-owned allocations are retained by Bootstrap until device reset.
+@@ -26,7 +24,7 @@ pub(crate) struct FirmwareQueues {
+     pending: usize,
+     render_count: u64,
+     compute_count: u64,
+-    last: Option<Stamp>,
++    pub(crate) last: [Option<Stamp>; 2],
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -61,7 +59,7 @@ pub(crate) fn new(priority: u32) -> Self {
+             pending: 0,
+             render_count: 0,
+             compute_count: 0,
+-            last: None,
++            last: [None; 2],
+         }
+     }
+ 
+@@ -76,39 +74,17 @@ pub(crate) struct Stamp {
+     pub(crate) value: u32,
+     pub(crate) event: u32,
+ }
+-impl Stamp {
+-    fn barrier(self, target: u32, uuid: u32) -> [u8; 0x40] {
+-        // G16 barriers carry both firmware stamp addresses. This is the same
+-        // ABI as the tiling -> fragment barrier, including the wider prefix.
+-        let mut out = [0u8; 0x40];
+-        out[..4].copy_from_slice(&4u32.to_le_bytes());
+-        out[4..12].copy_from_slice(&self.address.to_le_bytes());
+-        out[12..20].copy_from_slice(&self.address.to_le_bytes());
+-        for (off, value) in [
+-            (0x14, self.value),
+-            (0x20, self.event),
+-            (0x24, target),
+-            (0x28, uuid),
+-            // General queue dependency, as in M1/M2's explicit barriers.
+-            // Zero is reserved for the fixed TA -> fragment dependency.
+-            // G16's DAG barrier checker skips the dynamic stamp checks when
+-            // this field is zero, which can strand a compute -> TA wait.
+-            (0x30, 1),
+-        ] {
+-            out[off..off + 4].copy_from_slice(&value.to_le_bytes());
+-        }
+-        out
+-    }
+-}
+ #[derive(Clone, Copy)]
+ pub(crate) struct Receipt {
+     pub(crate) id: u64,
++    pub(crate) stamp: Stamp,
+ }
+ struct RenderFlight {
+     addresses: render::Addresses,
+     client: Arc<Mutex<g16_vm::AddressSpace>>,
+     root: u64,
+     events: RenderEvents,
++    scene: u32,
+ }
+ pub(super) struct Flight {
+     id: u64,
+@@ -128,7 +104,34 @@ fn reached(cursor: u32, target: u32, capacity: u32) -> bool {
+     cursor < capacity && target < capacity && (cursor + capacity - target) % capacity < capacity / 2
+ }
+ 
++/// Both firmware cursors must leave enough space for the entire publication.
++/// The half-ring bound also makes completion comparisons unambiguous.
++fn ring_room(tail: u32, read: u32, done: u32, entries: u32, capacity: u32) -> bool {
++    tail < capacity
++        && read < capacity
++        && done < capacity
++        && entries < capacity / 2
++        && [read, done]
++            .iter()
++            .all(|&cursor| (tail + capacity - cursor) % capacity + entries < capacity / 2)
++}
++
+ impl Bootstrap {
++    /// Report each exhausted resource once, without logging every retry or
++    /// enabling firmware KTrace (which changes command execution timing).
++    fn report_pressure(&self, bit: u64, resource: &str) {
++        if *crate::module_parameters::fw_trace.value() & 2 != 0
++            && self.pressure_reported.fetch_or(bit, Ordering::Relaxed) & bit == 0
++        {
++            dev_info!(
++                self.dev.as_ref(),
++                "G16: backpressure {} outstanding={}\n",
++                resource,
++                self.flights.len()
++            );
++        }
++    }
++
+     fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+         use crate::pgtable::prot::{PROT_FW_PRIV_RW, PROT_FW_SHARED_RW};
+         use g16_fw::queue as q;
+@@ -151,7 +154,7 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+             // shared only by its own vertex, fragment and compute lanes.
+             let jobs = base + 0x4100;
+             let context = base + 0x4140;
+-            for (stage, lane) in lanes.iter().enumerate() {
++            for lane in &lanes {
+                 fw.alloc(lane.queue, 0x4000, PROT_FW_PRIV_RW)?;
+                 fw.alloc(lane.pointers, 0x8000, PROT_FW_SHARED_RW)?;
+                 let mut descriptor = q::Queue {
+@@ -164,12 +167,12 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+                 }
+                 .encode_priority(owner.priority)
+                 .ok_or(EINVAL)?;
+-                if stage == 2 {
+-                    // Match M1/M2 WorkQueue::new: keep independent compute
+-                    // queues, but disable compute preemption until qualified.
+-                    descriptor[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
+-                    descriptor[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());
+-                }
++                // Run an active Work to completion on each engine. The
++                // preempting profile lost compute updates and, with mixed
++                // engines, a rendered image. Engines still overlap, and TA
++                // pipelines ahead of fragment; priorities select channels.
++                descriptor[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
++                descriptor[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());
+                 fw.write(lane.queue, &descriptor)?;
+                 fw.write(lane.pointers, &q::pointers(0x500, 0))?;
+             }
+@@ -179,7 +182,7 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+             crate::mem::tlbi_all();
+             crate::mem::sync();
+             owner.lanes = Some(lanes);
+-            if *crate::module_parameters::fw_trace.value() != 0 {
++            if *crate::module_parameters::fw_trace.value() & 1 != 0 {
+                 dev_info!(
+                     self.dev.as_ref(),
+                     "G16: queues vertex={:#x} fragment={:#x} compute={:#x} priority={}\n",
+@@ -197,7 +200,10 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+                     let free = !mask & 0xffff_ffff;
+                     (free != 0).then(|| mask | (1 << free.trailing_zeros()))
+                 })
+-                .map_err(|_| EBUSY)?;
++                .map_err(|_| {
++                    self.report_pressure(8, "events");
++                    EBUSY
++                })?;
+             owner.events = Some(QueueEvents {
+                 slots: self.queue_events.clone(),
+                 index: (!previous & 0xffff_ffff).trailing_zeros(),
+@@ -206,17 +212,30 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+         Ok(())
+     }
+ 
+-    fn reserve_flight(&mut self) -> Result {
++    fn reserve_flight(
++        &mut self,
++        queue: &FirmwareQueues,
++        render: bool,
++        root: Option<u64>,
++    ) -> Result {
+         if self.render_failed {
+             return Err(EIO);
+         }
+-        if self.flights.len() >= MAX_FLIGHTS {
++        // Check scarce resources before allocating any per-Work storage.
++        // A live render VM can share its ASID; compute uses a private root.
++        if !(1..64).any(|i| {
++            self.context_users[i] == 0
++                || root.is_some_and(|r| self.context_roots[i].is_some_and(|s| s.low == r))
++        }) {
++            self.report_pressure(1, "ASIDs");
+             return Err(EBUSY);
+         }
+-        self.flights.reserve(1, GFP_KERNEL)?;
++        let stages: &[usize] = if render { &[0, 1] } else { &[2] };
+         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
+         let guard = self._sgx.try_access().ok_or(ENODEV)?;
+-        for route in &config.channels[..12] {
++        for &stage in stages {
++            let channel = queue.priority as usize * 3 + stage;
++            let route = &config.channels[channel];
+             let read =
+                 guard.try_read32(0xd64000 + (route.state[0] - 0xffff_fc20_0002_8000) as usize)?;
+             let done =
+@@ -226,15 +245,51 @@ fn reserve_flight(&mut self) -> Result {
+             if read >= 256 || done >= 256 || tail >= 256 {
+                 return Err(EIO);
+             }
+-            if (tail + 1) & 255 == read || (tail + 1) & 255 == done {
++            if !ring_room(tail, read, done, 1, 256) {
++                self.report_pressure(2, "channel");
++                return Err(EBUSY);
++            }
++            // Keep even already-consumed, unretired targets within the
++            // half-ring window used by reached(). Notification can coalesce.
++            if self
++                .flights
++                .iter()
++                .filter(|f| f.channels.iter().any(|&(c, _)| c == channel))
++                .count()
++                >= 127
++            {
++                self.report_pressure(2, "channel");
+                 return Err(EBUSY);
+             }
++            if let Some(lanes) = &queue.lanes {
++                let lane = lanes[stage];
++                let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++                let entries = if render { 2 } else { 1 };
++                let read = fw.read_u32(lane.pointers)?;
++                let done = fw.read_u32(lane.pointers + 0x30)?;
++                if read >= 0x500 || done >= 0x500 || lane.head >= 0x500 {
++                    return Err(EIO);
++                }
++                if !ring_room(lane.head, read, done, entries, 0x500) {
++                    self.report_pressure(16, "workqueue");
++                    return Err(EBUSY);
++                }
++            }
+         }
+-        // At most four TA entries, two fragment entries or two compute entries
+-        // per flight: a 0x500-entry queue cannot fill at this admission limit.
++        self.flights.reserve(1, GFP_KERNEL)?;
+         Ok(())
+     }
+ 
++    pub(crate) fn dependencies_done(&self, dependencies: &[Option<Stamp>; 2]) -> Result<bool> {
++        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++        for stamp in dependencies.iter().flatten() {
++            if fw.read_u32(stamp.address)? != stamp.value {
++                return Ok(false);
++            }
++        }
++        Ok(true)
++    }
++
+     pub(crate) fn poison(&mut self) {
+         self.render_failed = true;
+     }
+@@ -250,7 +305,7 @@ fn stamps_done(&self, flight: &Flight) -> Result<bool> {
+     }
+ 
+     fn trace_publication(&self, kind: &str, id: u64) -> Result {
+-        if *crate::module_parameters::fw_trace.value() != 0 {
++        if *crate::module_parameters::fw_trace.value() & 1 != 0 {
+             let mut unretired = 0;
+             for flight in &self.flights {
+                 if !self.stamps_done(flight).unwrap_or(false) {
+@@ -415,6 +470,14 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                 .as_ref()
+                 .is_some_and(|r| r.events.memory_limit);
+             let id = flight.id;
++            if let Some(render) = &flight.render {
++                let pool = self
++                    .tvb_pools
++                    .iter_mut()
++                    .find(|p| p.root == render.root)
++                    .ok_or(EIO)?;
++                pool.release_scene(render.scene);
++            }
+             let mut owner = flight.owner.lock();
+             owner.pending -= 1;
+             if owner.pending == 0 {
+@@ -696,8 +759,8 @@ pub(crate) fn submit_render(
+         support: &Support,
+         timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+-        self.reserve_flight()?;
+         let mut queue = queues.lock();
++        self.reserve_flight(&queue, true, Some(owner.lock().roots().low))?;
+         self.prepare_queues(&mut queue)?;
+         let result = self.submit_render_queue(
+             &mut queue,
+@@ -742,6 +805,9 @@ fn submit_render_queue(
+                 self.tvb_pools.len() - 1
+             }
+         };
++        let scene = self.tvb_pools[index].reserve_scene().inspect_err(|_| {
++            self.report_pressure(4, "scenes");
++        })?;
+         let mut pool = self.tvb_pools.swap_remove(index);
+         let result = self.submit_render_pool(
+             client,
+@@ -751,8 +817,12 @@ fn submit_render_queue(
+             queues,
+             &mut pool,
+             owner.clone(),
++            scene,
+             timestamps,
+         );
++        if result.is_err() && !self.render_failed {
++            pool.release_scene(scene);
++        }
+         self.tvb_pools.push(pool, GFP_KERNEL)?;
+         result
+     }
+@@ -766,6 +836,7 @@ fn submit_render_pool(
+         queues: Arc<Mutex<FirmwareQueues>>,
+         pool: &mut crate::g16_tvb::Tvb,
+         owner: Arc<Mutex<g16_vm::AddressSpace>>,
++        scene: u32,
+         timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+         if self.render_failed {
+@@ -778,10 +849,15 @@ fn submit_render_pool(
+         let mut params = *params;
+         params.tiling_admission = pool.addresses.buffer_manager_slot;
+         params.fragment_admission = pool.addresses.buffer_manager_slot;
++        // These accelerator pointers must select the same leased scene as
++        // BufferThing. Reusing scene 1 here corrupts other in-flight renders.
++        params.scene_slot = u64::from(scene);
++        params.cycle = 0x240000 + u64::from(scene) * 0x30;
++        client.prepare_render(&mut params)?;
+         let mut a = render::Addresses::bootstrap()
+             .publication(self.render_publication)
+             .ok_or(ENOSPC)?;
+-        pool.work_addresses(&mut a, self.render_publication);
++        pool.work_addresses(&mut a, scene);
+         // Keep profiling storage private to the Work. Public timestamp BOs
+         // are written by the firmware through its separate user destinations.
+         let lanes = queue.lanes.as_ref().ok_or(EIO)?;
+@@ -801,7 +877,9 @@ fn submit_render_pool(
+         a.fragment_stamp = 0x100 + queue_ordinal * 0x100;
+         a.tiling_stamp = 0xc00 + queue_ordinal * 0x100;
+         let va = self.next_work_va;
+-        self.next_work_va = va.checked_add(0x14000).ok_or(ENOSPC)?;
++        self.next_work_va = va.checked_add(0x18000).ok_or(ENOSPC)?;
++        a.tiling_shared_tail = va + 0x10000;
++        a.fragment_shared_tail = va + 0x14000;
+         a.event_control = va + 0x200;
+         a.event_count_array = va + 0x300;
+         a.tiling_driver_stamp = va + 0x400;
+@@ -814,6 +892,11 @@ fn submit_render_pool(
+         }
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         fw.alloc(va, 0x10000, crate::pgtable::prot::PROT_FW_PRIV_RW)?;
++        fw.alloc(
++            va + 0x10000,
++            0x8000,
++            crate::pgtable::prot::PROT_FW_SHARED_RW,
++        )?;
+         for stage in 0..2u64 {
+             let work_page = va + stage * 0x8000;
+             let register_page = alias + stage * 0x4000;
+@@ -889,9 +972,8 @@ fn submit_render_pool(
+             value: a.fragment_stamp as u32,
+             event: a.fragment_event as u32,
+         };
+-        let receipt = Receipt { id: va };
+-        self.last_render = Some(stamp);
+-        queue.last = Some(stamp);
++        let receipt = Receipt { id: va, stamp };
++        queue.last[0] = Some(stamp);
+         queue.pending += 1;
+         self.flights.push(
+             Flight {
+@@ -917,6 +999,7 @@ fn submit_render_pool(
+                     client: owner,
+                     root: space.low,
+                     events: RenderEvents::default(),
++                    scene,
+                 }),
+             },
+             GFP_KERNEL,
+@@ -948,14 +1031,8 @@ fn publish_render(
+         let producer_offset = |address: u64| 0xd60000 + (address - 0xffff_fc20_0002_0000) as usize;
+         let next = (epoch + 1) & 255;
+         let firsts = [lanes[0].head, lanes[1].head];
+-        let mut waits = KVec::new();
+-        for stamp in [self.last_render, queue.last].into_iter().flatten() {
+-            if !waits.iter().any(|s: &Stamp| s.address == stamp.address) {
+-                waits.push(stamp, GFP_KERNEL)?;
+-            }
+-        }
+         let heads = [
+-            (firsts[0] + 1 + u32::from(initbm) + waits.len() as u32) % 0x500,
++            (firsts[0] + 1 + u32::from(initbm)) % 0x500,
+             (firsts[1] + 2) % 0x500,
+         ];
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+@@ -995,17 +1072,6 @@ fn publish_render(
+                 fw.write_live(micro, &a.fragment_microsequence())?;
+             }
+             let mut pos = firsts[stage];
+-            if stage == 0 {
+-                for (index, stamp) in waits.iter().enumerate() {
+-                    let address = a.tiling_prelude + 0x100 + index as u64 * 0x40;
+-                    fw.write_live(
+-                        address,
+-                        &stamp.barrier(a.tiling_stamp as u32, a.tiling_uuid as u32),
+-                    )?;
+-                    fw.write_live(ring + u64::from(pos) * 8, &address.to_le_bytes())?;
+-                    pos = (pos + 1) % 0x500;
+-                }
+-            }
+             if stage == 1 || initbm {
+                 fw.write_live(ring + u64::from(pos) * 8, &prelude.to_le_bytes())?;
+                 pos = (pos + 1) % 0x500;
+@@ -1082,8 +1148,8 @@ pub(crate) fn submit_compute(
+         memory: &impl crate::g16_cdm::Memory,
+         timestamps: [u64; 4],
+     ) -> Result<Receipt> {
+-        self.reserve_flight()?;
+         let mut queue = queues.lock();
++        self.reserve_flight(&queue, false, None)?;
+         self.prepare_queues(&mut queue)?;
+         let result = self.submit_compute_queue(
+             &mut queue,
+@@ -1110,7 +1176,7 @@ fn submit_compute_queue(
+     ) -> Result<Receipt> {
+         let lane = queue.lanes.as_ref().ok_or(EIO)?[2];
+         let priority = queue.priority;
+-        let dependency = queue.last;
++
+         parent.views.reserve(1, GFP_KERNEL)?;
+         let mut view = parent.fork()?;
+         let client = &mut view;
+@@ -1181,7 +1247,7 @@ fn submit_compute_queue(
+         let count32 = u32::try_from(count).map_err(|_| ENOSPC)?;
+ 
+         let first = lane.head;
+-        let head = (first + 1 + u32::from(dependency.is_some())) % 0x500;
++        let head = (first + 1) % 0x500;
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         fw.write_live(compute::SHARED_STATE, &count32.to_le_bytes())?;
+         fw.write_live(a.work, &work)?;
+@@ -1201,15 +1267,7 @@ fn submit_compute_queue(
+         let previous = a.stamp.checked_sub(0x100).ok_or(EINVAL)?;
+         fw.write_live(a.driver_stamp, &previous.to_le_bytes())?;
+         fw.write_live(a.firmware_stamp, &previous.to_le_bytes())?;
+-        // Optional resume state is null, matching ordinary shim compute.
+-        let mut pos = first;
+-        if let Some(stamp) = dependency {
+-            let barrier = a.work + 0x1900;
+-            fw.write_live(barrier, &stamp.barrier(a.stamp, a.identity as u32))?;
+-            fw.write_live(lane.ring + u64::from(pos) * 8, &barrier.to_le_bytes())?;
+-            pos = (pos + 1) % 0x500;
+-        }
+-        fw.write_live(lane.ring + u64::from(pos) * 8, &a.work.to_le_bytes())?;
++        fw.write_live(lane.ring + u64::from(first) * 8, &a.work.to_le_bytes())?;
+         fw.write_live(lane.pointers + 0x40, &head.to_le_bytes())?;
+         crate::mem::sync();
+         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
+@@ -1253,7 +1311,7 @@ fn submit_compute_queue(
+             event: a.event,
+         };
+         let pointers = lane.pointers;
+-        queue.last = Some(stamp);
++        queue.last[1] = Some(stamp);
+         queue.pending += 1;
+         self.flights.push(
+             Flight {
+@@ -1270,7 +1328,7 @@ fn submit_compute_queue(
+         )?;
+         self.render_failed = false;
+         self.trace_publication("compute", a.work)?;
+-        Ok(Receipt { id: a.work })
++        Ok(Receipt { id: a.work, stamp })
+     }
+ }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_tvb.rs b/drivers/gpu/drm/asahi/g16_tvb.rs
+index fe8e6447c950..9c982ce4d81e 100644
+--- a/drivers/gpu/drm/asahi/g16_tvb.rs
++++ b/drivers/gpu/drm/asahi/g16_tvb.rs
+@@ -19,6 +19,7 @@ pub(crate) struct Tvb {
+     pub(crate) blocks: u32,
+     pub(crate) counter: u32,
+     pub(crate) refused: bool,
++    scenes: u64,
+     next: u64,
+ }
+ impl Tvb {
+@@ -67,11 +68,27 @@ pub(crate) fn new(
+             blocks: 11,
+             counter: 0,
+             refused: false,
++            scenes: 0,
+             next: growth_base,
+         })
+     }
+ 
+-    pub(crate) fn work_addresses(&self, a: &mut render::Addresses, publication: u64) {
++    pub(crate) fn reserve_scene(&mut self) -> Result<u32> {
++        // The firmware's accelerator scene records have 36 slots. Lease one
++        // until both stages and their event replies have retired.
++        let index = (!self.scenes).trailing_zeros();
++        if index >= 36 {
++            return Err(EBUSY);
++        }
++        self.scenes |= 1 << index;
++        Ok(index)
++    }
++
++    pub(crate) fn release_scene(&mut self, index: u32) {
++        self.scenes &= !(1 << index);
++    }
++
++    pub(crate) fn work_addresses(&self, a: &mut render::Addresses, scene: u32) {
+         let p = &self.addresses;
+         a.buffer_manager_slot = p.buffer_manager_slot;
+         a.buffer_manager = p.buffer_manager;
+@@ -80,7 +97,7 @@ pub(crate) fn work_addresses(&self, a: &mut render::Addresses, publication: u64)
+         a.buffer_manager_counter = p.buffer_manager_counter;
+         a.buffer_manager_block_list = p.buffer_manager_block_list;
+         a.buffer_manager_page_list = p.buffer_manager_page_list;
+-        a.buffer_thing = (p.buffer_thing & !0x3fff) + ((publication + 1) % 80) * 0x80;
++        a.buffer_thing = (p.buffer_thing & !0x3fff) + u64::from(scene) * 0x80;
+     }
+ 
+     pub(crate) fn grow(
+@@ -91,7 +108,9 @@ pub(crate) fn grow(
+         let a = &self.addresses;
+         let old = self.blocks;
+         if client.roots().low != self.root
+-            || fw.read_u32(a.buffer_manager + 0x3c)? != old
++            // Another queued request can arrive before firmware consumes the
++            // previous growth reply. Its mirror may lag our published lists.
++            || fw.read_u32(a.buffer_manager + 0x3c)? > old
+             || fw.read_u32(a.buffer_manager_block_control)? != old
+             || fw.read_u32(a.buffer_manager_block_control + 4)? != old
+             || fw.read_u64(a.buffer_manager + 0x44)? != a.buffer_manager_block_list
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 2fa05683b367..3624da934246 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -30,6 +30,7 @@ pub(crate) struct AddressSpace {
+     // Drop the owned tables before releasing their mapped pages.
+     pages: KVec<(u64, Owned<Page>)>,
+     snapshots: KVec<Owned<Page>>,
++    render_scratch: core::ops::Range<u64>,
+ }
+ 
+ impl AddressSpace {
+@@ -47,6 +48,7 @@ pub(crate) fn new() -> Result<Self> {
+             pages: KVec::new(),
+             snapshots: KVec::new(),
+             views: KVec::new(),
++            render_scratch: 0..0,
+         })
+     }
+ 
+@@ -57,6 +59,7 @@ pub(crate) fn fork(&self) -> Result<Self> {
+             pages: KVec::new(),
+             snapshots: KVec::new(),
+             views: KVec::new(),
++            render_scratch: 0..0,
+         })
+     }
+ 
+@@ -96,6 +99,11 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+         let mut params = render::Parameters::default();
+         params.set_private(start, end).ok_or(EINVAL)?;
+         let pool = render::OperandPool::new(start, end).ok_or(EINVAL)?;
++        self.render_scratch =
++            pool.growth_end().ok_or(EINVAL)?..end.min(render::CONTEXT_BASE + (1 << 32));
++        if self.render_scratch.start > self.render_scratch.end {
++            return Err(ENOMEM);
++        }
+         self.alloc_low(start, render::PRIVATE_SIZE, prot::PROT_GPU_SHARED_RW)?;
+         for offset in (0..render::PRIVATE_SIZE).step_by(UAT_PGSZ) {
+             let va = start + offset as u64;
+@@ -130,6 +138,39 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+         Ok(())
+     }
+ 
++    /// Each render owns its tile metadata, deflake/status and auxiliary pages.
++    /// Only fresh DVAs are installed, so earlier renders keep stable mappings.
++    /// Pages remain owned by the VM until destruction, including failed setup.
++    pub(crate) fn prepare_render(&mut self, p: &mut crate::g16_render::Parameters) -> Result {
++        let (tilemap, tpc) = p.scratch_sizes().ok_or(EINVAL)?;
++        let base = self.render_scratch.start;
++        let size = tilemap
++            .checked_add(tpc)
++            .and_then(|n| n.checked_add(5 * UAT_PGSZ))
++            .ok_or(ENOMEM)?;
++        let end = base.checked_add(size as u64).ok_or(ENOMEM)?;
++        if end > self.render_scratch.end {
++            return Err(ENOMEM);
++        }
++        // Reserve before a fallible allocation so no partial range is reused.
++        self.render_scratch.start = end;
++        self.alloc_low(base, size, prot::PROT_GPU_SHARED_RW)?;
++        p.tilemap = base;
++        p.tpc = base + tilemap as u64;
++        let meta = p.tpc + tpc as u64;
++        p.layermeta = meta;
++        p.heapmeta = meta + if p.layers > 1 { 0x100 } else { 0 };
++        p.deflake_3 = meta + 0x4000;
++        p.deflake_2 = p.deflake_3 + 0x20;
++        p.deflake_1 = p.deflake_3 + 0x2a0;
++        p.ta_status = meta + 0x8000 + 0x240;
++        p.fragment_status = meta + 0xc000 + 0x2c0;
++        p.aux_fb = meta + 0x10000;
++        self.write_low(p.aux_fb + 0x600, &0x0000035b60000000u64.to_le_bytes())?;
++        self.sync();
++        Ok(())
++    }
++
+     /// Allocate all ten-block growth pages before changing visible mappings.
+     pub(crate) fn alloc_tvb_blocks(&mut self, base: u64, count: usize) -> Result<bool> {
+         if count == 0 || count > 10 || base & 0x7fff != 0 {

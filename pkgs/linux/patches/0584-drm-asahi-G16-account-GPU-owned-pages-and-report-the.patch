@@ -1,0 +1,245 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 16:15:02 -0500
+Subject: [PATCH] drm/asahi: G16: account GPU-owned pages and report them in
+ fdinfo
+
+The G16 driver backs firmware regions and each client VM's private render
+storage, scratch and tiler blocks with raw pages. They appeared in no
+meminfo counter, were not charged to any memory cgroup, and no tool could
+attribute them to a process: about 54 MiB per render client plus 87 MiB
+per device, 0.9 GB on a 16 GB Air KDE session.
+
+- Wrap them in GpuPage, which counts each page in the node's
+  NR_GPU_ACTIVE for its lifetime, as TTM does for its pool pages. They
+  now show up as GPUActive in /proc/meminfo and nr_gpu_active in vmstat.
+  The count is node-level (mod_node_page_state): memory cgroups have no
+  NR_GPU_ACTIVE item, and the lruvec path warns for charged pages.
+- Allocate the per-VM render private storage, built in the submitting
+  client's ioctl, with GFP_KERNEL_ACCOUNT, so it is charged to that
+  client's memory cgroup ("kernel" in memory.stat; memory.current, oomd
+  and the OOM killer see it). Scratch and tiler blocks are allocated by
+  the submission worker and stay uncharged.
+- Report fdinfo: drm_show_memory_stats() for the client's GEM handles,
+  and the pages owned by its VMs as drm-total-kernel and
+  drm-resident-kernel.
+
+No UAPI change.
+
+[Youwes09: Left out the post_open() and as_raw() context from Gravity's
+DriverFile.]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 19 ++++++++
+ drivers/gpu/drm/asahi/g16_vm.rs  | 75 +++++++++++++++++++++++++++-----
+ rust/helpers/page.c              |  5 +++
+ 3 files changed, 89 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index be33fdd058fd..55ebb3d6f75c 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -668,6 +668,25 @@ fn open(device: &Device) -> Result<Pin<KBox<Self>>> {
+             GFP_KERNEL,
+         )
+     }
++    const HAS_SHOW_FDINFO: bool = true;
++    /// GEM handles as the standard `memory` region, plus the pages the driver
++    /// owns for this client's VMs (render private storage and its operand
++    /// pool, scratch, tiler blocks) as the resident `kernel` region.
++    fn show_fdinfo(&self, file: &DrmFile, printer: &mut drm::file::Printer) {
++        printer.gem_memory_stats(file);
++        let mut owned = 0u64;
++        for vm in self.state.lock().vms.iter() {
++            for space in [&vm.space, &vm.compute_space] {
++                owned += space.lock().owned_bytes() as u64;
++            }
++        }
++        let stats = drm::file::MemoryStats {
++            private: owned,
++            resident: owned,
++            ..Default::default()
++        };
++        printer.memory_stats(&stats, true, c_str!("kernel"));
++    }
+ }
+ 
+ /// Unmaps a file's deferred GEM closes once their snapshots complete. Every
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 1a1ee5d8fcc0..999af52ad861 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -8,12 +8,56 @@
+ use crate::g16_alloc::Arena;
+ use crate::pgtable::{prot, UatPageTable, UAT_PGSZ};
+ use kernel::rbtree::{RBTree, RBTreeNode};
+-use kernel::{device, page::Page, prelude::*};
++use kernel::{bindings, device, page::Page, prelude::*, types::Owned};
+ 
+ const IAS: usize = 42;
+ const OAS: u32 = 42;
+ const USC_BASE: u64 = 0x100_0000_0000;
+ 
++/// A page the GPU uses on behalf of a client or the firmware. Its lifetime is
++/// counted in the node's `NR_GPU_ACTIVE` (`GPUActive` in /proc/meminfo,
++/// `nr_gpu_active` in vmstat), as TTM counts its pool pages, so these pages are
++/// not missing from the meminfo totals. The count is per node only: memory
++/// cgroups have no such item. Pages allocated with `__GFP_ACCOUNT` are charged
++/// to the allocating task's memory cgroup until they are freed.
++pub(crate) struct GpuPage(Owned<Page>);
++
++impl GpuPage {
++    pub(crate) fn alloc(flags: kernel::alloc::Flags) -> Result<Self, kernel::alloc::AllocError> {
++        let page = Page::alloc_page(flags)?;
++        // SAFETY: `page` is a valid page owned by this allocation.
++        unsafe {
++            bindings::mod_node_page_state(
++                bindings::page_pgdat(page.as_ptr()),
++                bindings::node_stat_item_NR_GPU_ACTIVE,
++                1,
++            )
++        };
++        Ok(Self(page))
++    }
++}
++
++impl core::ops::Deref for GpuPage {
++    type Target = Page;
++    fn deref(&self) -> &Page {
++        &self.0
++    }
++}
++
++impl Drop for GpuPage {
++    fn drop(&mut self) {
++        // SAFETY: The page stays allocated until `self.0` is dropped, after
++        // this function returns.
++        unsafe {
++            bindings::mod_node_page_state(
++                bindings::page_pgdat(self.0.as_ptr()),
++                bindings::node_stat_item_NR_GPU_ACTIVE,
++                -1,
++            )
++        };
++    }
++}
++
+ /// Published root addresses. The submission owner must retain their VM until
+ /// GPU completion; copying these addresses does not transfer page ownership.
+ #[derive(Clone, Copy)]
+@@ -26,7 +70,9 @@ pub(crate) struct AddressSpace {
+     pub(crate) low: UatPageTable,
+     pub(crate) high: UatPageTable,
+     // Drop the owned tables before releasing their mapped pages.
+-    pages: RBTree<u64, Owned<Page>>,
++    pages: RBTree<u64, GpuPage>,
++    /// Bytes of `pages`. Pages are only released with the address space.
++    owned_bytes: usize,
+     compute_arena: Arena,
+     render_arena: Arena,
+     scratch_free: [KVec<core::ops::Range<u64>>; 2],
+@@ -55,6 +101,12 @@ pub(crate) fn map_work_alias(&mut self, va: u64, pa: u64) -> Result {
+             ),
+         }
+     }
++    /// Bytes of backing owned by this root (render private storage, scratch,
++    /// tiler blocks and work aliases), for fdinfo.
++    pub(crate) fn owned_bytes(&self) -> usize {
++        self.owned_bytes
++    }
++
+     pub(crate) fn roots(&self) -> Roots {
+         Roots {
+             low: self.low.ttb(),
+@@ -87,6 +139,7 @@ pub(crate) fn new() -> Result<Self> {
+             low: UatPageTable::new_with_ias(OAS, IAS)?,
+             high: UatPageTable::new_with_ias(OAS, IAS)?,
+             pages: RBTree::new(),
++            owned_bytes: 0,
+             compute_arena: Arena::default(),
+             render_arena: Arena::default(),
+             scratch_free: [KVec::new(), KVec::new()],
+@@ -110,9 +163,10 @@ pub(crate) fn alloc_low(
+             }
+         }
+         for v in (va..end).step_by(UAT_PGSZ) {
+-            let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
++            let page = GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?;
+             let phys = page.phys();
+             self.pages.try_create_and_insert(v, page, GFP_KERNEL)?;
++            self.owned_bytes += UAT_PGSZ;
+             self.low
+                 .map_pages(v..v + UAT_PGSZ as u64, phys, access, false)?;
+         }
+@@ -123,6 +177,7 @@ pub(crate) fn alloc_low(
+     /// ENOMEM may leave a partial graph, all owned here. This root has never
+     /// rendered: retry can finish missing pages/PTEs and reinitialize storage
+     /// before its first publication. Never replace a conflicting mapping.
++    /// Runs in the submitting client's ioctl, which is charged for the pages.
+     pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+         use crate::g16_render as render;
+         let mut params = render::Parameters::default();
+@@ -139,8 +194,9 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+                 if self.low.translate(va)?.is_some() {
+                     return Err(EEXIST);
+                 }
+-                let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+-                self.pages.try_create_and_insert(va, page, GFP_KERNEL)?;
++                let page = GpuPage::alloc(GFP_KERNEL_ACCOUNT | __GFP_ZERO)?;
++                self.pages.try_create_and_insert(va, page, GFP_KERNEL_ACCOUNT)?;
++                self.owned_bytes += UAT_PGSZ;
+             }
+             let physical = self.pages.get(&va).ok_or(EIO)?.phys();
+             self.map_render_page(va, physical)?;
+@@ -342,7 +398,7 @@ pub(crate) fn alloc_tvb_blocks(&mut self, count: usize, gfp: kernel::alloc::Flag
+                 }
+             }
+             for va in (start..start + 0x20000).step_by(UAT_PGSZ) {
+-                let page = match Page::alloc_page(gfp | __GFP_ZERO) {
++                let page = match GpuPage::alloc(gfp | __GFP_ZERO) {
+                     Ok(page) => page,
+                     Err(_) => return Ok(None),
+                 };
+@@ -357,6 +413,7 @@ pub(crate) fn alloc_tvb_blocks(&mut self, count: usize, gfp: kernel::alloc::Flag
+         self.render_arena = arena;
+         for node in pages {
+             self.pages.insert(node);
++            self.owned_bytes += UAT_PGSZ;
+         }
+         for block in 0..count {
+             let start = base + block as u64 * 0x28000;
+@@ -493,11 +550,9 @@ pub(crate) fn check_geometry(&mut self, dev: &device::Device) -> Result {
+     }
+ }
+ 
+-use kernel::types::Owned;
+-
+ struct FirmwareRegion {
+     va: u64,
+-    pages: KVec<Owned<Page>>,
++    pages: KVec<GpuPage>,
+ }
+ 
+ /// The firmware uses this bootloader root independently of all client slots.
+@@ -593,7 +648,7 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+         }
+         let mut pages = KVec::new();
+         for _ in 0..size / UAT_PGSZ {
+-            pages.push(Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?, GFP_KERNEL)?;
++            pages.push(GpuPage::alloc(GFP_KERNEL | __GFP_ZERO)?, GFP_KERNEL)?;
+         }
+         let node = RBTreeNode::new(va, FirmwareRegion { va, pages }, GFP_KERNEL)?;
+         self.regions.insert(node);
+diff --git a/rust/helpers/page.c b/rust/helpers/page.c
+index 7ab81a8cad89..71b8f50423dd 100644
+--- a/rust/helpers/page.c
++++ b/rust/helpers/page.c
+@@ -52,3 +52,8 @@ bool rust_helper_pfn_valid(unsigned long pfn)
+ {
+ 	return pfn_valid(pfn);
+ }
++
++__rust_helper pg_data_t *rust_helper_page_pgdat(const struct page *page)
++{
++	return page_pgdat(page);
++}

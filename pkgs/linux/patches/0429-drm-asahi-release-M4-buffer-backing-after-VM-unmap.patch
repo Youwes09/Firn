@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 15 Sep 2026 00:53:15 -0400
+Subject: [PATCH] drm/asahi: release M4 buffer backing after VM unmap
+
+Long-lived VMs retained removed SGTable references until destruction,
+keeping explicitly unbound and closed buffers pinned. Drop removed backing
+after both GPU page-table views are unmapped and invalidated. Preserve
+references for surviving partial mappings and retain original ownership
+on errors; reject teardown when the runtime has failed.
+
+Validated on T8132 with 512 MiB across explicit unbind, GEM close, partial
+unbind and alias cases, with no retained shmem after release. Pending-work
+unbind and close waited for GPU completion; six GPU regression cases passed.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 9807df349e5c8903f81a25c24c1fc72a523d2e10)
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 18 ++++++++++--------
+ 1 file changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index c749bc0d8e65..70d3a643765d 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -77,7 +77,6 @@ struct Vm {
+     compute_space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     mappings: KVec<Mapping>,
+     pending: KVec<dma_fence::Fence>,
+-    retired: KVec<Arc<shmem::SGTable<Buffer>>>,
+     reservation: ARef<Object>,
+     render_support: Option<Arc<crate::g16::Support>>,
+     render_ready: bool,
+@@ -389,7 +388,6 @@ fn vm_create(
+                 )?,
+                 mappings: KVec::new(),
+                 pending: KVec::new(),
+-                retired: KVec::new(),
+                 reservation,
+                 render_support: None,
+                 render_ready: false,
+@@ -904,6 +902,12 @@ fn publish_mappings(&self, runtime: &crate::g16::Bootstrap) {
+     }
+ 
+     fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Result {
++        // Callers drain this VM's jobs and hold file state against new uses.
++        // A failure may have signaled those fences while we waited. The
++        // runtime lock prevents a concurrent failure during this teardown.
++        if runtime.render_failed() {
++            return Err(EIO);
++        }
+         // Prepare ownership splits before changing any page-table entry.
+         let mut retained = KVec::new();
+         for m in &self.mappings {
+@@ -930,17 +934,15 @@ fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Resul
+                 }
+             }
+         }
+-        self.retired.reserve(self.mappings.len(), GFP_KERNEL)?;
+         self.space.lock().low.reserve_invalidation()?;
+         self.compute_space.lock().low.reserve_invalidation()?;
+         self.space.lock().low.unmap_pages(range.clone())?;
+         self.compute_space.lock().low.unmap_pages(range.clone())?;
+         self.publish_mappings(runtime);
+-        for old in &self.mappings {
+-            if old.range.start < range.end && range.start < old.range.end {
+-                self.retired.push(old.sg.clone(), GFP_KERNEL)?;
+-            }
+-        }
++        // Both views are unmapped and their translation invalidations have
++        // completed. Drop removed backing now; surviving partial mappings
++        // retain their SGTable references. Any earlier error leaves the
++        // original ownership in self.mappings, including for partial unmaps.
+         self.mappings = retained;
+         Ok(())
+     }

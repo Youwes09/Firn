@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:25:55 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the completion_control parameter
+
+The parameter (default 4) set the completion control value of registers
+0x14308/0x14048. Production never changed it; renders keep this driver's
+original value 4 (macOS writes 0-3). The render parameter field stays.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ----
+ drivers/gpu/drm/asahi/g16_drm.rs  | 2 +-
+ 2 files changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 7e0ff42c5016..9775d14e73db 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -209,10 +209,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
+         },
+-        completion_control: u32 {
+-            default: 4,
+-            description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention)",
+-        },
+         render_preempt: u32 {
+             default: 1,
+             description: "1 lets firmware suspend and restart TA/3D work (preemptible render queues); 0 gives them compute's non-preemptible profile",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index c10ca4814d8d..becab41c708d 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -2534,7 +2534,7 @@ fn render_parameters(&self, c: &uapi::drm_asahi_cmd_render) -> Result<render::Pa
+         p.fragment_work_stamp = 0x121;
+         // macOS writes 0-3 (3 solo, mostly 1 under contention); this driver's
+         // original value is 4.
+-        p.completion_control = u64::from(crate::module_parameters::completion_control.value());
++        p.completion_control = 4;
+         p.layermeta = p.heapmeta;
+         if p.layers > 1 {
+             p.heapmeta += 0x100;

@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 24 Oct 2026 22:42:22 -0400
+Subject: [PATCH] drm/asahi: G16: render-to-render dependency items default to
+ kind 0
+
+Every production boot has passed asahi_m4.dependency_kind=0 since early
+October 2026, while the module default stayed 1. Make the default what
+production runs. The two vertex-reader synchronization CTS failures seen in
+a full reference run pass 5/5 in isolation at both kinds (Air), so they
+don't implicate kind 0. dependency_kind=1 still selects the dynamic
+dependency graph, and probe rejects any other value, since it is written
+straight into firmware dependency items. test-dependency-kind.py pins the
+default, the range check and slot 0 alone taking dependency_kind.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs             |  8 +++++---
+ .../drivers/gpu/asahi/test-dependency-kind.py | 19 +++++++++++++++++++
+ 2 files changed, 24 insertions(+), 3 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-dependency-kind.py
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index cd54937e883f..f450f3f71537 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -62,7 +62,9 @@ fn probe<'bound>(
+         _info: Option<&'bound Self::IdInfo>,
+     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+         let dev = pdev.as_ref();
+-        if !(11..=g16_tvb::MAX_BLOCKS).contains(&module_parameters::tvb_max_blocks.value()) {
++        if !(11..=g16_tvb::MAX_BLOCKS).contains(&module_parameters::tvb_max_blocks.value())
++            || module_parameters::dependency_kind.value() > 1
++        {
+             return Err(EINVAL);
+         }
+ 
+@@ -199,8 +201,8 @@ fn probe<'bound>(
+             description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16 per-vertex one-group profile; no capability advertisement",
+         },
+         dependency_kind: u32 {
+-            default: 1,
+-            description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",
++            default: 0,
++            description: "Firmware kind of render-to-render dependencies: 0 (default) as the internal TA-to-fragment wait, which every production boot has passed since early October 2026; 1 the dynamic dependency graph",
+         },
+         fault_control: u32 {
+             default: 3,
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-dependency-kind.py b/tools/testing/selftests/drivers/gpu/asahi/test-dependency-kind.py
+new file mode 100755
+index 000000000000..0cb999b7cdce
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-dependency-kind.py
+@@ -0,0 +1,19 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host checks of asahi_m4.dependency_kind: kind 0 by default, range-checked at
++probe, and applied only to render-to-render items (a render's slot 0)."""
++from pathlib import Path
++import re
++
++root = next(p for p in Path(__file__).resolve().parents
++            if (p / 'drivers/gpu/drm/asahi/g16_runtime.rs').exists())
++driver = root / 'drivers/gpu/drm/asahi'
++runtime = (driver / 'g16_runtime.rs').read_text()
++m4 = (driver / 'asahi_m4.rs').read_text()
++
++# Render-to-render items default to kind 0, as production boots pass.
++assert re.search(r'\n        dependency_kind: u32 \{\s*default: 0,', m4)
++assert 'module_parameters::dependency_kind.value() > 1' in m4
++# Renders: slot 0 (render producer) takes dependency_kind; slot 1 (compute) stays kind 1.
++assert "dep.map(|d| (if slot == 0 { render_kind } else { 1 }, d))" in runtime
++print('test-dependency-kind: ok')

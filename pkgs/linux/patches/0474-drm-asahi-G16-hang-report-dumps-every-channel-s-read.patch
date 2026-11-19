@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 02:53:42 -0400
+Subject: [PATCH] drm/asahi: G16 hang report dumps every channel's read, done
+ and tail cursors
+
+The hang report printed each flight's channel targets but not the
+channels themselves. Print the firmware read/done cursors and the driver
+tail of all twelve channels, so a stall can be placed before or after
+firmware consumed the lane's publication.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+(cherry picked from commit b70dbd61d3012ff14ecef3d0107c82d33dc5a981)
+(cherry picked from commit 2c7086e3fa35e84a93249fda700869346eb40d4b)
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 8b19041ec05a..f4193e870793 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -950,6 +950,34 @@ fn trace_dependencies(
+     /// firmware and driver stamps against their targets, and the newest
+     /// firmware receive-ring entries.
+     fn dump_hang_state(&self) -> Result {
++        // Device-wide transports: whether firmware consumed each channel's
++        // messages (read/done) up to what the driver published (tail).
++        {
++            let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
++            if let Some(guard) = self._sgx.try_access() {
++                for (index, route) in config.channels.iter().enumerate().take(12) {
++                    let read = guard
++                        .try_read32(0xd64000 + (route.state[0] - 0xffff_fc20_0002_8000) as usize)
++                        .unwrap_or(u32::MAX);
++                    let done = guard
++                        .try_read32(0xd64000 + (route.state[1] - 0xffff_fc20_0002_8000) as usize)
++                        .unwrap_or(u32::MAX);
++                    let tail = guard
++                        .try_read32(0xd60000 + (route.state[2] - 0xffff_fc20_0002_0000) as usize)
++                        .unwrap_or(u32::MAX);
++                    dev_err!(
++                        self.dev.as_ref(),
++                        "G16: hang channel {} (priority {} stage {}) read={} done={} tail={}\n",
++                        index,
++                        index / 3,
++                        index % 3,
++                        read,
++                        done,
++                        tail
++                    );
++                }
++            }
++        }
+         if let Some(guard) = self._sgx.try_access() {
+             let read64 = |offset: usize| -> u64 {
+                 let lo = guard.try_read32(offset).unwrap_or(0xdeadbeef);

@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 12 Oct 2026 04:23:49 -0400
+Subject: [PATCH] drm/asahi: G16: retire flights without shifting the list
+
+Retirement removed each flight with Vec::remove, moving every later flight
+(several hundred bytes each, about a hundred in flight under Dota). That is
+tens of KB of memmove per Work. The scan runs downwards, so swap_remove
+only moves an already examined flight into the slot. The hang dump picks
+the oldest publication by age instead of the first element.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index f639feb9cb1e..bd0388ba0bbf 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1331,7 +1331,9 @@ fn dump_hang_state(&self) -> Result {
+         }
+         // Never let one unreadable word end the report early.
+         let word = |address: u64| fw.read_u32(address).unwrap_or(0xdead_beef);
+-        if let Some(flight) = self.flights.first() {
++        // The oldest publication; `flights` is unordered.
++        let now = Instant::now();
++        if let Some(flight) = self.flights.iter().max_by_key(|f| now - f.started) {
+             for (stage, (pointers, head)) in flight.queues.iter().enumerate() {
+                 if *pointers == 0 {
+                     continue;
+@@ -1710,7 +1712,10 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             drop(owner);
+             self.context_users[flight.context as usize] -= 1;
+-            let flight = self.flights.remove(index).map_err(|_| EIO)?;
++            // The scan runs downwards: the flight swapped into `index` was
++            // already examined. Order carries no meaning (removal shifted
++            // every later flight, tens of KB per Work under load).
++            let flight = self.flights.swap_remove(index);
+             self.ledger.remove(&flight)?;
+             let root = match &flight.render {
+                 Some(render) => render.root,

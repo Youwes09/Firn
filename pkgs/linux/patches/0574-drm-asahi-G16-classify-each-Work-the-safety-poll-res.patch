@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 27 Oct 2026 05:51:04 -0400
+Subject: [PATCH] drm/asahi: G16: classify each Work the safety poll rescues
+
+When a notification wait times out and the poll finds finished Work,
+the summary line cannot say why no notification retired it. Log each
+such Work from the retire scan: render or compute, process, queue
+ordinal, age, how long ago its stamps were first seen complete, the
+condition that last held it back, and its notifier (own, owner or
+member of a submission's, whether the owner had retired, and the
+shared count against this render's total).
+
+A Work whose stamps are first seen in the poll scan got no
+notification; one seen earlier and held back by the notifier count got
+one and was not retired by it. Rescues are rare (none in 15 min of
+desktop load on the Air, 3 in 36 min in an earlier run), so every one a
+user hits now classifies itself. The existing summary line stays for
+the tooling that counts it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit d259ccd2c2013e6173d8d133adafa88f457410a8)
+---
+ drivers/gpu/drm/asahi/g16.rs                |  4 ++
+ drivers/gpu/drm/asahi/g16_drm_pump.rs       | 10 +++--
+ drivers/gpu/drm/asahi/g16_runtime_retire.rs | 48 +++++++++++++++++++++
+ 3 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 8978f39078fa..943753e69779 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -273,6 +273,9 @@ pub(crate) struct Bootstrap {
+     work_slots: [usize; 2],
+     /// shared_notifier=1: per-submission notifiers, capacity MAX_FLIGHTS.
+     job_notifiers: KVec<render_runtime::JobNotifier>,
++    /// The current retire scan follows a timed-out notification wait, so
++    /// every Work it retires was rescued by the safety poll.
++    poll_scan: bool,
+     compute_publication: u64,
+     queue_events: Arc<core::sync::atomic::AtomicU64>,
+     /// Queue storage returned by dropped queues, awaiting context destruction.
+@@ -825,6 +828,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             free_work: [KVec::new(), KVec::new()],
+             work_slots: [0, 0],
+             job_notifiers: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
++            poll_scan: false,
+             compute_publication: crate::module_parameters::fw_counter_start.value(),
+             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
+             retired_queues: Arc::pin_init(kernel::new_mutex!(KVec::new()), GFP_KERNEL)?,
+diff --git a/drivers/gpu/drm/asahi/g16_drm_pump.rs b/drivers/gpu/drm/asahi/g16_drm_pump.rs
+index 44069fad3cef..760007cea84d 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_pump.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_pump.rs
+@@ -109,6 +109,7 @@ fn run(this: Arc<Self>) {
+                 }
+                 let mut progress = false;
+                 let mut polled_retired = 0u32;
++                runtime.set_poll_scan(timed_out.is_some());
+                 while let Some((id, result)) = runtime.retire().inspect_err(|error| {
+                     pr_err!("G16: firmware retirement failed: {:?}\n", error);
+                 })? {
+@@ -158,14 +159,17 @@ fn run(this: Arc<Self>) {
+                     progress = true;
+                     polled_retired += 1;
+                 }
++                runtime.set_poll_scan(false);
+                 if let Some(age) = timed_out {
+                     use crate::g16_timeline as t;
+                     t::POLL_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+                     t::POLL_RETIRED.fetch_add(u64::from(polled_retired), Ordering::Relaxed);
+                     // A safety poll every few ms is routine; report only polls
+-                    // that found finished work, or long waits. Long waits with
+-                    // nothing retired are slow work (the retirement watchdog
+-                    // reports hangs): at most one line per 10 s.
++                    // that found finished work (each such Work is also
++                    // classified by the retire scan: "G16: rescue"), or long
++                    // waits. Long waits with nothing retired are slow work (the
++                    // retirement watchdog reports hangs): at most one line per
++                    // 10 s.
+                     if polled_retired != 0 {
+                         pr_warn!(
+                             "G16: notification wait timed out; polling retired {} Work(s), oldest flight {} ms\n",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_retire.rs b/drivers/gpu/drm/asahi/g16_runtime_retire.rs
+index cead779a027c..05cc4f6d38e4 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_retire.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_retire.rs
+@@ -169,6 +169,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             let mut done = true;
+             let mut blocked = 0u32;
++            let mut notifier_seen = None;
+             // The notifier pass drops embedded JobMeta references and cleans
+             // their cache lines before publishing these later driver stamps.
+             for stamp in flight.driver_stamps.iter().flatten() {
+@@ -182,6 +183,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                     // The shared notifier has counted this render's Works.
+                     Some((completed, total)) => {
+                         let count = snapshot.read(fw, completed)?;
++                        notifier_seen = Some((count, total));
+                         (count.wrapping_sub(total) as i32) >= 0
+                     }
+                     None => {
+@@ -255,6 +257,47 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                 continue;
+             }
+             let flight = &self.flights[index];
++            if self.poll_scan {
++                // Classify each rescue. Stamps first seen in this very scan
++                // (after_stamps_us ~0) mean no scan ran between completion
++                // and the timeout: no notification came. Stamps seen earlier
++                // with retirement blocked (bit 1: the shared notifier's count
++                // short) mean the notification came and the retirement
++                // condition held the Work back. Rescues are rare; the limit
++                // only bounds a pathological boot.
++                use core::sync::atomic::{AtomicU32, Ordering};
++                static REPORTED: AtomicU32 = AtomicU32::new(0);
++                if REPORTED.fetch_add(1, Ordering::Relaxed) < 256 {
++                    let (relation, owner_retired) = match flight.job_notifier {
++                        None => ("own", false),
++                        Some(owner) => (
++                            if owner == flight.id { "job-owner" } else { "job-member" },
++                            self.job_notifiers
++                                .iter()
++                                .find(|j| j.owner == owner)
++                                .is_some_and(|j| j.owner_root.is_some()),
++                        ),
++                    };
++                    let (count, total) = notifier_seen.unwrap_or((u32::MAX, u32::MAX));
++                    dev_warn!(
++                        self.dev.as_ref(),
++                        "G16: rescue {:#x} render={} comm={} ordinal={} age_ms={} after_stamps_us={} last_blocked={:#x} notifier={} owner_retired={} count={:#x}/{:#x}\n",
++                        flight.id,
++                        flight.render.is_some(),
++                        core::str::from_utf8(&flight.comm)
++                            .unwrap_or("?")
++                            .trim_end_matches('\0'),
++                        flight.ordinal,
++                        flight.started.elapsed().as_millis(),
++                        flight.stamps_seen.map_or(0, |t| t.elapsed().as_micros_ceil()),
++                        flight.blocked,
++                        relation,
++                        owner_retired,
++                        count,
++                        total
++                    );
++                }
++            }
+             if crate::module_parameters::fw_trace.value() & 16 != 0 {
+                 dev_info!(
+                     self.dev.as_ref(),
+@@ -394,6 +437,11 @@ pub(super) fn flight_ms(&self, flight: &Flight, now: Instant<Monotonic>) -> i64
+         self.progress.map_or(age, |p| age.min(now - p)).as_millis()
+     }
+ 
++    /// Mark the following retire scans as safety-poll rescues.
++    pub(crate) fn set_poll_scan(&mut self, on: bool) {
++        self.poll_scan = on;
++    }
++
+     pub(crate) fn oldest_flight_ms(&self) -> u64 {
+         // One clock read for all flights.
+         let now = Instant::now();

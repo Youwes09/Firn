@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 14:45:42 -0400
+Subject: [PATCH] drm/asahi: Keep G16 submission out of the job worker's stack
+ frame
+
+The render and compute submission paths were inlined into the job
+worker, whose frame reached about 18 KiB with the Work encodings and
+diagnostics: more than half of the 32 KiB kernel stack, in a single
+frame. Keep submit_render_pool, submit_compute_queue and the diagnostic
+dump and dependency-event helpers as separate frames.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index cf4a6358a862..119ce3461ef3 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1832,6 +1832,7 @@ fn submit_render_queue(
+         result
+     }
+ 
++    #[inline(never)]
+     fn submit_render_pool(
+         &mut self,
+         client: &mut g16_vm::AddressSpace,
+@@ -2415,6 +2416,7 @@ pub(crate) fn submit_compute(
+         result
+     }
+ 
++    #[inline(never)]
+     fn submit_compute_queue(
+         &mut self,
+         queue: &mut FirmwareQueues,
+@@ -2919,6 +2921,7 @@ impl Bootstrap {
+     /// dump_render_buffered keeps renders matching the shape filters;
+     /// dump_render_recent keeps every render, for the stuck context's
+     /// immediate predecessors.
++    #[inline(never)]
+     fn dump_render(&mut self, a: &render::Addresses, tgid: (i32, [u8; 16]), vm_root: u64, stream: u64, ordinal: u64, pages: [(u32, u64, u64); 8], ta: &[u8], frag: &[u8]) {
+         let recent = crate::module_parameters::dump_render_recent.value() as usize;
+         if recent != 0 {
+@@ -3114,6 +3117,7 @@ fn set_lane_event(&mut self, stamp: u64, event: u32) {
+ 
+     /// Diagnostics: count waits whose event tag differs from the event the
+     /// producing lane's queue currently holds ("stale tag at publish").
++    #[inline(never)]
+     fn note_dependency_events(&mut self, dependencies: &[Option<Stamp>; 2], own: [u64; 3]) {
+         for dep in dependencies.iter().flatten() {
+             let Some(&(_, current)) = self.lane_events.iter().find(|e| e.0 == dep.address) else {

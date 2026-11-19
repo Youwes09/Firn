@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 16:02:13 -0400
+Subject: [PATCH] drm/asahi: Keep G16 diagnostic history arrays off the probe
+ stack
+
+Bootstrap is built by value in probe, and the compiler keeps several
+copies of it in the register() frame, so each byte added to it costs
+about four bytes of probe stack. With #52's slot-handover array and
+#56's stale-tag buffer (2 KiB each) the register() frame reached 26.9
+KiB, and with Platform::bundle and the driver-core frames the probe
+overflowed the 32 KiB kernel stack: 7.3 #56 hung right after 'boot memory
+contract validated'. Allocate both arrays on the heap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16.rs | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index b647e027e577..145379a5d57a 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -218,14 +218,15 @@ pub(crate) struct Bootstrap {
+     render_ring: render_runtime::RenderRing,
+     retire_log: KVec<render_runtime::Retired>,
+     retire_next: usize,
+-    handovers: [Option<render_runtime::Handover>; 64],
++    /// Heap-allocated: Bootstrap is built on the probe stack.
++    handovers: KVec<Option<render_runtime::Handover>>,
+     lane_events: KVec<(u64, u32)>,
+     stale_event_tags: u32,
+     stale_live_tags: u32,
+     stale_live_own_tags: u32,
+     dependency_waits: u32,
+     /// The last 64 stale tags: (time ns, stamp, want, tag, current, live).
+-    stale_recent: [(i64, u64, u32, u32, u32, bool); 64],
++    stale_recent: KVec<(i64, u64, u32, u32, u32, bool)>,
+     stale_next: usize,
+     recent_ring: render_runtime::RenderRing,
+     next_work_va: u64,
+@@ -707,13 +708,21 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             render_ring: render_runtime::RenderRing::new(),
+             retire_log: KVec::new(),
+             retire_next: 0,
+-            handovers: [None; 64],
++            handovers: {
++                let mut v = KVec::new();
++                v.extend_with(64, None, GFP_KERNEL)?;
++                v
++            },
+             lane_events: KVec::new(),
+             stale_event_tags: 0,
+             stale_live_tags: 0,
+             stale_live_own_tags: 0,
+             dependency_waits: 0,
+-            stale_recent: [(0, 0, 0, 0, 0, false); 64],
++            stale_recent: {
++                let mut v = KVec::new();
++                v.extend_with(64, (0, 0, 0, 0, 0, false), GFP_KERNEL)?;
++                v
++            },
+             stale_next: 0,
+             recent_ring: render_runtime::RenderRing::new(),
+             next_work_va: 0xffff_fc22_0000_0000,

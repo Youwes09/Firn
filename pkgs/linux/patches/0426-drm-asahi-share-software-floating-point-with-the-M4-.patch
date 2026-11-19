@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 14 Sep 2026 16:39:58 -0400
+Subject: [PATCH] drm/asahi: share software floating point with the M4 driver
+
+Use the existing Asahi software floating-point implementation and expose the conversions needed by M4 initialization. Remove the separate M4 implementation while preserving the saved rounding behavior.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 11b95e898731a2a17971db899b1fa88002430bc7)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs               | 1 -
+ drivers/gpu/drm/asahi/{m4_float.rs => float.rs} | 8 ++------
+ 2 files changed, 2 insertions(+), 7 deletions(-)
+ rename drivers/gpu/drm/asahi/{m4_float.rs => float.rs} (97%)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 04b281d54e31..4c0680f5bc51 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -5,7 +5,6 @@
+ 
+ #![recursion_limit = "2048"]
+ 
+-#[path = "m4_float.rs"]
+ mod float;
+ mod g16;
+ mod g16_compute;
+diff --git a/drivers/gpu/drm/asahi/m4_float.rs b/drivers/gpu/drm/asahi/float.rs
+similarity index 97%
+rename from drivers/gpu/drm/asahi/m4_float.rs
+rename to drivers/gpu/drm/asahi/float.rs
+index c016ab470bd3..068b2c67d9e8 100644
+--- a/drivers/gpu/drm/asahi/m4_float.rs
++++ b/drivers/gpu/drm/asahi/float.rs
+@@ -1,6 +1,4 @@
+-// SPDX-License-Identifier: GPL-2.0-only
+-// Copyright The Gravity Linux Contributors
+-// Adapted from the Asahi Linux software-float implementation.
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
+ 
+ //! Basic soft floating-point support
+ //!
+@@ -298,9 +296,7 @@ const fn is_inf(&self) -> bool {
+     const fn pack(mut self) -> F32 {
+         self = self.norm();
+         if !self.is_zero() {
+-            // Round halfway cases to an even low bit, as the shim
+-            // does at each binary32 operation.
+-            self.frac += 0xff + ((self.frac >> 9) & 1);
++            self.frac += 0x100;
+             self = self.norm();
+         }
+ 

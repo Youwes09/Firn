@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 14 Sep 2026 16:39:52 -0400
+Subject: [PATCH] drm/asahi: wire M4 GPU into the T8132 desktop platform
+
+Add GPU resources to the existing desktop board description. Accept an explicit bootloader maximum-power value while retaining compatibility with the upstream power ladder, and describe the actual probe-only default.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 3a2ad760d7316813f37c0ddc653ef783827f855b; G16 driver files only: device tree in bits/000-devicetree)
+---
+ drivers/gpu/drm/asahi/Kconfig         |  4 ++--
+ drivers/gpu/drm/asahi/g16_platform.rs | 24 +++++++++++++++++-------
+ 2 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/Kconfig b/drivers/gpu/drm/asahi/Kconfig
+index 5d14dfc0f5a6..6d61de97a677 100644
+--- a/drivers/gpu/drm/asahi/Kconfig
++++ b/drivers/gpu/drm/asahi/Kconfig
+@@ -12,5 +12,5 @@ config DRM_ASAHI_M4
+ 	help
+ 	  Rust DRM driver for the T8132 (M4) GPU, following the Asahi UAPI
+ 	  and the M4 Python DRM-shim firmware implementation. Intended for
+-	  development under m1n1. The probe_only parameter defaults to true
+-	  until the firmware port is qualified.
++	  development under m1n1. Normal initialization is the default;
++	  probe_only selects identification without firmware startup.
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 0ed186d40471..a61c7bc60168 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -2,7 +2,7 @@
+ // Copyright The Gravity Linux Contributors
+ 
+ //! Live platform inputs and initialization builders from g16g_platform.py and
+-//! g16g_initdata.py. No archived performance or register-window profile.
++//! g16g_initdata.py. Firmware data is built from explicit bootloader properties.
+ 
+ use kernel::{c_str, device, of, prelude::*};
+ 
+@@ -75,13 +75,23 @@ pub(crate) struct Platform {
+ impl Platform {
+     pub(crate) fn new(dev: &device::Device) -> Result<Self> {
+         let node = dev.of_node().ok_or(ENODEV)?;
+-        let power = ladder(&node, c_str!("apple,m4-power-mw"))?;
++        // Only the maximum is consumed by the firmware builders. A loader
++        // with an observed board maximum need not invent an entire power
++        // ladder. Continue accepting the original loader's modeled ladder.
++        let maximum_power = match node.get_opt_property::<u32>(c_str!("apple,m4-max-power-mw"))? {
++            Some(value) => value,
++            None => {
++                let power = ladder(&node, c_str!("apple,m4-power-mw"))?;
++                if power[0] != 0 || power.windows(2).any(|w| w[0] > w[1]) {
++                    return Err(EINVAL);
++                }
++                power[10]
++            }
++        };
+         let freq_a = ladder(&node, c_str!("apple,m4-freq-a"))?;
+         let freq_b = ladder(&node, c_str!("apple,m4-freq-b"))?;
+-        if power[0] != 0
+-            || power[10] == 0
+-            || power[10] > i32::MAX as u32
+-            || power.windows(2).any(|w| w[0] > w[1])
++        if maximum_power == 0
++            || maximum_power > i32::MAX as u32
+             || freq_a[0] != 0
+             || freq_a.windows(2).any(|w| w[0] >= w[1])
+             || freq_b[0] != 0
+@@ -120,7 +130,7 @@ pub(crate) fn new(dev: &device::Device) -> Result<Self> {
+             node,
+             freq_a,
+             freq_b,
+-            maximum_power: power[10],
++            maximum_power,
+             core_mask,
+             period_ms,
+             period_clocks,

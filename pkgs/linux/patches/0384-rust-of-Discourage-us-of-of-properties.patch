@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sun, 13 Jul 2025 10:44:51 +0200
+Subject: [PATCH] rust: of: Discourage us of "of" properties
+
+Use FwNode based device properties instead.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+(cherry picked from commit 89f03c6e8335a77d39e3c8efa68f1ebb29e1d486)
+---
+ rust/kernel/of.rs | 16 ++++++++--------
+ 1 file changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/rust/kernel/of.rs b/rust/kernel/of.rs
+index e3271fb58a2f..cacbc55c28dc 100644
+--- a/rust/kernel/of.rs
++++ b/rust/kernel/of.rs
+@@ -103,24 +103,24 @@ pub(crate) fn node(&self) -> &bindings::device_node {
+     }
+ 
+     /// Returns the name of the node.
+-    pub fn name(&self) -> &CStr {
++    pub(crate) fn name(&self) -> &CStr {
+         // SAFETY: The lifetime of the `CStr` is the same as the lifetime of this `Node`.
+         unsafe { CStr::from_char_ptr(self.node().name) }
+     }
+ 
+     /// Returns the phandle for this node.
+-    pub fn phandle(&self) -> PHandle {
++    pub(crate) fn phandle(&self) -> PHandle {
+         self.node().phandle
+     }
+ 
+     /// Returns the full name (with address) for this node.
+-    pub fn full_name(&self) -> &CStr {
++    pub(crate) fn full_name(&self) -> &CStr {
+         // SAFETY: The lifetime of the `CStr` is the same as the lifetime of this `Node`.
+         unsafe { CStr::from_char_ptr(self.node().full_name) }
+     }
+ 
+     /// Returns `true` if the node is the root node.
+-    pub fn is_root(&self) -> bool {
++    pub(crate) fn is_root(&self) -> bool {
+         #[cfg(not(CONFIG_OF))]
+         {
+             false
+@@ -133,7 +133,7 @@ pub fn is_root(&self) -> bool {
+     }
+ 
+     /// Returns the parent node, if any.
+-    pub fn parent(&self) -> Option<Node> {
++    pub(crate) fn parent(&self) -> Option<Node> {
+         #[cfg(not(CONFIG_OF))]
+         {
+             None
+@@ -164,7 +164,7 @@ pub fn children(
+ 
+     /// Find a child by its name and return it, or None if not found.
+     #[allow(unused_variables)]
+-    pub fn get_child_by_name(&self, name: &CStr) -> Option<Node> {
++    pub(crate) fn get_child_by_name(&self, name: &CStr) -> Option<Node> {
+         #[cfg(not(CONFIG_OF))]
+         {
+             None
+@@ -184,7 +184,7 @@ pub fn get_child_by_name(&self, name: &CStr) -> Option<Node> {
+     /// Returns `None` if there is no match, or `Some<NonZeroU32>` if there is, with the value
+     /// representing as match score (higher values for more specific compatible matches).
+     #[allow(unused_variables)]
+-    pub fn is_compatible(&self, compatible: &CStr) -> Option<NonZeroU32> {
++    pub(crate) fn is_compatible(&self, compatible: &CStr) -> Option<NonZeroU32> {
+         #[cfg(not(CONFIG_OF))]
+         let ret = 0;
+         #[cfg(CONFIG_OF)]
+@@ -242,7 +242,7 @@ pub fn reserved_mem_region_to_resource_byname(&self, name: &CStr) -> Result<Reso
+ 
+     #[allow(unused_variables)]
+     /// Look up a node property by name, returning a `Property` object if found.
+-    pub fn find_property(&self, propname: &CStr) -> Option<Property<'_>> {
++    pub(crate) fn find_property(&self, propname: &CStr) -> Option<Property<'_>> {
+         #[cfg(not(CONFIG_OF))]
+         {
+             None

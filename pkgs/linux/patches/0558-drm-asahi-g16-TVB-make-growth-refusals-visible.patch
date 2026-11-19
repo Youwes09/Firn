@@ -1,0 +1,309 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 24 Oct 2026 04:12:53 -0400
+Subject: [PATCH] drm/asahi: g16: TVB: make growth refusals visible
+
+At a refused growth request the firmware only re-requests, about every
+355 ms, until pages free up: renders crawl and a client's exit drains for
+minutes, which looked like a hang (2026-10-24 analysis, tvb-cap-* kits).
+Record why each request was refused (at tvb_max_blocks, render arena VA
+full, or a failed non-reclaiming allocation), count refusals by reason in
+dep_stats (tvb_refused_cap/_va/_memory, summing to tvb_refused), and warn
+for the first refusal of the boot with its reason; later pools are
+reported at info, since CTS performance cases refuse growth in every
+process. No growth, cap or VA change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_alloc.rs            |  5 ++
+ drivers/gpu/drm/asahi/g16_runtime.rs          | 31 ++++++++++
+ drivers/gpu/drm/asahi/g16_timeline.rs         | 12 +++-
+ drivers/gpu/drm/asahi/g16_tvb.rs              | 37 +++++++++++
+ drivers/gpu/drm/asahi/g16_vm.rs               |  6 ++
+ .../drivers/gpu/asahi/test-scene-offset.py    |  1 +
+ .../drivers/gpu/asahi/test-tvb-growth-gfp.py  |  2 +-
+ .../gpu/asahi/test-tvb-refusal-visibility.py  | 62 +++++++++++++++++++
+ 8 files changed, 153 insertions(+), 3 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-tvb-refusal-visibility.py
+
+diff --git a/drivers/gpu/drm/asahi/g16_alloc.rs b/drivers/gpu/drm/asahi/g16_alloc.rs
+index 936c73321e9e..332ac573ffae 100644
+--- a/drivers/gpu/drm/asahi/g16_alloc.rs
++++ b/drivers/gpu/drm/asahi/g16_alloc.rs
+@@ -32,6 +32,11 @@ pub(crate) fn alloc(&mut self, size: u64, align: u64) -> Option<Range<u64>> {
+         Some(start..end)
+     }
+ 
++    /// Bytes not yet taken from either end.
++    pub(crate) fn free(&self) -> u64 {
++        self.remaining.end.saturating_sub(self.remaining.start)
++    }
++
+     pub(crate) fn alloc_back(&mut self, size: u64, align: u64) -> Option<Range<u64>> {
+         if size == 0 || !align.is_power_of_two() {
+             return None;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index de1a2361bada..4841e493d027 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -3160,6 +3160,37 @@ fn service_render_events(
+                     use core::sync::atomic::Ordering::Relaxed;
+                     tl::TVB_REQUESTS.fetch_add(1, Relaxed);
+                     if grown { &tl::TVB_GROWN } else { &tl::TVB_REFUSED }.fetch_add(1, Relaxed);
++                    if !grown {
++                        let reason = pool.refusal.unwrap_or(crate::g16_tvb::Refusal::Memory);
++                        match reason {
++                            crate::g16_tvb::Refusal::Cap => &tl::TVB_REFUSED_CAP,
++                            crate::g16_tvb::Refusal::Va => &tl::TVB_REFUSED_VA,
++                            crate::g16_tvb::Refusal::Memory => &tl::TVB_REFUSED_MEMORY,
++                        }
++                        .fetch_add(1, Relaxed);
++                        if !pool.warned {
++                            pool.warned = true;
++                            // Warn for the first refusal of the boot only: CTS
++                            // performance cases refuse in every process.
++                            if !crate::g16_tvb::REFUSAL_WARNED.swap(true, Relaxed) {
++                                dev_warn!(
++                                    self.dev.as_ref(),
++                                    "G16: TVB slot {} growth refused at {} blocks ({}); its renders throttle until pages free (later pools: info)\n",
++                                    pool.addresses.buffer_manager_slot,
++                                    pool.blocks,
++                                    reason.name()
++                                );
++                            } else {
++                                dev_info!(
++                                    self.dev.as_ref(),
++                                    "G16: TVB slot {} growth refused at {} blocks ({})\n",
++                                    pool.addresses.buffer_manager_slot,
++                                    pool.blocks,
++                                    reason.name()
++                                );
++                            }
++                        }
++                    }
+                 }
+                 dev_info!(
+                     self.dev.as_ref(),
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 2b12e478bd74..6b603b5fe626 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -428,7 +428,8 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         writeln!(
+             f,
+             "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\npoll_timeouts {}\npoll_retired {}\n\
+-             tvb_requests {}\ntvb_grown {}\ntvb_refused {}\ntvb_memory_limit {}\npartial_renders {}",
++             tvb_requests {}\ntvb_grown {}\ntvb_refused {}\ntvb_memory_limit {}\npartial_renders {}\n\
++             tvb_refused_cap {}\ntvb_refused_va {}\ntvb_refused_memory {}",
+             DEP_WORKS.load(Relaxed),
+             DEP_ITEMS.load(Relaxed),
+             DEP_SAME_LANE.load(Relaxed),
+@@ -441,7 +442,10 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+             TVB_GROWN.load(Relaxed),
+             TVB_REFUSED.load(Relaxed),
+             TVB_MEMORY_LIMIT.load(Relaxed),
+-            PARTIAL_RENDERS.load(Relaxed)
++            PARTIAL_RENDERS.load(Relaxed),
++            TVB_REFUSED_CAP.load(Relaxed),
++            TVB_REFUSED_VA.load(Relaxed),
++            TVB_REFUSED_MEMORY.load(Relaxed)
+         )
+     }
+ }
+@@ -483,6 +487,10 @@ pub(crate) fn read_opt() -> bool {
+ pub(crate) static TVB_REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static TVB_MEMORY_LIMIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static PARTIAL_RENDERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++/// Refusals by reason (g16_tvb::Refusal); they sum to tvb_refused.
++pub(crate) static TVB_REFUSED_CAP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static TVB_REFUSED_VA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static TVB_REFUSED_MEMORY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ 
+ /// Debug: read-only view of the firmware regions that live as long as the
+ /// firmware (debugfs `asahi_m4/fw_mem`), for sampling the firmware's own
+diff --git a/drivers/gpu/drm/asahi/g16_tvb.rs b/drivers/gpu/drm/asahi/g16_tvb.rs
+index d2fe8a662f79..a1edffb81534 100644
+--- a/drivers/gpu/drm/asahi/g16_tvb.rs
++++ b/drivers/gpu/drm/asahi/g16_tvb.rs
+@@ -14,6 +14,32 @@
+ // default budget is one third of this, as in Apple8's non-memoryless path.
+ pub(crate) const MAX_BLOCKS: u32 = 6579;
+ 
++/// Why a growth request was refused (debugfs dep_stats counters and the
++/// pool's one-time warning). At any of these the firmware re-requests about
++/// every 355 ms until pages free up, so renders crawl (2026-10-24).
++#[derive(Clone, Copy, PartialEq)]
++pub(crate) enum Refusal {
++    /// At tvb_max_blocks.
++    Cap,
++    /// The VM's render arena has no VA for another block.
++    Va,
++    /// A non-reclaiming allocation failed.
++    Memory,
++}
++
++/// Set by the first refusal of the boot, which alone is a warning.
++pub(crate) static REFUSAL_WARNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
++
++impl Refusal {
++    pub(crate) fn name(self) -> &'static str {
++        match self {
++            Self::Cap => "at tvb_max_blocks",
++            Self::Va => "render arena VA full",
++            Self::Memory => "allocation failed",
++        }
++    }
++}
++
+ /// Scene records initialized in the pool (render::Addresses::private_page).
+ /// Each lease owns a distinct cursor and 48-byte scene record.
+ const SCENES: u32 = 80;
+@@ -26,6 +52,9 @@ pub(crate) struct Tvb {
+     pub(crate) counter: u32,
+     submissions: u32,
+     pub(crate) refused: bool,
++    /// The reason of the last refusal, and whether the pool already warned.
++    pub(crate) refusal: Option<Refusal>,
++    pub(crate) warned: bool,
+     scenes: u128,
+     next_scene: u32,
+ }
+@@ -77,6 +106,8 @@ pub(crate) fn new(
+             counter: 0,
+             submissions: 0,
+             refused: false,
++            refusal: None,
++            warned: false,
+             scenes: 0,
+             next_scene: 0,
+         })
+@@ -151,6 +182,7 @@ pub(crate) fn grow(
+             return Err(EIO);
+         }
+         if new == old {
++            self.refusal = Some(Refusal::Cap);
+             return Ok(false);
+         }
+         // Allocation is all-or-nothing before publishing any leaf or list entry.
+@@ -176,6 +208,11 @@ pub(crate) fn grow(
+             // smaller allocation before asking firmware to partially render.
+             let add = new - old;
+             if add == 1 {
++                self.refusal = Some(if client.tvb_va_blocks() == 0 {
++                    Refusal::Va
++                } else {
++                    Refusal::Memory
++                });
+                 return Ok(false);
+             }
+             new = old + add / 2;
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 9e98fd56ff16..97e45991c511 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -319,6 +319,12 @@ pub(crate) fn release_scratch(&mut self, scratch: Scratch) -> Result {
+         Ok(())
+     }
+ 
++    /// TVB blocks that still fit in the render arena's free VA (each block
++    /// reserves 0x28000). Scratch shares the arena from its other end.
++    pub(crate) fn tvb_va_blocks(&self) -> u32 {
++        (self.render_arena.free() / 0x28000).min(u64::from(u32::MAX)) as u32
++    }
++
+     /// Allocate tiler blocks from the shared private aperture. Before mapping,
+     /// failure leaves both existing backing and the arena reservation untouched.
+     /// `gfp` comes from the caller: TVB growth must not enter reclaim. Page
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py b/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py
+index add9a226b0c1..2f998eae8f5b 100644
+--- a/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py
+@@ -57,6 +57,7 @@ for name in ('g16_render', 'g16_stamp', 'g16_mesh'):
+     fixture += f'#[path = "{driver / (name + ".rs")}"] mod {name};\n'
+ fixture += 'use g16_render as render;\n'
+ fixture += re.search(r'const SCENES: u32 = .*?;', tvb).group() + '\n'
++fixture += '#[allow(dead_code)]\n' + item(tvb, r'pub\(crate\) enum Refusal') + '\n'
+ fixture += '#[derive(Default)]\n' + item(tvb, r'pub\(crate\) struct Tvb')
+ fixture += '\nimpl Tvb {\n'
+ for name in ('reserve_scene', 'release_scene', 'work_addresses'):
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py b/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py
+index dd9bb5b87dfa..0aa2809657ff 100755
+--- a/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py
+@@ -36,7 +36,7 @@ assert 'client.alloc_tvb_blocks((new - old) as usize, gfp)?' in grow
+ assert re.search(r'extend_with\(\(new - old\) as usize \* 8, 0u8, gfp\)', grow)
+ checks += 1
+ # The fallback: halve, then refuse at one block.
+-assert re.search(r'if add == 1 \{\s*return Ok\(false\);\s*\}\s*new = old \+ add / 2;', grow)
++assert re.search(r'if add == 1 \{\s*self\.refusal = Some\(.*?\);\s*return Ok\(false\);\s*\}\s*new = old \+ add / 2;', grow, re.S)
+ checks += 1
+ # Every allocation in alloc_tvb_blocks takes the caller's flags; none fails the context.
+ assert 'Page::alloc_page(gfp | __GFP_ZERO)' in blocks and 'RBTreeNode::new(va, page, gfp)' in blocks
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-tvb-refusal-visibility.py b/tools/testing/selftests/drivers/gpu/asahi/test-tvb-refusal-visibility.py
+new file mode 100755
+index 000000000000..450c3ab3580e
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-tvb-refusal-visibility.py
+@@ -0,0 +1,62 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host source checks: TVB growth refusals are visible.
++
++At a refusal the firmware only re-requests (about every 355 ms) until pages
++free up, so renders crawl and a client's exit drains slowly (2026-10-24).
++Every refusal records its reason (cap, render-arena VA, allocation); dep_stats
++counts them by reason (summing to tvb_refused); each pool reports once, as a
++warning for the first refusal of the boot and as info after that. No
++growth, cap or VA behaviour changes.
++"""
++from pathlib import Path
++import re
++
++here = Path(__file__).resolve()
++root = next(p for p in here.parents if (p / 'drivers/gpu/drm/asahi/g16_tvb.rs').exists())
++driver = root / 'drivers/gpu/drm/asahi'
++tvb = (driver / 'g16_tvb.rs').read_text()
++runtime = (driver / 'g16_runtime.rs').read_text()
++timeline = (driver / 'g16_timeline.rs').read_text()
++
++
++def function(source, name):
++    m = re.search(r'\n(\s*)(?:pub\(crate\) )?fn ' + name + r'\b', source)
++    assert m, name
++    indent = m.group(1).lstrip('\n')
++    end = re.search(r'\n' + indent + r'}\n', source[m.end():])
++    return source[m.start():m.end() + end.end()]
++
++
++checks = 0
++grow = function(tvb, 'grow')
++# Each Ok(false) is preceded by a recorded reason.
++assert grow.count('Ok(false)') == 2
++assert re.search(r'if new == old \{\s*self\.refusal = Some\(Refusal::Cap\);\s*return Ok\(false\);', grow)
++assert re.search(r'if add == 1 \{\s*self\.refusal = Some\(if client\.tvb_va_blocks\(\) == 0 \{\s*Refusal::Va\s*\} else \{\s*'
++                 r'Refusal::Memory\s*\}\);\s*return Ok\(false\);', grow)
++# No behaviour change: the cap clamp and growth policy are p2's.
++assert 'let limit = (crate::module_parameters::tvb_max_blocks.value()).min(MAX_BLOCKS);' in grow
++assert 'let mut new = old.saturating_mul(3).min(limit).max(old);' in grow and 'tvb_va_blocks' not in grow.split('if add == 1')[0]
++checks += 1
++
++# dep_stats: three new fields appended after the existing ones.
++assert re.search(r'partial_renders \{\}\\n\\\s*tvb_refused_cap \{\}\\ntvb_refused_va \{\}\\ntvb_refused_memory \{\}"', timeline)
++assert re.search(r'PARTIAL_RENDERS\.load\(Relaxed\),\s*TVB_REFUSED_CAP\.load\(Relaxed\),\s*TVB_REFUSED_VA\.load\(Relaxed\),\s*'
++                 r'TVB_REFUSED_MEMORY\.load\(Relaxed\)\s*\)', timeline)
++checks += 1
++
++service = function(runtime, 'service_render_events')
++m = re.search(r'if grown \{ &tl::TVB_GROWN \} else \{ &tl::TVB_REFUSED \}\.fetch_add\(1, Relaxed\);\s*if !grown \{(.*?)\n                \}',
++              service, re.S)
++assert m, 'refusal accounting next to tvb_refused'
++body = m.group(1)
++for reason, counter in (('Cap', 'TVB_REFUSED_CAP'), ('Va', 'TVB_REFUSED_VA'), ('Memory', 'TVB_REFUSED_MEMORY')):
++    assert f'crate::g16_tvb::Refusal::{reason} => &tl::{counter},' in body
++# One warning per boot (the first refusal), info for later pools (review V1).
++assert re.search(r'if !pool\.warned \{\s*pool\.warned = true;.*?'
++                 r'if !crate::g16_tvb::REFUSAL_WARNED\.swap\(true, Relaxed\) \{\s*dev_warn!.*?\} else \{\s*dev_info!', body, re.S)
++assert 'pub(crate) static REFUSAL_WARNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);' in tvb
++assert 'return Err' not in body
++checks += 1
++print(f'test-tvb-refusal-visibility: {checks} checks passed')

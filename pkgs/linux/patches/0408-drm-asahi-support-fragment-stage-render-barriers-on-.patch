@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 17 Sep 2026 20:37:30 -0400
+Subject: [PATCH] drm/asahi: support fragment-stage render barriers on M4
+ [uapi]
+
+Expose a feature bit and render flag for deferring render dependencies until fragment execution. Keep compute dependencies before tiling and account for barrier entries on each firmware queue.
+
+Validation: the barrier-only GPU object builds with ARCH=arm64 LLVM=1.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(split from commit 84462e19ddcddd04ac37e01ecbf25602f2d64d5c: uapi changes only)
+---
+ include/uapi/drm/asahi_drm.h | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/include/uapi/drm/asahi_drm.h b/include/uapi/drm/asahi_drm.h
+index de67f1c603af..b1d6d35fea77 100644
+--- a/include/uapi/drm/asahi_drm.h
++++ b/include/uapi/drm/asahi_drm.h
+@@ -213,6 +213,13 @@ enum drm_asahi_feature {
+ 	 * userspace can speculate memory accesses more aggressively.
+ 	 */
+ 	DRM_ASAHI_FEATURE_SOFT_FAULTS = (1UL) << 0,
++
++	/**
++	 * @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER: Render commands accept
++	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT to defer render dependencies
++	 * until the fragment stage.
++	 */
++	DRM_ASAHI_FEATURE_FRAGMENT_BARRIER = (1UL) << 1,
+ };
+ 
+ /**
+@@ -789,6 +796,17 @@ enum drm_asahi_render_flags {
+ 	 */
+ 	DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING = (1U << 2),
+ 
++	/**
++	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT: Apply the command header's
++	 * vdm_barrier before fragment execution instead of before tiling.
++	 * The cdm_barrier and submission input fences still precede tiling.
++	 * Tiling commands on the same queue execute in submission order.
++	 * Userspace must ensure that this command's tiling accesses do not
++	 * depend on earlier fragment execution, including write-after-read
++	 * hazards. Requires @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER.
++	 */
++	DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT = (1U << 3),
++
+ 	/**
+ 	 * @DRM_ASAHI_RENDER_DBIAS_IS_INT: Use integer depth bias formula.
+ 	 *

@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 18:26:25 -0400
+Subject: [PATCH] drm/asahi: G16: fw_cache_maint defaults to 0
+
+The 2026-10-11 #158 full CTS at fw_cache_maint=0 matched fcm=1 on every
+rerun family, and the notification-timeout bursts first suspected of stale
+reads also occur at fcm=1 (asahi-03 discriminator). In Dota default mode
+fcm=0 cuts pump CPU 482 -> 331 ms/s and firmware read cost 17.1 -> 6.4
+us/Work (#167 profile). 1 restores the maintenance at runtime
+(debugfs asahi_m4/fw_cache_maint).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index c7e8fbc95e66..40c7bd23d087 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -290,8 +290,8 @@ fn probe<'bound>(
+             description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
+         },
+         fw_cache_maint: u32 {
+-            default: 1,
+-            description: "1 (default) keeps CPU data-cache maintenance; 0 skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
++            default: 0,
++            description: "0 (default) skips CPU data-cache maintenance; 1 keeps it (#149 behaviour). 0 skips CPU data-cache maintenance (dc ivac/cvac) on firmware and client memory writes, reads and page initialization, keeping the barriers; page-table, TTB and handoff cleans are unchanged. Upstream G13/G14 and writeback user BOs on G16 rely on coherency",
+         },
+         profile: u32 {
+             default: 0,

@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 6 Oct 2026 14:57:32 -0400
+Subject: [PATCH] arm64: dts: apple: t8132-j713: add the GPU
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 62931caf52af641e2a047ca75d4eb78509727dde)
+---
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 5a3a8ac8d0ce..559dce81d796 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -11,6 +11,7 @@
+ 
+ #include "t8132.dtsi"
+ #include "t8132-jxxx.dtsi"
++#include "t8132-gpu.dtsi"
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/thermal/thermal.h>
+ 

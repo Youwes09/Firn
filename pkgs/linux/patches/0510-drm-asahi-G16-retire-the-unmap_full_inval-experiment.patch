@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:10:27 -0400
+Subject: [PATCH] drm/asahi: G16: retire the unmap_full_inval experiment
+
+Keep range invalidations for every context bound to the root, followed by the same barrier and invalidation-list clear. Remove the optional whole-ASID and all-EL1 invalidations.
+
+K1: no callers found in boot configs, tools, or the retained test scripts. Keep the production default exactly.
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    | 4 ----
+ drivers/gpu/drm/asahi/g16_runtime.rs | 9 ---------
+ drivers/gpu/drm/asahi/m4_mem.rs      | 7 -------
+ 3 files changed, 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 336c83cceed7..15090b20ff7e 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -157,10 +157,6 @@ fn probe<'bound>(
+             default: 400,
+             description: "Debug: at most this many renders are dumped per boot",
+         },
+-        unmap_full_inval: u32 {
+-            default: 0,
+-            description: "Experiment: on every VM bind and unbind, 1 also invalidates each bound context's whole ASID (not only the changed pages); 2 additionally invalidates all EL1 translations (tlbi vmalle1os). Both complete with dsb sy before the ioctl returns",
+-        },
+         event_affinity: u32 {
+             default: 0,
+             description: "Experiment: firmware event indices of idle queues. 0: an idle queue releases its index and takes the lowest free one when it next submits. 1: it retakes its previous index if free, else the next free index after the last one handed out (so a just-released index is not immediately given to another queue). 2: as 1, and a queue keeps its index while idle, for its whole lifetime (risks event exhaustion with more than 32 live queues; see backpressure logs)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 1fe88f65a03b..9599e4c7b28e 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1968,21 +1968,12 @@ pub(crate) fn invalidate_client(&self, client: &g16_vm::AddressSpace) {
+             client.low.invalidate(Some(0));
+             client.high.invalidate(Some(0));
+         }
+-        let full = crate::module_parameters::unmap_full_inval.value();
+         for (index, roots) in self.context_roots.iter().enumerate().skip(1) {
+             if roots.is_some_and(|r| r.low == root) {
+                 client.low.invalidate(Some(index as u8));
+                 client.high.invalidate(Some(index as u8));
+-                if full != 0 {
+-                    // Experiment: drop every cached translation of the
+-                    // context, not just the changed pages.
+-                    crate::mem::tlbi_asid(index as u8);
+-                }
+             }
+         }
+-        if full >= 2 {
+-            crate::mem::tlbi_all();
+-        }
+         crate::mem::sync();
+         client.low.clear_invalidations();
+         client.high.clear_invalidations();
+diff --git a/drivers/gpu/drm/asahi/m4_mem.rs b/drivers/gpu/drm/asahi/m4_mem.rs
+index 00943c5141a3..d9c9d925f910 100644
+--- a/drivers/gpu/drm/asahi/m4_mem.rs
++++ b/drivers/gpu/drm/asahi/m4_mem.rs
+@@ -19,13 +19,6 @@ pub(crate) fn tlbi_asid(asid: u8) {
+     }
+ }
+ 
+-/// Experiment (unmap_full_inval=2): invalidate every EL1 translation in the
+-/// outer-shareable domain, CPU and GPU, all ASIDs.
+-pub(crate) fn tlbi_all() {
+-    // SAFETY: These instructions only discard cached translations.
+-    unsafe { core::arch::asm!(".arch armv8.4-a", "tlbi vmalle1os", options(nostack, preserves_flags)) };
+-}
+-
+ /// Invalidate only these GPU virtual pages, including global firmware mappings.
+ /// VA operands use 4 KiB units even though the GPU page size is 16 KiB.
+ /// The caller publishes PTE writes before this and completes the batch after it.

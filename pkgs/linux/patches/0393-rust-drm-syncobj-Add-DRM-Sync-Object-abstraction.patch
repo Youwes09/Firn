@@ -1,0 +1,269 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Sat, 11 Feb 2023 16:59:20 +0900
+Subject: [PATCH] rust: drm: syncobj: Add DRM Sync Object abstraction
+
+DRM Sync Objects are a container for a DMA fence, and can be waited on
+signaled, exported, and imported from userspace. Add a Rust abstraction
+so Rust DRM drivers can support this functionality.
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+(cherry picked from commit 2bf9aa2d0086bfe0d21310d7ec9ef52b6be14a0a)
+[Youwes09: use mainline's dma_fence and carry FenceChain here]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/bindings/bindings_helper.h |   2 +
+ rust/helpers/dma_fence.c        |  11 +++
+ rust/helpers/drm_syncobj.c      |  22 +++++
+ rust/helpers/helpers.c          |   1 +
+ rust/kernel/drm/mod.rs          |   1 +
+ rust/kernel/drm/syncobj.rs      | 141 ++++++++++++++++++++++++++++++++
+ 6 files changed, 178 insertions(+)
+ create mode 100644 rust/helpers/drm_syncobj.c
+ create mode 100644 rust/kernel/drm/syncobj.rs
+
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index a76011f2a181..9f97bcf57ac6 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -37,6 +37,7 @@
+ #include <drm/drm_gem_shmem_helper.h>
+ #include <drm/drm_gpuvm.h>
+ #include <drm/drm_ioctl.h>
++#include <drm/drm_syncobj.h>
+ #include <kunit/test.h>
+ #include <linux/auxiliary_bus.h>
+ #include <linux/bitmap.h>
+@@ -54,6 +55,7 @@
+ #include <linux/device/faux.h>
+ #include <linux/dma-direction.h>
+ #include <linux/dma-fence.h>
++#include <linux/dma-fence-chain.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/dma-resv.h>
+ #include <linux/errname.h>
+diff --git a/rust/helpers/dma_fence.c b/rust/helpers/dma_fence.c
+index 549f6b6a7171..e644b9378c7f 100644
+--- a/rust/helpers/dma_fence.c
++++ b/rust/helpers/dma_fence.c
+@@ -1,6 +1,7 @@
+ // SPDX-License-Identifier: GPL-2.0
+ 
+ #include <linux/dma-fence.h>
++#include <linux/dma-fence-chain.h>
+ 
+ __rust_helper void rust_helper_dma_fence_get(struct dma_fence *f)
+ {
+@@ -47,3 +48,13 @@ __rust_helper void rust_helper_dma_fence_set_error(struct dma_fence *f, int erro
+ {
+ 	dma_fence_set_error(f, error);
+ }
++
++__rust_helper struct dma_fence_chain *rust_helper_dma_fence_chain_alloc(void)
++{
++	return dma_fence_chain_alloc();
++}
++
++__rust_helper void rust_helper_dma_fence_chain_free(struct dma_fence_chain *chain)
++{
++	dma_fence_chain_free(chain);
++}
+diff --git a/rust/helpers/drm_syncobj.c b/rust/helpers/drm_syncobj.c
+new file mode 100644
+index 000000000000..9e14c989edfd
+--- /dev/null
++++ b/rust/helpers/drm_syncobj.c
+@@ -0,0 +1,22 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <drm/drm_syncobj.h>
++
++#ifdef CONFIG_DRM
++
++void rust_helper_drm_syncobj_get(struct drm_syncobj *obj)
++{
++	drm_syncobj_get(obj);
++}
++
++void rust_helper_drm_syncobj_put(struct drm_syncobj *obj)
++{
++	drm_syncobj_put(obj);
++}
++
++struct dma_fence *rust_helper_drm_syncobj_fence_get(struct drm_syncobj *syncobj)
++{
++	return drm_syncobj_fence_get(syncobj);
++}
++
++#endif
+diff --git a/rust/helpers/helpers.c b/rust/helpers/helpers.c
+index d62c7be1ca7b..4a3ad32dbfbe 100644
+--- a/rust/helpers/helpers.c
++++ b/rust/helpers/helpers.c
+@@ -63,6 +63,7 @@
+ #endif
+ #include "drm.c"
+ #include "drm_gpuvm.c"
++#include "drm_syncobj.c"
+ #include "err.c"
+ #include "fs.c"
+ #include "fwctl.c"
+diff --git a/rust/kernel/drm/mod.rs b/rust/kernel/drm/mod.rs
+index fd6ed35bc35a..361cea0d418a 100644
+--- a/rust/kernel/drm/mod.rs
++++ b/rust/kernel/drm/mod.rs
+@@ -8,6 +8,7 @@
+ pub mod gem;
+ pub mod gpuvm;
+ pub mod ioctl;
++pub mod syncobj;
+ 
+ pub use self::device::Device;
+ pub use self::device::DeviceContext;
+diff --git a/rust/kernel/drm/syncobj.rs b/rust/kernel/drm/syncobj.rs
+new file mode 100644
+index 000000000000..2d27def514df
+--- /dev/null
++++ b/rust/kernel/drm/syncobj.rs
+@@ -0,0 +1,141 @@
++// SPDX-License-Identifier: GPL-2.0 OR MIT
++
++//! DRM Sync Objects
++//!
++//! C header: [`include/drm/drm_syncobj.h`](../../../../include/drm/drm_syncobj.h)
++
++use crate::{bindings, dma_buf::Fence, drm, error::Result, prelude::*, sync::aref::ARef};
++use core::ptr::NonNull;
++
++/// A DRM Sync Object
++///
++/// # Invariants
++/// ptr is a valid pointer to a drm_syncobj and we own a reference to it.
++pub struct SyncObj {
++    ptr: *mut bindings::drm_syncobj,
++}
++
++impl SyncObj {
++    /// Looks up a sync object by its handle for a given `File`.
++    pub fn lookup_handle<T: drm::file::DriverFile>(
++        file: &drm::File<T>,
++        handle: u32,
++    ) -> Result<SyncObj> {
++        // SAFETY: The arguments are all valid per the type invariants.
++        let ptr = unsafe { bindings::drm_syncobj_find(file.as_raw() as *mut _, handle) };
++
++        if ptr.is_null() {
++            Err(ENOENT)
++        } else {
++            Ok(SyncObj { ptr })
++        }
++    }
++
++    /// Returns the DMA fence associated with this sync object, if any.
++    pub fn fence_get(&self) -> Option<ARef<Fence>> {
++        // SAFETY: self.ptr is always valid
++        let fence = unsafe { bindings::drm_syncobj_fence_get(self.ptr) };
++
++        // SAFETY: drm_syncobj_fence_get() returns NULL or a new reference.
++        NonNull::new(fence).map(|fence| unsafe { Fence::from_raw_owned(fence) })
++    }
++
++    /// Replaces the DMA fence with a new one, or removes it if fence is None.
++    pub fn replace_fence(&self, fence: Option<&Fence>) {
++        // SAFETY: All arguments should be valid per the respective type invariants.
++        unsafe {
++            bindings::drm_syncobj_replace_fence(
++                self.ptr,
++                fence.map_or(core::ptr::null_mut(), |a| a.as_raw()),
++            )
++        };
++    }
++
++    /// Adds a new timeline point to the syncobj.
++    pub fn add_point(&self, chain: FenceChain, fence: &Fence, point: u64) {
++        // SAFETY: All arguments should be valid per the respective type invariants.
++        // This takes over the FenceChain ownership.
++        unsafe { bindings::drm_syncobj_add_point(self.ptr, chain.into_raw(), fence.as_raw(), point) };
++    }
++}
++
++impl Drop for SyncObj {
++    fn drop(&mut self) {
++        // SAFETY: We own a reference to this syncobj.
++        unsafe { bindings::drm_syncobj_put(self.ptr) };
++    }
++}
++
++impl Clone for SyncObj {
++    fn clone(&self) -> Self {
++        // SAFETY: `ptr` is valid per the type invariant and we own a reference to it.
++        unsafe { bindings::drm_syncobj_get(self.ptr) };
++        SyncObj { ptr: self.ptr }
++    }
++}
++
++// SAFETY: drm_syncobj operations are internally locked.
++unsafe impl Sync for SyncObj {}
++// SAFETY: drm_syncobj operations are internally locked.
++unsafe impl Send for SyncObj {}
++
++/// A DMA Fence Chain Object
++///
++/// # Invariants
++/// ptr is a valid pointer to a dma_fence_chain which we own.
++pub struct FenceChain {
++    ptr: *mut bindings::dma_fence_chain,
++}
++
++impl FenceChain {
++    /// Create a new DmaFenceChain object.
++    pub fn new() -> Result<Self> {
++        // SAFETY: This function is safe to call and takes no arguments.
++        let ptr = unsafe { bindings::dma_fence_chain_alloc() };
++
++        if ptr.is_null() {
++            Err(ENOMEM)
++        } else {
++            Ok(FenceChain { ptr })
++        }
++    }
++
++    /// Finds the point `seqno` on the timeline that `fence` ends.
++    ///
++    /// Returns `None` if that point has already signaled.
++    pub fn find_seqno(fence: ARef<Fence>, seqno: u64) -> Result<Option<ARef<Fence>>> {
++        let mut ptr = Fence::into_raw(fence);
++
++        // SAFETY: This will safely fail if `ptr` is not a chain. We own the
++        // reference to `ptr`, which the call replaces with one to the point.
++        let ret = unsafe { bindings::dma_fence_chain_find_seqno(&mut ptr, seqno) };
++
++        if ret != 0 {
++            // SAFETY: This is either an owned reference or NULL, dma_fence_put can handle both.
++            unsafe { bindings::dma_fence_put(ptr) };
++            Err(Error::from_errno(ret))
++        } else {
++            // SAFETY: `ptr` is NULL or an owned reference to the point.
++            Ok(NonNull::new(ptr).map(|ptr| unsafe { Fence::from_raw_owned(ptr) }))
++        }
++    }
++
++    /// Convert the DmaFenceChain into the underlying raw pointer.
++    ///
++    /// This assumes the caller will take ownership of the object.
++    pub(crate) fn into_raw(self) -> *mut bindings::dma_fence_chain {
++        let ptr = self.ptr;
++        core::mem::forget(self);
++        ptr
++    }
++}
++
++impl Drop for FenceChain {
++    fn drop(&mut self) {
++        // SAFETY: We own this dma_fence_chain.
++        unsafe { bindings::dma_fence_chain_free(self.ptr) };
++    }
++}
++
++// SAFETY: A dma_fence_chain that hasn't been added to a timeline is plain memory.
++unsafe impl Send for FenceChain {}

@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 02:28:41 -0400
+Subject: [PATCH] drm/asahi: Never let a G16 lane head lap an unretired flight
+
+reserve_flight() bounds a lane's new entries against the firmware read
+and done cursors, but not against flights that the firmware has consumed
+and the driver has not yet retired. retire() checks each flight's ring
+head with a modular comparison that is only unambiguous within half the
+0x500-entry ring. A burst of hundreds of small Works can therefore move
+the cursors more than 640 entries past an unretired flight's head, after
+which its ring check is false forever and it never retires.
+
+Apply the same bound the channel epochs already have: refuse (as
+workqueue backpressure) while the new head would be half a ring past any
+unretired flight on the lane.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 7b6371a616f86469ea8b3c24f5d538c2dc900433)
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 9364faeef3ca..6ce7a5abb3a5 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -582,6 +582,20 @@ fn reserve_flight(
+                     self.report_pressure(16, "workqueue");
+                     return Err(EBUSY);
+                 }
++                // Retirement compares the firmware cursors with each flight's
++                // head modulo the ring, which is only unambiguous within half
++                // a ring. Like the channel epochs above, never let the head
++                // run half a ring past an unretired flight on this lane, or
++                // that flight's ring check stays false and it never retires.
++                let next = (lane.head + entries[stage]) % 0x500;
++                if self.flights.iter().any(|f| {
++                    f.queues
++                        .iter()
++                        .any(|&(pointers, head)| pointers == lane.pointers && !reached(next, head, 0x500))
++                }) {
++                    self.report_pressure(16, "workqueue");
++                    return Err(EBUSY);
++                }
+             }
+         }
+         drop(guard);

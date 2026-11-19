@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Tue, 10 Dec 2024 04:03:40 +0900
+Subject: [PATCH] rust: addr: Add a module to declare core address types
+
+Encapsulates the core physical/DMA address types, so they can be used by
+Rust abstractions.
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+(cherry picked from commit 6a98994d63d9fc8a384ca025efc1373a5875da2f)
+---
+ rust/kernel/addr.rs | 15 +++++++++++++++
+ rust/kernel/lib.rs  |  1 +
+ 2 files changed, 16 insertions(+)
+ create mode 100644 rust/kernel/addr.rs
+
+diff --git a/rust/kernel/addr.rs b/rust/kernel/addr.rs
+new file mode 100644
+index 000000000000..06aff10a0332
+--- /dev/null
++++ b/rust/kernel/addr.rs
+@@ -0,0 +1,15 @@
++// SPDX-License-Identifier: GPL-2.0
++
++//! Kernel core address types.
++
++use bindings;
++use core::ffi;
++
++/// A physical memory address (which may be wider than the CPU pointer size)
++pub type PhysicalAddr = bindings::phys_addr_t;
++/// A DMA memory address (which may be narrower than `PhysicalAddr` on some systems)
++pub type DmaAddr = bindings::dma_addr_t;
++/// A physical resource size, typically the same width as `PhysicalAddr`
++pub type ResourceSize = bindings::resource_size_t;
++/// A raw page frame number, not to be confused with the C `pfn_t` which also encodes flags.
++pub type Pfn = ffi::c_ulong;
+diff --git a/rust/kernel/lib.rs b/rust/kernel/lib.rs
+index 98e485fb5633..397dded6454e 100644
+--- a/rust/kernel/lib.rs
++++ b/rust/kernel/lib.rs
+@@ -44,6 +44,7 @@
+ pub use ffi;
+ 
+ pub mod acpi;
++pub mod addr;
+ pub mod alloc;
+ #[cfg(CONFIG_AUXILIARY_BUS)]
+ pub mod auxiliary;

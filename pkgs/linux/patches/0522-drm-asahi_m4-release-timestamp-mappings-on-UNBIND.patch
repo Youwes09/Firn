@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 12:28:34 -0400
+Subject: [PATCH] drm/asahi_m4: release timestamp mappings on UNBIND
+
+A single Vulkan device creating and destroying two-query timestamp pools fails at cycle 4096: UNBIND forgets the public handle but keeps every firmware mapping and retained GEM reference until file close.
+
+Release the firmware range before removing either reference. bind_object already holds and drains admission before taking file state, so all users of the old timestamp address have completed and new submits cannot observe it. If unmapping fails, keep both records and their pinned backing for safe teardown.
+
+Baseline: vk-churn timestamp 8192 fails with ENOSPC on 82ead359b4e1d at cycle 4096. Candidate validation is recorded in tmp/simplification-review/REVIEW-REQUEST-kernel-bugs.md.
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 82b148037440..eb0d9faa01d4 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -849,7 +849,24 @@ fn bind_object(
+                     .iter()
+                     .position(|t| t.id == data.object_handle)
+                     .ok_or(ENOENT)?;
++                let timestamp = &state.timestamps[index];
++                // Failed BIND rollback can retain an unpublished allocation
++                // without advancing next_timestamp. Match the reserved range,
++                // which stays unique even if that public ID is reused.
++                let retained = state
++                    .retained_timestamps
++                    .iter()
++                    .position(|t| t.base == timestamp.base && t.extent == timestamp.extent)
++                    .ok_or(EIO)?;
++                // Admission is held and drained above: no submitted work can
++                // still write this firmware mapping, or acquire it anew.
++                // Keep both backing references if unmapping fails, just as
++                // at file teardown, so a stale PTE never reaches freed RAM.
++                device.runtime.lock().release_timestamp(
++                    timestamp.base..timestamp.base + timestamp.extent,
++                )?;
+                 state.timestamps.swap_remove(index);
++                state.retained_timestamps.swap_remove(retained);
+             }
+             _ => return Err(EINVAL),
+         }

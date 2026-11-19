@@ -1,0 +1,211 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 05:10:39 -0400
+Subject: [PATCH] drm/asahi: G16: dep_stats counts and hold times for
+ kernel-resolved dependencies
+
+To measure what kernel-side ordering costs per frame, count per queue:
+- renders whose tiling stage was ordered after an earlier fragment stamp in
+  the kernel;
+- admissions deferred on that stamp, and on compute or other-queue stamps;
+- fragment-stage waits dropped as already ordered by the lane;
+- compute admissions deferred on other queues.
+With dep_stats=1 the counts are logged once when the queue is destroyed:
+"G16: queue deps renders= computes= ta_ordered= ta_held= cross_held=
+lane_dropped= compute_held=".
+
+Folded in:
+- drm/asahi: G16 dep_stats: per-queue counts of kernel-resolved dependencies
+- drm/asahi: G16 dep_stats: report how long kernel-resolved dependencies hold Works
+
+[drm/asahi: G16 dep_stats: report how long kernel-resolved dependencies hold Works]
+Add the number of Works admitted after at least one deferral and their
+total time from first deferral to admission, so the throughput cost of
+kernel-side ordering can be read per queue after a run.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit d67bf5d0e0cd246022c032f3a9a384803aa8d4a6)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 90 ++++++++++++++++++++++++++--
+ 2 files changed, 90 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 40ddf472f8a5..fe8d6815e731 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -120,6 +120,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump",
+         },
++        dep_stats: u32 {
++            default: 0,
++            description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
++        },
+         render_deps: u32 {
+             default: 0,
+             description: "Experiment: 1 orders renders in the kernel (waits for other queues and for the previous fragment stamp a tiling stage needs, then submits with no firmware dependency items); 0 encodes firmware dependency items",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 23d50e27c0bd..fadca1338343 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -29,6 +29,70 @@ pub(crate) struct FirmwareQueues {
+     /// Render Works counted into the queue's shared notifier (two per render).
+     notified_works: u32,
+     pub(crate) last: [Option<Stamp>; 2],
++    /// Kernel-side dependency resolution statistics (logged at teardown with
++    /// dep_stats=1).
++    deps: DependencyStats,
++}
++
++/// Cumulative per-queue counts of kernel-resolved dependencies.
++#[derive(Default)]
++struct DependencyStats {
++    /// Renders admitted whose tiling stage waited on an earlier fragment
++    /// stamp in the kernel (render_deps=1: the vertex-consumer order).
++    ta_ordered: u64,
++    /// Admission attempts deferred (EBUSY) because that fragment stamp was
++    /// not yet reached; retries are counted each time.
++    ta_held: u64,
++    /// Render admissions deferred on a compute or other-queue stamp.
++    cross_held: u64,
++    /// Fragment-stage waits on the queue's own fragment lane dropped as
++    /// already ordered by the lane.
++    lane_dropped: u64,
++    /// Compute admissions deferred on another queue's stamp.
++    compute_held: u64,
++    /// Works admitted after at least one deferral, and the total time from
++    /// their first deferral to admission.
++    held_works: u64,
++    held_us: u64,
++    /// First deferral of the Work currently waiting, if any.
++    hold_start: Option<Instant<Monotonic>>,
++}
++
++impl DependencyStats {
++    fn defer(&mut self) {
++        if self.hold_start.is_none() {
++            self.hold_start = Some(Instant::now());
++        }
++    }
++
++    fn admit(&mut self) {
++        if let Some(start) = self.hold_start.take() {
++            self.held_works += 1;
++            self.held_us += start.elapsed().as_micros_ceil() as u64;
++        }
++    }
++}
++
++impl Drop for FirmwareQueues {
++    fn drop(&mut self) {
++        let d = &self.deps;
++        if crate::module_parameters::dep_stats.value() != 0
++            && d.ta_ordered + d.ta_held + d.cross_held + d.lane_dropped + d.compute_held != 0
++        {
++            pr_info!(
++                "G16: queue deps renders={} computes={} ta_ordered={} ta_held={} cross_held={} lane_dropped={} compute_held={} held_works={} held_us={}\n",
++                self.render_count,
++                self.compute_count,
++                d.ta_ordered,
++                d.ta_held,
++                d.cross_held,
++                d.lane_dropped,
++                d.compute_held,
++                d.held_works,
++                d.held_us
++            );
++        }
++    }
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -114,6 +178,7 @@ pub(crate) fn new(priority: u32) -> Self {
+             compute_count: crate::module_parameters::fw_counter_start.value(),
+             notified_works: 0,
+             last: [None; 2],
++            deps: DependencyStats::default(),
+         }
+     }
+ 
+@@ -1540,7 +1605,7 @@ fn drain_trace_rx(&mut self) -> Result {
+     /// link is unchanged. render_deps=0 keeps the items.
+     fn resolve_render_dependencies(
+         &self,
+-        queue: &FirmwareQueues,
++        queue: &mut FirmwareQueues,
+         params: &render::Parameters,
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<[Option<Stamp>; 2]> {
+@@ -1551,16 +1616,30 @@ fn resolve_render_dependencies(
+             || crate::module_parameters::render_barrier.value() & 1 != 0;
+         let own_fragment = queue.lanes.as_ref().map(|lanes| lanes[1].firmware_stamp());
+         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++        let mut ta_ordered = false;
++        let mut lane_dropped = false;
+         for (slot, dep) in dependencies.iter().enumerate() {
+             let Some(dep) = dep else { continue };
+             // Slot 0 is the render dependency: on the fragment stage with a
+             // fragment barrier, else on the tiling stage. Slot 1 (compute) is
+             // always a tiling-stage wait.
+             let lane_ordered = slot == 0 && fragment_stage && own_fragment == Some(dep.address);
++            let ta_wait = slot == 0 && !fragment_stage && own_fragment == Some(dep.address);
+             if !lane_ordered && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value) {
++                if ta_wait {
++                    queue.deps.ta_held += 1;
++                } else {
++                    queue.deps.cross_held += 1;
++                }
++                queue.deps.defer();
+                 return Err(EBUSY);
+             }
++            ta_ordered |= ta_wait;
++            lane_dropped |= lane_ordered;
+         }
++        queue.deps.ta_ordered += u64::from(ta_ordered);
++        queue.deps.lane_dropped += u64::from(lane_dropped);
++        queue.deps.admit();
+         Ok([None; 2])
+     }
+ 
+@@ -1574,7 +1653,7 @@ pub(crate) fn submit_render(
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
+-        let resolved = self.resolve_render_dependencies(&queue, params, dependencies)?;
++        let resolved = self.resolve_render_dependencies(&mut queue, params, dependencies)?;
+         let dependencies = &resolved;
+         let root = owner.lock().roots().low;
+         let initbm = !self
+@@ -2131,7 +2210,7 @@ pub(crate) fn map_compute_work(
+     /// rest of this queue. compute_deps=0 keeps the firmware items.
+     fn resolve_compute_dependencies(
+         &self,
+-        queue: &FirmwareQueues,
++        queue: &mut FirmwareQueues,
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<[Option<Stamp>; 2]> {
+         if crate::module_parameters::compute_deps.value() == 0 {
+@@ -2143,9 +2222,12 @@ fn resolve_compute_dependencies(
+             if own_lane != Some(dep.address)
+                 && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value)
+             {
++                queue.deps.compute_held += 1;
++                queue.deps.defer();
+                 return Err(EBUSY);
+             }
+         }
++        queue.deps.admit();
+         Ok([None; 2])
+     }
+ 
+@@ -2159,7 +2241,7 @@ pub(crate) fn submit_compute(
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
+         let mut client = owner.lock();
+-        let resolved = self.resolve_compute_dependencies(&queue, dependencies)?;
++        let resolved = self.resolve_compute_dependencies(&mut queue, dependencies)?;
+         let dependencies = &resolved;
+         self.reserve_flight(
+             &queue,

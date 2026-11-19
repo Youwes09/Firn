@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 16:01:25 -0500
+Subject: [PATCH] rust: drm: add a show_fdinfo hook with memory-stats printing
+
+Rust DRM drivers had no way to report per-client statistics in
+/proc/<pid>/fdinfo, and their file operations did not even install
+drm_show_fdinfo(), so their DRM fds printed no drm-* keys at all.
+
+Install drm_show_fdinfo() in the GEM file operations, as
+DEFINE_DRM_GEM_FOPS does for C drivers, so every Rust DRM client reports
+drm-driver and drm-client-id. A driver that sets
+DriverFile::HAS_SHOW_FDINFO gets a show_fdinfo callback with a Printer
+that wraps drm_show_memory_stats() (the standard drm-*-memory keys for
+the file's GEM handles) and drm_print_memory_stats() (drm-total-,
+drm-shared- and optionally drm-resident-<region> for driver-owned
+memory).
+
+[Youwes09: Dropped the post_open() and as_raw() trait methods from the
+context; mainline's DriverFile has neither.]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/drm/device.rs  |  6 ++-
+ rust/kernel/drm/file.rs    | 80 ++++++++++++++++++++++++++++++++++++++
+ rust/kernel/drm/gem/mod.rs |  1 +
+ 3 files changed, 86 insertions(+), 1 deletion(-)
+
+diff --git a/rust/kernel/drm/device.rs b/rust/kernel/drm/device.rs
+index fdd5b413abda..9c7aeabfaf1f 100644
+--- a/rust/kernel/drm/device.rs
++++ b/rust/kernel/drm/device.rs
+@@ -186,7 +186,11 @@ const fn compute_features() -> u32 {
+         dumb_create: T::Object::ALLOC_OPS.dumb_create,
+         dumb_map_offset: T::Object::ALLOC_OPS.dumb_map_offset,
+ 
+-        show_fdinfo: None,
++        show_fdinfo: if <T::File as drm::file::DriverFile>::HAS_SHOW_FDINFO {
++            Some(drm::File::<T::File>::show_fdinfo_callback)
++        } else {
++            None
++        },
+         fbdev_probe: None,
+ 
+         major: T::INFO.major,
+diff --git a/rust/kernel/drm/file.rs b/rust/kernel/drm/file.rs
+index 10160601ce5a..2715e9a9efb3 100644
+--- a/rust/kernel/drm/file.rs
++++ b/rust/kernel/drm/file.rs
+@@ -19,6 +19,72 @@ pub trait DriverFile {
+ 
+     /// Open a new file (called when a client opens the DRM device).
+     fn open(device: &drm::Device<Self::Driver>) -> Result<Pin<KBox<Self>>>;
++
++    /// Whether the driver implements [`DriverFile::show_fdinfo`].
++    const HAS_SHOW_FDINFO: bool = false;
++
++    /// Print driver-specific `/proc/<pid>/fdinfo` keys for this client, after
++    /// the common `drm-driver` and `drm-client-id` keys (see
++    /// `Documentation/gpu/drm-usage-stats.rst`). Called only when
++    /// [`DriverFile::HAS_SHOW_FDINFO`] is set.
++    fn show_fdinfo(&self, _file: &File<Self>, _printer: &mut Printer)
++    where
++        Self: Sized,
++    {
++    }
++}
++
++/// Memory totals for one fdinfo region (`struct drm_memory_stats`), in bytes.
++#[derive(Clone, Copy, Default)]
++pub struct MemoryStats {
++    /// Memory shared with other clients.
++    pub shared: u64,
++    /// Memory private to this client.
++    pub private: u64,
++    /// Memory backed by pages.
++    pub resident: u64,
++    /// Resident memory that can be purged.
++    pub purgeable: u64,
++    /// Memory in use by an active submission.
++    pub active: u64,
++}
++
++/// The output of a [`DriverFile::show_fdinfo`] call (`struct drm_printer`).
++///
++/// # Invariants
++///
++/// `self.0` is a valid `struct drm_printer` for the lifetime of the value.
++pub struct Printer(*mut bindings::drm_printer);
++
++impl Printer {
++    /// Print the `drm-total-memory` family of keys for the GEM objects with
++    /// a handle in `file` (`drm_show_memory_stats()`).
++    pub fn gem_memory_stats<T: DriverFile>(&mut self, file: &File<T>) {
++        // SAFETY: `self.0` is valid by the type invariant and `file` is an
++        // open DRM file.
++        unsafe { bindings::drm_show_memory_stats(self.0, file.as_raw()) }
++    }
++
++    /// Print `drm-total-<region>` and `drm-shared-<region>`, and with
++    /// `resident` also `drm-resident-<region>`, for driver-owned memory
++    /// (`drm_print_memory_stats()`).
++    pub fn memory_stats(&mut self, stats: &MemoryStats, resident: bool, region: &CStr) {
++        let raw = bindings::drm_memory_stats {
++            shared: stats.shared,
++            private: stats.private,
++            resident: stats.resident,
++            purgeable: stats.purgeable,
++            active: stats.active,
++        };
++        let supported = if resident {
++            bindings::drm_gem_object_status_DRM_GEM_OBJECT_RESIDENT
++        } else {
++            0
++        };
++        // SAFETY: `self.0` is valid by the type invariant, `raw` lives for the
++        // call and `region` is a NUL-terminated string.
++        unsafe { bindings::drm_print_memory_stats(self.0, &raw, supported, region.as_char_ptr()) }
++    }
+ }
+ 
+ /// An open DRM File.
+@@ -87,6 +153,20 @@ pub(crate) extern "C" fn open_callback(
+         0
+     }
+ 
++    /// The show_fdinfo callback of a `struct drm_driver`.
++    pub(crate) extern "C" fn show_fdinfo_callback(
++        printer: *mut bindings::drm_printer,
++        raw_file: *mut bindings::drm_file,
++    ) {
++        // SAFETY: `drm_show_fdinfo()` calls this for an open file, whose
++        // `driver_priv` was set by `open_callback` and is released only by
++        // `postclose_callback`, after the last file reference is gone.
++        let file = unsafe { File::<T>::from_raw(raw_file) };
++        // INVARIANT: `drm_show_fdinfo()` passes a valid printer for the call.
++        let mut printer = Printer(printer);
++        file.inner().show_fdinfo(file, &mut printer);
++    }
++
+     /// The postclose callback of a `struct drm_file`.
+     pub(crate) extern "C" fn postclose_callback(
+         _raw_dev: *mut bindings::drm_device,
+diff --git a/rust/kernel/drm/gem/mod.rs b/rust/kernel/drm/gem/mod.rs
+index c03c936794d6..bc42083eff57 100644
+--- a/rust/kernel/drm/gem/mod.rs
++++ b/rust/kernel/drm/gem/mod.rs
+@@ -492,6 +492,7 @@ pub(super) const fn create_fops(owner: *mut bindings::module) -> bindings::file_
+     fops.read = Some(bindings::drm_read);
+     fops.llseek = Some(bindings::noop_llseek);
+     fops.mmap = Some(bindings::drm_gem_mmap);
++    fops.show_fdinfo = Some(bindings::drm_show_fdinfo);
+     fops.fop_flags = bindings::FOP_UNSIGNED_OFFSET;
+ 
+     fops

@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:09:57 -0400
+Subject: [PATCH] drm/asahi: G16: retire the flush_each experiment
+
+Keep one channel publication per lane at the end of each pump pass, with the existing optional kick_first control unchanged.
+
+K1: no callers found in boot configs, tools, or the retained test scripts. Keep the production default exactly.
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ----
+ drivers/gpu/drm/asahi/g16_drm.rs  | 6 +-----
+ 2 files changed, 1 insertion(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index a0042ddc7c82..925173e0ef30 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -165,10 +165,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Experiment: firmware event indices of idle queues. 0: an idle queue releases its index and takes the lowest free one when it next submits. 1: it retakes its previous index if free, else the next free index after the last one handed out (so a just-released index is not immediately given to another queue). 2: as 1, and a queue keeps its index while idle, for its whole lifetime (risks event exhaustion with more than 32 live queues; see backpressure logs)",
+         },
+-        flush_each: u32 {
+-            default: 0,
+-            description: "Experiment: 1 publishes every admitted Work with its own channel message and kick, instead of batching all Works admitted in one worker pass into one message per lane",
+-        },
+         wedge_ms: u32 {
+             default: 2000,
+             description: "A4 wedge detection window: a render with TA done and all waits met whose 3D never starts, with all channels drained and no fragment progress on any lane for this long",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 42946626e303..948a5f6bfb0a 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -1719,11 +1719,7 @@ fn run(this: Arc<Self>) {
+                         engine.cursor = index + 1;
+                         progress = true;
+                         admitted += 1;
+-                        if crate::module_parameters::flush_each.value() != 0 {
+-                            // Experiment: one channel message per Work
+-                            // instead of one per lane for the whole pass.
+-                            runtime.flush()?;
+-                        } else if admitted == 1
++                        if admitted == 1
+                             && crate::g16_timeline::KICK_FIRST.load(Ordering::Relaxed) != 0
+                         {
+                             // Ring the doorbell for the pass's first Work so

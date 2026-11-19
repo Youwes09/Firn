@@ -1,0 +1,382 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 16:15:22 -0500
+Subject: [PATCH] drm/asahi: G16: shrink the render FList ring and make the
+ pool size a knob
+
+Each VM that renders gets a render support object whose FList (free
+list) holds 24 operand buffers of 2 MiB plus a ring directory of 512Ki
+entries (4 MiB), all allocated at its first render: 52 of the 54 MiB of
+private render storage per client. The accelerator takes 4 KiB pages
+from this pool for shader private memory (scratch frames: spills and
+dynamically indexed arrays) and returns them to the ring tail when the
+work retires (support +0x20 counts returns, +0x24 is the tail).
+
+The ring only ever holds the pool's own pages. Size it to twice the
+registered pages (24576 entries, 192 KiB), as the compute support
+object keeps its ring above its pages, with the tail at the page count.
+The firmware wraps the tail at that capacity; 32 KiB scratch frames
+across full-screen draws, which cycle the ring many times, render
+correctly at #302's speed. The unused directory span is an unbacked
+hole the support object never advertises. This saves 3.8 MiB per
+client: render private storage is 50.0 MiB instead of 53.8 MiB.
+
+The 24 buffers stay. The pool size bounds how many scratch-using
+threads the GPU can keep resident, and smaller pools starve large
+frames (full-screen 1920x1080 draws, 32 KiB per invocation, mini):
+
+  buffers  ms/draw  kernel log
+  24        48.5    clean
+  20        50.8    clean
+  16        56.6    notification wait timed out (1 s flight)
+   8       180.4    notification timeout, A4 wedge detection (2 s)
+   4         -      render never completed; G16 failed until reboot
+
+4 KiB frames got faster with smaller pools (24: 16.0 ms, 8: 8.0 ms), so
+the size is a real trade-off, but a pool that can hang the GPU is not a
+default. Keep 24 and expose the count as the research parameter
+render_operand_buffers (1..=24; runtime: debugfs
+asahi_m4/render_operand_buffers, read at each VM's first render).
+Native mesh VMs always use 24. Unregistered buffers are unbacked holes;
+the VA layout is unchanged.
+
+fw_mem now includes the render support pages and the opening FList
+support object, so their ring counters can be read.
+
+No UAPI change.
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs       |  4 ++
+ drivers/gpu/drm/asahi/g16.rs            |  4 ++
+ drivers/gpu/drm/asahi/g16_drm.rs        |  5 ++
+ drivers/gpu/drm/asahi/g16_drm_submit.rs | 10 ++-
+ drivers/gpu/drm/asahi/g16_render.rs     | 84 ++++++++++++++++++++-----
+ drivers/gpu/drm/asahi/g16_timeline.rs   | 10 +++
+ drivers/gpu/drm/asahi/g16_vm.rs         | 22 +++++--
+ 7 files changed, 117 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index fcecb3b5b1a6..b686a9d26624 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -171,6 +171,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
+         },
++        render_operand_buffers: u32 {
++            default: 24,
++            description: "Research: 2 MiB shader private-memory (operand) buffers in each VM's render pool, 1..=24 (default 24; native mesh VMs always use 24). Each is resident for the VM's lifetime. Smaller pools starve large shader scratch frames: 8 made 32 KiB frames 3.7x slower with a 2 s stall, 4 hung the GPU. Runtime: debugfs asahi_m4/render_operand_buffers, read at each VM's first render",
++        },
+         native_mesh: u32 {
+             default: 0,
+             description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16/T32 one-parent profile, 2=unqualified multiple-parent profile, 3=research admission of wider mesh state (not qualified); no capability advertisement. Runtime: debugfs asahi_m4/native_mesh (a VM keeps the support mode of its first render)",
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 6ac35bb9b70e..75dba7d5334d 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -382,6 +382,10 @@ pub(crate) fn firmware_pages(&self) -> Result<KVec<(u64, kernel::addr::PhysicalA
+             0xffff_fc20_001b_8000,
+             crate::g16_compute::QUEUE,
+             crate::g16_compute::SHARED,
++            // FList support objects (render leases and the opening pool):
++            // their ring counters.
++            crate::g16_render::SUPPORT_BASE,
++            crate::g16_fw::CONTROL_DATA,
+         ];
+         let heaps = FIRMWARE_HEAPS.iter().map(|(va, _)| *va);
+         for va in Iterator::chain(Iterator::chain(fixed.into_iter(), heaps), SHARED_PAGES) {
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 55ebb3d6f75c..6fd9645d4f58 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -367,6 +367,11 @@ pub(crate) fn register<'a>(
+         (c_str!("fail_prep"), FlagKnob::FAIL_PREP, 0),
+         (c_str!("fail_retire"), FlagKnob::FAIL_RETIRE, 0),
+         (c_str!("fail_skip"), FlagKnob::FAIL_SKIP, 0),
++        (
++            c_str!("render_operand_buffers"),
++            FlagKnob::RENDER_OPERAND_BUFFERS,
++            crate::module_parameters::render_operand_buffers.value(),
++        ),
+     ];
+     let mut flags = KVec::with_capacity(knobs.len(), GFP_KERNEL)?;
+     for (name, knob, value) in knobs {
+diff --git a/drivers/gpu/drm/asahi/g16_drm_submit.rs b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+index 8eaa3ef8d0a6..65ce0ae071c0 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_submit.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+@@ -259,8 +259,14 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                 return Err(EIO);
+             }
+             if renders != 0 && !vm.render_ready {
++                // Native mesh keeps its qualified full-size pool.
++                let buffers = if vm.native_mode.enabled() {
++                    render::OPERAND_BUFFERS_MAX
++                } else {
++                    crate::g16_timeline::RENDER_OPERAND_BUFFERS.load(Ordering::Relaxed)
++                };
+                 let pool =
+-                    render::OperandPool::new(vm.kernel.start, vm.kernel.end).ok_or_else(|| reject(format_args!("VM kernel VA {:#x}..{:#x} too small for the render operand pool", vm.kernel.start, vm.kernel.end)))?;
++                    render::OperandPool::with_buffers(vm.kernel.start, vm.kernel.end, buffers).ok_or_else(|| reject(format_args!("VM kernel VA {:#x}..{:#x} too small for the render operand pool, or render_operand_buffers={} outside 1..={}", vm.kernel.start, vm.kernel.end, buffers, render::OPERAND_BUFFERS_MAX)))?;
+                 // Acquire scarce support and its Arc before editing this
+                 // root. ENOSPC/ENOMEM here must not quarantine a healthy VM.
+                 let support = Arc::new(
+@@ -268,7 +274,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                     GFP_KERNEL,
+                 )?;
+                 if let Err(error) = vm.space.lock()
+-                    .alloc_render_private(vm.kernel.start, vm.kernel.end)
++                    .alloc_render_private(vm.kernel.start, vm.kernel.end, &pool)
+                 {
+                     // The unpublished graph owns every partial allocation
+                     // and resumes on ENOMEM. Structural/PTE inconsistencies
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index 73ef251ce7fd..2cef8d4b3bf6 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -829,18 +829,38 @@ pub(crate) fn fragment_work(&self, a: &Addresses, out: &mut [u8]) -> Option<()>
+ 
+ /// Per-VM firmware operand storage, placed in the caller kernel carveout.
+ pub(crate) const CONTEXT_BASE: u64 = 0x10_0000_0000;
++/// Extent of the private backing window. Its directory and operand-buffer
++/// spans are backed only as far as the pool's buffer count needs.
+ pub(crate) const PRIVATE_SIZE: usize = 0x35d4000;
+ pub(crate) const HEAPMETA_OFFSET: u64 = 0x35d0000;
+ const OPERAND_STRIDE: u64 = 0x208000;
++/// Operand (shader private-memory) buffers the VA layout has room for.
++pub(crate) const OPERAND_BUFFERS_MAX: u32 = 24;
++/// 4 KiB accelerator pages in each 2 MiB operand buffer.
++const OPERAND_PAGES: u32 = 512;
++const DIRECTORY_BACKING: usize = 0x40000;
++const DIRECTORY_SPAN: usize = 0x400000;
++const TABLE_BACKING: usize = 0x440000;
++const BUFFER_BACKING: usize = 0x450000;
++const BUFFER_SIZE: usize = 0x200000;
+ 
++/// The render FList: a ring directory of free 4 KiB operand pages and the
++/// descriptor table of the 2 MiB buffers holding them. The accelerator takes
++/// pages for shader private memory and returns them to the ring tail when
++/// the work retires. Only `buffers` buffers are backed and registered; the
++/// VA layout always reserves room for `OPERAND_BUFFERS_MAX`.
+ #[derive(Clone, Copy)]
+ pub(crate) struct OperandPool {
+     pub(crate) directory: u64,
+     pub(crate) table: u64,
+     buffer: u64,
++    buffers: u32,
+ }
+ impl OperandPool {
+     pub(crate) fn new(start: u64, end: u64) -> Option<Self> {
++        Self::with_buffers(start, end, OPERAND_BUFFERS_MAX)
++    }
++    pub(crate) fn with_buffers(start: u64, end: u64, buffers: u32) -> Option<Self> {
+         let directory = start.checked_add(PRIVATE_SIZE as u64 + 0x4000)?;
+         let table = directory.checked_add(0x408000)?;
+         let buffer = table.checked_add(0x18000)?;
+@@ -848,14 +868,40 @@ pub(crate) fn new(start: u64, end: u64) -> Option<Self> {
+             directory,
+             table,
+             buffer,
++            buffers,
+         };
+-        if start & 0x3fff != 0 || pool.end()? > end {
++        if start & 0x3fff != 0
++            || !(1..=OPERAND_BUFFERS_MAX).contains(&buffers)
++            || pool.end()? > end
++        {
+             return None;
+         }
+         Some(pool)
+     }
+     pub(crate) fn end(&self) -> Option<u64> {
+-        self.buffer.checked_add(24 * OPERAND_STRIDE)
++        self.buffer.checked_add(OPERAND_BUFFERS_MAX as u64 * OPERAND_STRIDE)
++    }
++    fn pages(&self) -> u32 {
++        self.buffers * OPERAND_PAGES
++    }
++    /// Ring entries: at least twice the page count, so a ring holding every
++    /// page is never full (the compute FList likewise keeps its capacity above
++    /// its pages), in whole 16 KiB directory pages.
++    fn capacity(&self) -> u32 {
++        (2 * self.pages()).next_multiple_of(0x4000 / 8)
++    }
++    fn directory_bytes(&self) -> usize {
++        self.capacity() as usize * 8
++    }
++    /// Whether this page of the private backing window is allocated. The
++    /// unregistered directory tail and operand buffers are holes: the
++    /// accelerator reaches the directory and buffers only through their
++    /// aliases, within the extents the support object advertises.
++    pub(crate) fn backed(&self, offset: usize) -> bool {
++        let directory = DIRECTORY_BACKING + self.directory_bytes()..DIRECTORY_BACKING + DIRECTORY_SPAN;
++        let buffers = BUFFER_BACKING + self.buffers as usize * BUFFER_SIZE
++            ..BUFFER_BACKING + OPERAND_BUFFERS_MAX as usize * BUFFER_SIZE;
++        !directory.contains(&offset) && !buffers.contains(&offset)
+     }
+     pub(crate) fn support(&self, id: u64, shared: u64) -> [u8; 0x100] {
+         let mut out = [0; 0x100];
+@@ -865,11 +911,13 @@ pub(crate) fn end(&self) -> Option<u64> {
+         // this slot into the accelerator's private-memory pool selector.
+         u32_at(&mut out, 8, id as u32);
+         u64_at(&mut out, 0x14, self.directory);
+-        u32_at(&mut out, 0x1c, 0x400000 / 8);
+-        u32_at(&mut out, 0x24, 24 * 512);
+-        u32_at(&mut out, 0x2c, 24 * 512);
++        // Ring capacity, tail index (all pages free) and free page count,
++        // as in the compute support object.
++        u32_at(&mut out, 0x1c, self.capacity());
++        u32_at(&mut out, 0x24, self.pages() % self.capacity());
++        u32_at(&mut out, 0x2c, self.pages());
+         u64_at(&mut out, 0x30, self.table);
+-        u32_at(&mut out, 0x48, 24 * 0x40 / 8);
++        u32_at(&mut out, 0x48, self.buffers * 0x40 / 8);
+         u64_at(&mut out, 0x4c, shared);
+         out
+     }
+@@ -905,8 +953,8 @@ pub(crate) fn initialize_native_support(header: &mut [u8]) {
+         (0x10_0008_0000, 0x3c000, 0x4000),
+         (0x10_0025_8000, 0x3450000, 0x1c000),
+         (0x10_0024_0000, 0x346c000, 0x4000),
+-        (pool.directory, 0x40000, 0x400000),
+-        (pool.table, 0x440000, 0x10000),
++        (pool.directory, DIRECTORY_BACKING as u64, pool.directory_bytes()),
++        (pool.table, TABLE_BACKING as u64, 0x10000),
+     ]);
+     for i in 0..11 {
+         out[5 + i] = (
+@@ -915,11 +963,11 @@ pub(crate) fn initialize_native_support(header: &mut [u8]) {
+             0x20000,
+         );
+     }
+-    for i in 0..24 {
++    for i in 0..pool.buffers as usize {
+         out[16 + i] = (
+             pool.buffer + i as u64 * OPERAND_STRIDE,
+-            0x450000 + i as u64 * 0x200000,
+-            0x200000,
++            (BUFFER_BACKING + i * BUFFER_SIZE) as u64,
++            BUFFER_SIZE,
+         );
+     }
+     out
+@@ -928,25 +976,29 @@ pub(crate) fn initialize_native_support(header: &mut [u8]) {
+ /// Return one initialized backing page, without allocating a contiguous 54 MiB
+ /// CPU buffer. All unmapped padding and scratch begin at zero.
+ pub(crate) fn private_page(pool: &OperandPool, offset: usize, out: &mut [u8]) -> Option<()> {
+-    if offset & 0x3fff != 0 || offset >= PRIVATE_SIZE || out.len() != 0x4000 {
++    if offset & 0x3fff != 0 || offset >= PRIVATE_SIZE || out.len() != 0x4000 || !pool.backed(offset) {
+         return None;
+     }
+     out.fill(0);
+     if offset == 0x38000 {
+         u32_at(out, 0x600, 0x60000000);
+         u32_at(out, 0x604, 0x35b);
+-    } else if (0x40000..0x58000).contains(&offset) {
+-        let first = (offset - 0x40000) / 8;
++    } else if (DIRECTORY_BACKING..DIRECTORY_BACKING + pool.directory_bytes()).contains(&offset) {
++        // Ring entries 0..pages start out holding every operand page.
++        let first = (offset - DIRECTORY_BACKING) / 8;
+         for i in 0..0x800 {
+             let page = first + i;
++            if page >= pool.pages() as usize {
++                break;
++            }
+             u64_at(
+                 out,
+                 i * 8,
+                 pool.buffer + (page / 512) as u64 * OPERAND_STRIDE + (page % 512) as u64 * 0x1000,
+             );
+         }
+-    } else if offset == 0x440000 {
+-        for i in 0..24 {
++    } else if offset == TABLE_BACKING {
++        for i in 0..pool.buffers as usize {
+             u64_at(
+                 out,
+                 i * 0x40,
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 79ef4acecd40..cd4e668a44ca 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -343,6 +343,11 @@ pub(crate) fn shared_notifier() -> bool {
+     SHARED_NOTIFIER.load(core::sync::atomic::Ordering::Relaxed) != 0
+ }
+ 
++/// Operand buffers in the render pool of each VM whose first render comes
++/// afterwards (asahi_m4.render_operand_buffers; runtime: debugfs
++/// asahi_m4/render_operand_buffers). Submission rejects values outside 1..=24.
++pub(crate) static RENDER_OPERAND_BUFFERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(24);
++
+ /// A 0/1 debugfs switch over a static.
+ pub(crate) struct FlagKnob {
+     cell: &'static core::sync::atomic::AtomicU32,
+@@ -360,6 +365,11 @@ pub(crate) fn init(&self, value: u32) {
+     pub(crate) const FAIL_PREP: Self = Self { cell: &FAIL_PREP, name: "fail_prep", max: i32::MAX as u32 };
+     pub(crate) const FAIL_RETIRE: Self = Self { cell: &FAIL_RETIRE, name: "fail_retire", max: i32::MAX as u32 };
+     pub(crate) const FAIL_SKIP: Self = Self { cell: &FAIL_SKIP, name: "fail_skip", max: 4096 };
++    pub(crate) const RENDER_OPERAND_BUFFERS: Self = Self {
++        cell: &RENDER_OPERAND_BUFFERS,
++        name: "render_operand_buffers",
++        max: crate::g16_render::OPERAND_BUFFERS_MAX,
++    };
+ }
+ 
+ /// debugfs `asahi_m4/native_mesh`: the runtime native mesh mode. Each write
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 999af52ad861..02ece3c6c623 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -177,18 +177,29 @@ pub(crate) fn alloc_low(
+     /// ENOMEM may leave a partial graph, all owned here. This root has never
+     /// rendered: retry can finish missing pages/PTEs and reinitialize storage
+     /// before its first publication. Never replace a conflicting mapping.
++    /// `pool` must be the one whose support object this root's renders use.
+     /// Runs in the submitting client's ioctl, which is charged for the pages.
+-    pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
++    pub(crate) fn alloc_render_private(
++        &mut self,
++        start: u64,
++        end: u64,
++        pool: &crate::g16_render::OperandPool,
++    ) -> Result {
+         use crate::g16_render as render;
+         let mut params = render::Parameters::default();
+         params.set_private(start, end).ok_or(EINVAL)?;
+-        let pool = render::OperandPool::new(start, end).ok_or(EINVAL)?;
++        if render::OperandPool::new(start, end).map(|p| p.directory) != Some(pool.directory) {
++            return Err(EINVAL);
++        }
+         let remaining = pool.end().ok_or(EINVAL)?..end.min(render::CONTEXT_BASE + (1 << 32));
+         if remaining.start > remaining.end {
+             return Err(ENOMEM);
+         }
+         self.render_arena = Arena::new(remaining);
+         for offset in (0..render::PRIVATE_SIZE).step_by(UAT_PGSZ) {
++            if !pool.backed(offset) {
++                continue;
++            }
+             let va = start + offset as u64;
+             if self.pages.get(&va).is_none() {
+                 if self.low.translate(va)?.is_some() {
+@@ -202,16 +213,19 @@ pub(crate) fn alloc_render_private(&mut self, start: u64, end: u64) -> Result {
+             self.map_render_page(va, physical)?;
+         }
+         for offset in (0..render::PRIVATE_SIZE).step_by(UAT_PGSZ) {
++            if !pool.backed(offset) {
++                continue;
++            }
+             let va = start + offset as u64;
+             let page = self.pages.get(&va).ok_or(EIO)?;
+             page.with_pointer_into_page(0, UAT_PGSZ, |ptr| {
+                 // SAFETY: The closure has exclusive access to the full page
+                 // owned by this unpublished VM; no GPU root references it.
+                 let bytes = unsafe { core::slice::from_raw_parts_mut(ptr, UAT_PGSZ) };
+-                render::private_page(&pool, offset, bytes).ok_or(EINVAL)
++                render::private_page(pool, offset, bytes).ok_or(EINVAL)
+             })?;
+         }
+-        for (alias, offset, size) in render::private_aliases(&pool) {
++        for (alias, offset, size) in render::private_aliases(pool) {
+             for page in (0..size).step_by(UAT_PGSZ) {
+                 let va = alias + page as u64;
+                 let physical = self

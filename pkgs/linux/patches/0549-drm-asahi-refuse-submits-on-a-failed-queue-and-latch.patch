@@ -1,0 +1,256 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 23 Oct 2026 19:19:58 -0400
+Subject: [PATCH] drm/asahi: refuse submits on a failed queue and latch on
+ retirement errors
+
+A queue latched by a rejected command still accepted new submissions,
+which could only complete with ECANCELED. Refuse them in the SUBMIT ioctl
+with ECANCELED, as xe and amdgpu do for a banned queue or lost context.
+Honeykrisp already reports any submit failure as device loss.
+
+A command that completes with an error at retirement (a render that hit
+its TVB memory limit, ENOMEM) failed only its own job. Later jobs on the
+same queue may already be published, so the publication latch cannot stop
+them; they would signal success over incomplete output, and Honeykrisp
+only inspects the queue's latest timeline point. Latch the queue on any
+retirement error and complete every later job on it with ECANCELED.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs             |  1 +
+ drivers/gpu/drm/asahi/g16_drm.rs              | 35 +++++++++++--
+ drivers/gpu/drm/asahi/g16_queue_fail.rs       | 37 +++++++++++++
+ drivers/gpu/drm/asahi/g16_runtime.rs          |  9 ++--
+ .../selftests/drivers/gpu/asahi/queue-fail.rs | 52 +++++++++++++++++++
+ .../drivers/gpu/asahi/test-queue-fail.py      | 24 +++++++++
+ 6 files changed, 151 insertions(+), 7 deletions(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_queue_fail.rs
+ create mode 100644 tools/testing/selftests/drivers/gpu/asahi/queue-fail.rs
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-queue-fail.py
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index c87899735eba..48959a25617b 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -15,6 +15,7 @@
+ mod g16_fw;
+ mod g16_platform;
+ mod g16_power;
++mod g16_queue_fail;
+ mod g16_render;
+ mod g16_stamp;
+ mod g16_timeline;
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index f7e5526536bb..e44650fc0848 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -1810,6 +1810,16 @@ struct Issued {
+     id: u64,
+     owner: u64,
+ }
++impl crate::g16_queue_fail::QueueJob for Running {
++    type Error = Error;
++    fn same_queue(&self, other: &Self) -> bool {
++        Arc::ptr_eq(&self.execution.firmware, &other.execution.firmware)
++    }
++    fn error_mut(&mut self) -> &mut Option<Error> {
++        &mut self.error
++    }
++}
++
+ struct Engine {
+     cursor: usize,
+     jobs: KVec<Running>,
+@@ -1918,11 +1928,25 @@ fn run(this: Arc<Self>) {
+                 })? {
+                     let index = engine.issued.iter().position(|r| r.id == id).ok_or(EIO)?;
+                     let issued = engine.issued.remove(index).map_err(|_| EIO)?;
+-                    let job = engine
++                    let at = engine
+                         .jobs
+-                        .iter_mut()
+-                        .find(|r| r.execution.id == issued.owner)
++                        .iter()
++                        .position(|r| r.execution.id == issued.owner)
+                         .ok_or(EIO)?;
++                    if let Err(error) = result {
++                        pr_warn!(
++                            "G16: execution {} completed with {:?}; later work on its queue is cancelled\n",
++                            engine.jobs[at].execution.id,
++                            error
++                        );
++                        // Later jobs on this queue may already be published,
++                        // so the publication latch alone cannot stop them.
++                        // They complete with ECANCELED instead of reporting
++                        // success over this job's incomplete output.
++                        engine.jobs[at].execution.firmware.lock().rejected = true;
++                        crate::g16_queue_fail::cancel_later(&mut engine.jobs, at, ECANCELED);
++                    }
++                    let job = &mut engine.jobs[at];
+                     job.pending -= 1;
+                     if job.pending == 0 && crate::module_parameters::timeline.value() >= 2 {
+                         let n = &this.device.notifications;
+@@ -2464,6 +2488,11 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+         // completion must never subsume an earlier dependency in DRM.
+         let unique = dma_fence::FenceContexts::new(1, c_str!("asahi_m4"), FENCE_KEY)?
+             .new_fence(0, Completion)?;
++        // A queue that has failed work stays failed: refuse new work instead
++        // of accepting jobs that can only complete with ECANCELED.
++        if queue.firmware.lock().rejected {
++            return Err(ECANCELED);
++        }
+         let vm_id = queue.vm;
+         let firmware = queue.firmware.clone();
+         let mut timestamps = KVec::new();
+diff --git a/drivers/gpu/drm/asahi/g16_queue_fail.rs b/drivers/gpu/drm/asahi/g16_queue_fail.rs
+new file mode 100644
+index 000000000000..05a36fc50ec0
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_queue_fail.rs
+@@ -0,0 +1,37 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright 2026 The Asahi Linux Contributors
++
++//! Failure of a public queue.
++//!
++//! Userspace may split one submission into several jobs whose later parts
++//! rely on queue order, and only the last one carries the application's
++//! fence. Once a command on a queue fails, later jobs on that queue must not
++//! report success over its missing or incomplete output: they complete with
++//! ECANCELED, and the queue refuses new work. Pure list logic, host-tested.
++
++/// A queued job as this logic sees it.
++pub(crate) trait QueueJob {
++    type Error: Copy;
++    /// Whether both jobs were submitted to the same public queue.
++    fn same_queue(&self, other: &Self) -> bool;
++    fn error_mut(&mut self) -> &mut Option<Self::Error>;
++}
++
++/// Gives every job after `jobs[at]` (in submission order) on the same queue
++/// `cancelled`, unless it already failed. Returns how many jobs changed.
++pub(crate) fn cancel_later<J: QueueJob>(jobs: &mut [J], at: usize, cancelled: J::Error) -> usize {
++    if at >= jobs.len() {
++        return 0;
++    }
++    let (head, later) = jobs.split_at_mut(at + 1);
++    let failed = &head[at];
++    let mut changed = 0;
++    for job in later.iter_mut().filter(|job| job.same_queue(failed)) {
++        let error = job.error_mut();
++        if error.is_none() {
++            *error = Some(cancelled);
++            changed += 1;
++        }
++    }
++    changed
++}
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index c5590b36d850..ada2aff8e261 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -33,10 +33,11 @@ pub(crate) struct FirmwareQueues {
+     /// Render Works counted into the queue's shared notifier (two per render).
+     notified_works: u32,
+     pub(crate) last: [Option<Stamp>; 2],
+-    /// A command on this queue was rejected before publication. Userspace
+-    /// may split one submission into several jobs whose later parts rely on
+-    /// queue order, so every later job on the queue fails with ECANCELED
+-    /// instead of running without that command.
++    /// A command on this queue was rejected before publication or completed
++    /// with an error. Userspace may split one submission into several jobs
++    /// whose later parts rely on queue order, so every later job on the queue
++    /// fails with ECANCELED instead of running without that command, and new
++    /// submissions are refused.
+     pub(crate) rejected: bool,
+     /// Per lane (TA, 3D, compute), the latest stamps its published Works
+     /// waited on as firmware items, keyed by address.
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/queue-fail.rs b/tools/testing/selftests/drivers/gpu/asahi/queue-fail.rs
+new file mode 100644
+index 000000000000..6f621ae78b5e
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/queue-fail.rs
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Included by test-queue-fail.py with the production g16_queue_fail.rs.
++use g16_queue_fail::{cancel_later, QueueJob};
++
++#[derive(Debug, PartialEq)]
++struct J(u32, Option<i32>);
++
++impl QueueJob for J {
++    type Error = i32;
++    fn same_queue(&self, other: &Self) -> bool {
++        self.0 == other.0
++    }
++    fn error_mut(&mut self) -> &mut Option<i32> {
++        &mut self.1
++    }
++}
++
++const ENOMEM: i32 = -12;
++const ECANCELED: i32 = -125;
++
++#[test]
++fn later_jobs_on_the_queue_are_cancelled() {
++    let mut jobs = vec![J(1, None), J(1, Some(ENOMEM)), J(2, None), J(1, None), J(1, None)];
++    assert_eq!(cancel_later(&mut jobs, 1, ECANCELED), 2);
++    assert_eq!(
++        jobs,
++        [J(1, None), J(1, Some(ENOMEM)), J(2, None), J(1, Some(ECANCELED)), J(1, Some(ECANCELED))]
++    );
++}
++
++#[test]
++fn earlier_jobs_and_other_queues_are_untouched() {
++    let mut jobs = vec![J(1, None), J(2, None), J(1, Some(ENOMEM)), J(2, None)];
++    assert_eq!(cancel_later(&mut jobs, 2, ECANCELED), 0);
++    assert_eq!(jobs, [J(1, None), J(2, None), J(1, Some(ENOMEM)), J(2, None)]);
++}
++
++#[test]
++fn an_existing_error_is_kept() {
++    let mut jobs = vec![J(1, Some(ENOMEM)), J(1, Some(ENOMEM)), J(1, None)];
++    assert_eq!(cancel_later(&mut jobs, 0, ECANCELED), 1);
++    assert_eq!(jobs, [J(1, Some(ENOMEM)), J(1, Some(ENOMEM)), J(1, Some(ECANCELED))]);
++}
++
++#[test]
++fn the_last_job_or_an_out_of_range_index_changes_nothing() {
++    let mut jobs = vec![J(1, None), J(1, Some(ENOMEM))];
++    assert_eq!(cancel_later(&mut jobs, 1, ECANCELED), 0);
++    assert_eq!(cancel_later(&mut jobs, 5, ECANCELED), 0);
++    assert_eq!(cancel_later(&mut Vec::<J>::new(), 0, ECANCELED), 0);
++    assert_eq!(jobs, [J(1, None), J(1, Some(ENOMEM))]);
++}
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-queue-fail.py b/tools/testing/selftests/drivers/gpu/asahi/test-queue-fail.py
+new file mode 100755
+index 000000000000..13e1c3f3cda0
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-queue-fail.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host tests of the G16 queue-failure cancellation (g16_queue_fail.rs).
++
++Compiles the production module with queue-fail.rs. rustc must be on PATH;
++no device or kernel build is needed.
++"""
++from pathlib import Path
++import os
++import subprocess
++import tempfile
++
++here = Path(__file__).resolve()
++root = next(p for p in here.parents if (p / 'drivers/gpu/drm/asahi/g16_queue_fail.rs').exists())
++source = f'''#![allow(dead_code)]
++#[path = "{root / 'drivers/gpu/drm/asahi/g16_queue_fail.rs'}"] mod g16_queue_fail;
++''' + here.with_name('queue-fail.rs').read_text()
++
++with tempfile.TemporaryDirectory(prefix='asahi-queue-fail-') as temp:
++    temp = Path(temp)
++    (temp / 'test.rs').write_text(source)
++    subprocess.run([os.environ.get('RUSTC', 'rustc'), '--edition=2021', '--test', '-Dwarnings',
++                    str(temp / 'test.rs'), '-o', str(temp / 'test')], check=True)
++    subprocess.run([str(temp / 'test')], check=True)

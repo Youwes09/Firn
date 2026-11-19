@@ -1,0 +1,1005 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Cody Ho <codyho@stanford.edu>
+Date: Mon, 14 Sep 2026 08:08:38 +0000
+Subject: [PATCH] drm/asahi: queue M4 dependencies in firmware and share
+ compute roots
+
+Keep compute save storage in the retained Work allocation, with fresh private
+scratch and marker VAs in the persistent VM. Remove CPU CDM/resource reads,
+resource snapshots, PTE replacement and per-command page-table forks.
+
+Encode resolved UAPI dependencies as type-1 firmware barriers before TA/CDM.
+Account for their ring entries and preserve internal partial-render barriers,
+external completion fences and backing ownership through VM destruction.
+
+M4 hardware passes queued mixed partials/TVB growth, 64 computes sharing one
+ASID/message/kick, local-indirect GPU geometry and delayed fences/timestamps.
+Host ownership, failure, scheduling, batching, notification and wire checks pass.
+The mixed replay needs a full caller post-dispatch CDM barrier; qualification
+adds it only in the test caller and documents the separate Mesa follow-up.
+
+(cherry picked from commit f6f4ab9555573ee1db0b5f199cd8a252c83a3c69)
+(cherry picked from commit 038dab903d3ee943199d6b87830aa53df23b889f)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |   3 +-
+ drivers/gpu/drm/asahi/g16_cdm.rs     | 109 -----------------
+ drivers/gpu/drm/asahi/g16_compute.rs |  20 ++--
+ drivers/gpu/drm/asahi/g16_drm.rs     |  74 +++---------
+ drivers/gpu/drm/asahi/g16_queue.rs   |  26 ++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 173 +++++++++++++++++++--------
+ drivers/gpu/drm/asahi/g16_vm.rs      |  76 ++++--------
+ drivers/gpu/drm/asahi/m4_pgtable.rs  |  62 +---------
+ 8 files changed, 202 insertions(+), 341 deletions(-)
+ delete mode 100644 drivers/gpu/drm/asahi/g16_cdm.rs
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index fc1637eb01d2..18739fce8bf8 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -8,7 +8,6 @@
+ #[path = "m4_float.rs"]
+ mod float;
+ mod g16;
+-mod g16_cdm;
+ mod g16_compute;
+ mod g16_drm;
+ mod g16_fw;
+@@ -111,7 +110,7 @@ fn probe(
+     params: {
+         fw_trace: u32 {
+             default: 0,
+-            description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches",
++            description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies",
+         },
+         tvb_max_blocks: u32 {
+             default: 331,
+diff --git a/drivers/gpu/drm/asahi/g16_cdm.rs b/drivers/gpu/drm/asahi/g16_cdm.rs
+deleted file mode 100644
+index d8b4f758af86..000000000000
+--- a/drivers/gpu/drm/asahi/g16_cdm.rs
++++ /dev/null
+@@ -1,109 +0,0 @@
+-// SPDX-License-Identifier: GPL-2.0-only
+-// Copyright The Gravity Linux Contributors
+-
+-//! Bounded Apple9 CDM walker and resource-table selection.
+-//! Reads happen after scheduler dependencies complete, because earlier GPU
+-//! commands can produce a later command stream or its resource table.
+-
+-use kernel::prelude::*;
+-
+-pub(crate) trait Memory {
+-    fn read(&self, address: u64, out: &mut [u8]) -> Result;
+-    fn cover(&self, address: u64, size: u64, permissions: u32) -> Result;
+-}
+-
+-pub(crate) fn resource(memory: &impl Memory, base: u64, end: u64) -> Result<u64> {
+-    if base >= end || (base | end) & 3 != 0 {
+-        return Err(EINVAL);
+-    }
+-    memory.cover(base, end - base, 2)?;
+-    let mut cursor = base;
+-    let mut stack = [0u64; 32];
+-    let mut depth = 0;
+-    let mut selected = None;
+-    // A fixed block budget also bounds cycles. No recursion or allocations
+-    // proportional to the user-supplied virtual span are needed.
+-    for _ in 0..4096 {
+-        if cursor < base || cursor.checked_add(4).ok_or(EINVAL)? > end || cursor & 3 != 0 {
+-            return Err(EINVAL);
+-        }
+-        let mut body = [0u8; 0x28];
+-        memory.read(cursor, &mut body[..4])?;
+-        let header = u32::from_le_bytes(body[..4].try_into().map_err(|_| EINVAL)?);
+-        let kind = header >> 29;
+-        let mode = (header >> 27) & 3;
+-        let size = match kind {
+-            0 => match mode {
+-                0 => 0x28,
+-                1 => 0x24,
+-                2 => 0x18,
+-                _ => return Err(EINVAL),
+-            },
+-            1 => 8,
+-            2..=4 => 4,
+-            _ => return Err(EINVAL),
+-        };
+-        let next = cursor.checked_add(size).ok_or(EINVAL)?;
+-        if next > end {
+-            return Err(EINVAL);
+-        }
+-        // Keep the header already decoded, even if userspace concurrently
+-        // edits its BO. Such edits cannot expand our validated bounds.
+-        memory.read(cursor + 4, &mut body[4..size as usize])?;
+-        let word = |off| u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
+-        match kind {
+-            0 => {
+-                if word(12) & 0x4000_0000 == 0 {
+-                    return Err(EINVAL);
+-                }
+-                let pipeline = (u64::from(word(12) & 255) << 40) | (u64::from(word(8)) << 6);
+-                let resource = (pipeline & !0x7fff).checked_add(0x50000).ok_or(EINVAL)?;
+-                let aperture = 0x100_0000_0000..0x101_0000_0000;
+-                if !aperture.contains(&pipeline) || !aperture.contains(&resource) {
+-                    return Err(EINVAL);
+-                }
+-                if selected.is_some_and(|old| old != resource) {
+-                    return Err(ENOTSUPP);
+-                }
+-                selected = Some(resource);
+-                if mode != 0 {
+-                    let indirect = (u64::from(word(0x10)) << 32) | u64::from(word(0x14));
+-                    // Local-indirect adds three local dimensions to the three
+-                    // global thread dimensions. Validate the complete readable
+-                    // object, but leave GPU-produced values to the hardware.
+-                    let geometry_size = if mode == 2 { 24 } else { 12 };
+-                    memory.cover(indirect, geometry_size, 2)?;
+-                }
+-                cursor = next;
+-            }
+-            1 => {
+-                if header & (1 << 28) != 0 {
+-                    if depth == stack.len() {
+-                        return Err(EINVAL);
+-                    }
+-                    stack[depth] = next;
+-                    depth += 1;
+-                }
+-                cursor = (u64::from(header & 255) << 32) | u64::from(word(4));
+-            }
+-            2 => {
+-                if depth != 0 || next != end {
+-                    return Err(EINVAL);
+-                }
+-                let resource = selected.ok_or(ENOTSUPP)?;
+-                memory.cover(resource, 0x4000, 2)?;
+-                return Ok(resource);
+-            }
+-            3 => cursor = next,
+-            4 => {
+-                if depth == 0 {
+-                    return Err(EINVAL);
+-                }
+-                depth -= 1;
+-                cursor = stack[depth];
+-            }
+-            _ => return Err(EINVAL),
+-        }
+-    }
+-    Err(EINVAL)
+-}
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index f76862acb193..603c80c8e5cb 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -9,8 +9,8 @@
+ pub(crate) const STATS: u64 = QUEUE + 0x8000;
+ pub(crate) const SHARED: u64 = 0xffff_fc20_0200_0000;
+ 
+-// Fixed opening compute namespace used by the working shim. These pages
+-// belong to the device and are aliased into whichever client root is active.
++// Device-owned opening namespace. Client roots share only the FList directory
++// and spill pool; each command receives distinct scratch/marker VAs instead.
+ pub(crate) const DIRECTORY: u64 = 0x70_02cc_0000;
+ pub(crate) const DIRECTORY_SIZE: usize = 0x18000;
+ pub(crate) const BUFFER_BASE: u64 = 0x70_0310_8000;
+@@ -25,7 +25,7 @@
+ 
+ /// Drain/invalidate compute caches before entering the caller's CDM stream.
+ /// Back-to-back M4 Works require the full barrier used by Mesa's CDM helper;
+-/// 0x60000168 does not preserve dependent SSBO writes across context views.
++/// 0x60000168 does not preserve dependent SSBO writes between Works.
+ pub(crate) fn entry(stream: u64) -> [u8; 12] {
+     let mut out = [0; 12];
+     u32_at(&mut out, 0, 0x600fffff);
+@@ -73,7 +73,7 @@ pub(crate) struct Parameters {
+     pub(crate) sampler_count: u32,
+     pub(crate) scratch: u64,
+     pub(crate) marker: u64,
+-    pub(crate) resource: u64,
++    pub(crate) save_area: u64,
+ }
+ 
+ #[derive(Clone, Copy)]
+@@ -168,12 +168,12 @@ fn valid(&self) -> bool {
+         u32_at(&mut out, 12, a.context);
+         u64_at(&mut out, 16, a.notifier);
+         let registers = [
+-            (0x1a510, self.resource),
++            (0x1a510, self.save_area),
+             (0x1a420, a.cdm_entry.unwrap_or(self.cdm)),
+-            (0x1a4d0, self.resource + 0x1480),
+-            (0x1a4d8, self.resource + 0x1488),
+-            (0x1a4e0, self.resource + 0x1490),
+-            (0x1a4e8, self.resource + 0x1498),
++            (0x1a4d0, self.save_area + 0x1480),
++            (0x1a4d8, self.save_area + 0x1488),
++            (0x1a4e0, self.save_area + 0x1490),
++            (0x1a4e8, self.save_area + 0x1498),
+             (0x1a440, 0x154024201),
+             (0x1a458, 0x10c08ae0),
+             (0x101d9, 0x1c),
+@@ -200,7 +200,7 @@ fn valid(&self) -> bool {
+         for (off, value) in [
+             (0x720, a.register_table),
+             (0x760, a.microsequence),
+-            (0x798, self.resource),
++            (0x798, self.save_area),
+             (0x7a0, self.cdm_end - 4),
+             (
+                 0x7e8,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 594c0cebba90..2db07ed9e844 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -85,49 +85,12 @@ struct Vm {
+     render_broken: bool,
+ }
+ 
+-/// A submit-time view of bindings, pinned through actual hardware completion.
+-/// GPU writes to the backing remain visible when the worker reads after its
+-/// input dependencies; no file-state lock is needed in the worker.
+-struct MemoryView {
+-    mappings: KVec<Mapping>,
++/// Retain submit-time GEM and timestamp bindings until actual completion.
++/// Command preparation never reads caller CDM or shader resource data.
++struct Bindings {
++    _mappings: KVec<Mapping>,
+     _timestamps: KVec<TimestampBuffer>,
+ }
+-impl crate::g16_cdm::Memory for MemoryView {
+-    fn cover(&self, start: u64, size: u64, permissions: u32) -> Result {
+-        Mapping::cover(&self.mappings, start, size, permissions)
+-    }
+-
+-    fn read(&self, mut address: u64, mut out: &mut [u8]) -> Result {
+-        if out.is_empty() {
+-            return Ok(());
+-        }
+-        self.cover(address, out.len() as u64, 2)?;
+-        while !out.is_empty() {
+-            let mapping = self
+-                .mappings
+-                .iter()
+-                .find(|m| m.range.contains(&address))
+-                .ok_or(EINVAL)?;
+-            let delta = address - mapping.range.start;
+-            let mut size = out.len().min((mapping.range.end - address) as usize);
+-            let offset = mapping.offset
+-                + if mapping.single {
+-                    size = size.min(0x4000 - (delta as usize & 0x3fff));
+-                    delta & 0x3fff
+-                } else {
+-                    delta
+-                };
+-            mapping
+-                .sg
+-                .object()
+-                .vmap::<u8>()?
+-                .read(&mut out[..size], offset.try_into()?)?;
+-            address += size as u64;
+-            out = &mut out[size..];
+-        }
+-        Ok(())
+-    }
+-}
+ 
+ struct FileState {
+     next_vm: u32,
+@@ -807,9 +770,6 @@ fn detach(&self, runtime: &mut crate::g16::Bootstrap) -> Result {
+         runtime.release_render_vm(self.space.lock().roots())?;
+         let compute = self.compute_space.lock();
+         runtime.release_render_vm(compute.roots())?;
+-        for view in &compute.views {
+-            runtime.release_render_vm(view.roots())?;
+-        }
+         Ok(())
+     }
+ 
+@@ -989,7 +949,7 @@ struct Execution {
+     _owner: Arc<Mutex<FileState>>,
+     render_space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+-    memory: MemoryView,
++    _bindings: Bindings,
+     support: Option<Arc<crate::g16::Support>>,
+     parameters: KVec<Parameters>,
+     timestamps: KVec<[u64; 4]>,
+@@ -1100,12 +1060,8 @@ fn run(this: Arc<Self>) {
+                         let execution = job.execution.clone();
+                         let compute =
+                             matches!(execution.parameters[job.next], Parameters::Compute(_));
+-                        // Wake on completion of explicitly declared dependencies.
+-                        // NONE dependencies admit immediately; independent engines
+-                        // and successive render stages can execute concurrently.
+-                        if !runtime.dependencies_done(&dependencies)? {
+-                            continue;
+-                        }
++                        // Intra-queue UAPI dependencies are encoded into firmware
++                        // rings; preparation does not read GPU-produced data.
+                         engine.issued.reserve(1, GFP_KERNEL)?;
+                         let job = &mut engine.jobs[index];
+                         crate::mem::sync();
+@@ -1116,13 +1072,14 @@ fn run(this: Arc<Self>) {
+                                 p,
+                                 execution.support.as_deref().ok_or(EIO)?,
+                                 execution.timestamps[job.next],
++                                &dependencies,
+                             ),
+                             Parameters::Compute(p) => runtime.submit_compute(
+                                 execution.firmware.clone(),
+                                 &mut execution.space.lock(),
+                                 p,
+-                                &execution.memory,
+                                 execution.timestamps[job.next],
++                                &dependencies,
+                             ),
+                         };
+                         let receipt = match receipt {
+@@ -1539,7 +1496,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+             }
+             if computes != 0 && !vm.compute_ready {
+                 vm.render_broken = true;
+-                runtime.map_compute_work(&mut vm.compute_space.lock())?;
++                runtime.map_compute_work(&mut vm.compute_space.lock(), vm.kernel.clone())?;
+                 vm.compute_ready = true;
+                 vm.render_broken = false;
+             }
+@@ -1548,8 +1505,8 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+         for mapping in &vm.mappings {
+             mappings.push(mapping.clone(), GFP_KERNEL)?;
+         }
+-        let memory = MemoryView {
+-            mappings,
++        let bindings = Bindings {
++            _mappings: mappings,
+             _timestamps: timestamp_bindings,
+         };
+         vm.pending.retain(|f| {
+@@ -1563,7 +1520,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+             try_pin_init!(Execution {
+                 id: NEXT_EXECUTION.fetch_add(1, Ordering::Relaxed), firmware, barriers,
+                 device: device.into(), _owner: inner.state.clone(),
+-                render_space: vm.space.clone(), space: vm.compute_space.clone(), memory,
++                render_space: vm.space.clone(), space: vm.compute_space.clone(), _bindings: bindings,
+                 support: vm.render_support.clone(),
+                 parameters, timestamps, completion: worker_completion,
+                 started: AtomicBool::new(false), work <- new_work!("m4-execution"),
+@@ -1585,8 +1542,7 @@ fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) ->
+         // No fallible operation follows output-fence publication.
+         // Publish the hardware lifetime fence directly. Scheduler finished
+         // fences can be downgraded to scheduled dependencies by DRM; our
+-        // external inputs must wait for actual completion (including CPU CDM
+-        // preparation that may read data produced by the dependency).
++        // external inputs must wait for actual hardware completion.
+         let fence = completion.clone();
+         admission.push(completion, GFP_KERNEL)?;
+         let job = job.arm();
+@@ -1634,7 +1590,7 @@ fn compute_parameters(&self, c: &uapi::drm_asahi_cmd_compute) -> Result<compute:
+             sampler_count: c.sampler_count,
+             scratch: compute::SCRATCH,
+             marker: compute::MARKER,
+-            resource: 0,
++            save_area: 0,
+         })
+     }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_queue.rs b/drivers/gpu/drm/asahi/g16_queue.rs
+index cffc37e1804f..e270a49adfd7 100644
+--- a/drivers/gpu/drm/asahi/g16_queue.rs
++++ b/drivers/gpu/drm/asahi/g16_queue.rs
+@@ -98,6 +98,32 @@ impl Queue {
+     out
+ }
+ 
++/// General G16 dependency, before a consumer TA or CDM Work. Type 1 participates
++/// in firmware's dynamic dependency graph; the internal TA-to-fragment prelude
++/// retains type 0 for partial-render scheduling.
++pub(crate) fn dependency(
++    stamp: u64,
++    wait: u32,
++    event: u32,
++    stamp_self: u32,
++    uuid: u32,
++) -> [u8; 0x40] {
++    let mut out = [0; 0x40];
++    u32_at(&mut out, 0, 4);
++    u64_at(&mut out, 4, stamp);
++    u64_at(&mut out, 0xc, stamp);
++    for (off, value) in [
++        (0x14, wait),
++        (0x20, event),
++        (0x24, stamp_self),
++        (0x28, uuid),
++        (0x30, 1),
++    ] {
++        u32_at(&mut out, off, value);
++    }
++    out
++}
++
+ pub(crate) fn channel(
+     queue: u64,
+     head: u16,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 203fff96769a..d519d7adeeea 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -254,16 +254,16 @@ fn reserve_flight(
+         &mut self,
+         queue: &FirmwareQueues,
+         render: bool,
+-        root: Option<u64>,
++        root: u64,
++        entries: [u32; 3],
+     ) -> Result {
+         if self.render_failed {
+             return Err(EIO);
+         }
+         // Check scarce resources before allocating any per-Work storage.
+-        // A live render VM can share its ASID; compute uses a private root.
++        // Commands in either persistent VM root can share its live ASID.
+         if !(1..64).any(|i| {
+-            self.context_users[i] == 0
+-                || root.is_some_and(|r| self.context_roots[i].is_some_and(|s| s.low == r))
++            self.context_users[i] == 0 || self.context_roots[i].is_some_and(|s| s.low == root)
+         }) {
+             self.report_pressure(1, "ASIDs");
+             return Err(EBUSY);
+@@ -317,13 +317,12 @@ fn reserve_flight(
+             if let Some(lanes) = &queue.lanes {
+                 let lane = lanes[stage];
+                 let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+-                let entries = if render { 2 } else { 1 };
+                 let read = fw.read_u32(lane.pointers)?;
+                 let done = fw.read_u32(lane.pointers + 0x30)?;
+                 if read >= 0x500 || done >= 0x500 || lane.head >= 0x500 {
+                     return Err(EIO);
+                 }
+-                if !ring_room(lane.head, read, done, entries, 0x500) {
++                if !ring_room(lane.head, read, done, entries[stage], 0x500) {
+                     self.report_pressure(16, "workqueue");
+                     return Err(EBUSY);
+                 }
+@@ -449,16 +448,6 @@ pub(crate) fn flush(&mut self) -> Result {
+         Ok(())
+     }
+ 
+-    pub(crate) fn dependencies_done(&self, dependencies: &[Option<Stamp>; 2]) -> Result<bool> {
+-        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+-        for stamp in dependencies.iter().flatten() {
+-            if fw.read_u32(stamp.address)? != stamp.value {
+-                return Ok(false);
+-            }
+-        }
+-        Ok(true)
+-    }
+-
+     pub(crate) fn poison(&mut self) {
+         self.render_failed = true;
+     }
+@@ -498,6 +487,34 @@ fn trace_publication(&self, kind: &str, id: u64) -> Result {
+         Ok(())
+     }
+ 
++    /// Optional qualification trace. Readiness is observed only for diagnostics;
++    /// it does not decide whether a dependent Work can enter the firmware ring.
++    fn trace_dependencies(
++        &self,
++        kind: &str,
++        id: u64,
++        context: u32,
++        dependencies: &[Option<Stamp>; 2],
++    ) -> Result {
++        if *crate::module_parameters::fw_trace.value() & 8 != 0 {
++            let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++            let mut unfinished = 0;
++            for dep in dependencies.iter().flatten() {
++                unfinished += usize::from(fw.read_u32(dep.address)? != dep.value);
++            }
++            dev_info!(
++                self.dev.as_ref(),
++                "G16: staged {} {:#x} context={} dependencies={} unfinished={}\n",
++                kind,
++                id,
++                context,
++                dependencies.iter().flatten().count(),
++                unfinished
++            );
++        }
++        Ok(())
++    }
++
+     /// Dispatch events by the outstanding Work identity, never by the most
+     /// recently submitted job. Completion notifications are hints; stamps and
+     /// ring retirement remain authoritative even if event bits coalesce.
+@@ -950,9 +967,24 @@ pub(crate) fn submit_render(
+         params: &render::Parameters,
+         support: &Support,
+         timestamps: [u64; 4],
++        dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
+-        self.reserve_flight(&queue, true, Some(owner.lock().roots().low))?;
++        let root = owner.lock().roots().low;
++        let initbm = !self
++            .tvb_pools
++            .iter()
++            .any(|p| p.root == root && p.initialized);
++        self.reserve_flight(
++            &queue,
++            true,
++            root,
++            [
++                1 + u32::from(initbm) + dependencies.iter().flatten().count() as u32,
++                2,
++                0,
++            ],
++        )?;
+         self.prepare_queues(&mut queue)?;
+         let result = self.submit_render_queue(
+             &mut queue,
+@@ -961,6 +993,7 @@ pub(crate) fn submit_render(
+             params,
+             support,
+             timestamps,
++            dependencies,
+         );
+         if queue.pending == 0 {
+             queue.events = None;
+@@ -976,6 +1009,7 @@ fn submit_render_queue(
+         params: &render::Parameters,
+         support: &Support,
+         timestamps: [u64; 4],
++        dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let mut guard = owner.lock();
+         let client = &mut *guard;
+@@ -1011,6 +1045,7 @@ fn submit_render_queue(
+             owner.clone(),
+             scene,
+             timestamps,
++            dependencies,
+         );
+         if result.is_err() && !self.render_failed {
+             pool.release_scene(scene);
+@@ -1030,6 +1065,7 @@ fn submit_render_pool(
+         owner: Arc<Mutex<g16_vm::AddressSpace>>,
+         scene: u32,
+         timestamps: [u64; 4],
++        dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         if self.render_failed {
+             return Err(EIO);
+@@ -1141,7 +1177,8 @@ fn submit_render_pool(
+             .as_mut()
+             .ok_or(EIO)?
+             .write_live(a.render_shared_state, &use_count.to_le_bytes())?;
+-        let (heads, epochs) = self.publish_render(&a, &ta, &frag, queue, initbm, pool.blocks)?;
++        let (heads, epochs) =
++            self.publish_render(&a, &ta, &frag, queue, initbm, pool.blocks, dependencies)?;
+         pool.initialized = true;
+         support.submissions.store(next_submitted, Ordering::Relaxed);
+         self.render_publication += 1;
+@@ -1191,6 +1228,7 @@ fn submit_render_pool(
+         self.render_failed = false;
+         self.batch_works += 1;
+         self.trace_publication("render", va)?;
++        self.trace_dependencies("render", va, a.context_id as u32, dependencies)?;
+         Ok(receipt)
+     }
+ 
+@@ -1202,13 +1240,15 @@ fn publish_render(
+         queue: &FirmwareQueues,
+         initbm: bool,
+         blocks: u32,
++        dependencies: &[Option<Stamp>; 2],
+     ) -> Result<([u32; 2], [u32; 2])> {
+         let priority = queue.priority;
+         let lanes = queue.lanes.as_ref().ok_or(EIO)?;
+         let publication = self.render_publication;
+         let firsts = [lanes[0].head, lanes[1].head];
+         let heads = [
+-            (firsts[0] + 1 + u32::from(initbm)) % 0x500,
++            (firsts[0] + 1 + u32::from(initbm) + dependencies.iter().flatten().count() as u32)
++                % 0x500,
+             (firsts[1] + 2) % 0x500,
+         ];
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+@@ -1248,6 +1288,25 @@ fn publish_render(
+                 fw.write_live(micro, &a.fragment_microsequence())?;
+             }
+             let mut pos = firsts[stage];
++            if stage == 0 {
++                // The prelude page leaves +0x40..+0xc0 free before its
++                // microsequence. All barrier bytes share the Work's lifetime.
++                for (index, dep) in dependencies.iter().flatten().enumerate() {
++                    let address = prelude + 0x40 + index as u64 * 0x40;
++                    fw.write_live(
++                        address,
++                        &g16_fw::queue::dependency(
++                            dep.address,
++                            dep.value,
++                            dep.event,
++                            a.tiling_stamp as u32,
++                            a.tiling_uuid as u32,
++                        ),
++                    )?;
++                    fw.write_live(ring + u64::from(pos) * 8, &address.to_le_bytes())?;
++                    pos = (pos + 1) % 0x500;
++                }
++            }
+             if stage == 1 || initbm {
+                 fw.write_live(ring + u64::from(pos) * 8, &prelude.to_le_bytes())?;
+                 pos = (pos + 1) % 0x500;
+@@ -1274,9 +1333,18 @@ fn publish_render(
+ }
+ 
+ impl Bootstrap {
+-    pub(crate) fn map_compute_work(&mut self, space: &mut g16_vm::AddressSpace) -> Result {
++    pub(crate) fn map_compute_work(
++        &mut self,
++        space: &mut g16_vm::AddressSpace,
++        private: core::ops::Range<u64>,
++    ) -> Result {
+         let opening = self._opening_client.as_mut().ok_or(EIO)?;
+         for (base, size) in compute::private_ranges() {
++            // Scratch and marker are private to each command at fresh VAs.
++            // Only the device-owned FList directory and spill pool are shared.
++            if base == compute::SCRATCH || base == compute::MARKER {
++                continue;
++            }
+             for va in (base..base + size as u64).step_by(0x4000) {
+                 if space.low.translate(va)?.is_some() {
+                     return Err(EEXIST);
+@@ -1290,6 +1358,7 @@ pub(crate) fn map_compute_work(&mut self, space: &mut g16_vm::AddressSpace) -> R
+                 )?;
+             }
+         }
++        space.init_compute_private(private);
+         space.sync();
+         Ok(())
+     }
+@@ -1297,21 +1366,26 @@ pub(crate) fn map_compute_work(&mut self, space: &mut g16_vm::AddressSpace) -> R
+     pub(crate) fn submit_compute(
+         &mut self,
+         queues: Arc<Mutex<FirmwareQueues>>,
+-        parent: &mut g16_vm::AddressSpace,
++        client: &mut g16_vm::AddressSpace,
+         params: &compute::Parameters,
+-        memory: &impl crate::g16_cdm::Memory,
+         timestamps: [u64; 4],
++        dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
+-        self.reserve_flight(&queue, false, None)?;
++        self.reserve_flight(
++            &queue,
++            false,
++            client.roots().low,
++            [0, 0, 1 + dependencies.iter().flatten().count() as u32],
++        )?;
+         self.prepare_queues(&mut queue)?;
+         let result = self.submit_compute_queue(
+             &mut queue,
+             queues.clone(),
+-            parent,
++            client,
+             params,
+-            memory,
+             timestamps,
++            dependencies,
+         );
+         if queue.pending == 0 {
+             queue.events = None;
+@@ -1323,26 +1397,16 @@ fn submit_compute_queue(
+         &mut self,
+         queue: &mut FirmwareQueues,
+         queues: Arc<Mutex<FirmwareQueues>>,
+-        parent: &mut g16_vm::AddressSpace,
++        client: &mut g16_vm::AddressSpace,
+         params: &compute::Parameters,
+-        memory: &impl crate::g16_cdm::Memory,
+         timestamps: [u64; 4],
++        dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
+         let lane = queue.lanes.as_ref().ok_or(EIO)?[2];
+         let priority = queue.priority;
+ 
+-        parent.views.reserve(1, GFP_KERNEL)?;
+-        // SAFETY: The parent lock serializes table access. The view is retained
+-        // in parent.views before publication, and those views drop first.
+-        let mut view = unsafe { parent.fork()? };
+-        let client = &mut view;
+-        // Different firmware compute queues can suspend/resume independently.
+-        // Their scratch and resume marker must not alias the device's opening
+-        // context (or another Work), even when they use the same virtual VA.
+-        for (base, size) in [(params.scratch, 0x20000), (params.marker, 0x4000)] {
+-            client.low.unmap_pages(base..base + size as u64)?;
+-            client.alloc_low(base, size, crate::pgtable::prot::PROT_GPU_SHARED_RW)?;
+-        }
++        let mut params = *params;
++        client.prepare_compute(&mut params)?;
+         let space = client.roots();
+         if self.render_failed {
+             return Err(EIO);
+@@ -1351,15 +1415,14 @@ fn submit_compute_queue(
+             return Err(EINVAL);
+         }
+         let ordinal = queue.compute_count;
+-        let resource = crate::g16_cdm::resource(memory, params.cdm, params.cdm_end)?;
+-        client.snapshot(memory, resource)?;
+-        let mut params = *params;
+-        params.resource = resource;
+         let work = self.allocate_work(false)?;
+         let alias = 0x71_0000_0000 + self.compute_publication * 0x4000;
+         if alias + 0x4000 > 0x72_0000_0000 {
+             return Err(ENOSPC);
+         }
++        // Firmware save state is independent of shader resource tables.
++        // The upper half of the zeroed Work page is GPU-addressable storage.
++        params.save_area = alias + 0x2000;
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         let pa = fw.physical(work)?;
+         self._address_space.as_mut().ok_or(EIO)?.low.map_pages(
+@@ -1387,8 +1450,6 @@ fn submit_compute_queue(
+         a.context = self.acquire_context(space, 1)?;
+         a.identity = (u64::from(a.context) << 32) | (a.identity & 0xffff_ffff);
+         a.register_identity = (u64::from(a.context) << 32) | 1;
+-        // Retain the new tables and snapshot before publishing any Work.
+-        parent.views.push(view, GFP_KERNEL)?;
+         self.render_failed = true;
+         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
+         let work = params.work(&a).ok_or(EINVAL)?;
+@@ -1400,7 +1461,7 @@ fn submit_compute_queue(
+         let count32 = u32::try_from(count).map_err(|_| ENOSPC)?;
+ 
+         let first = lane.head;
+-        let head = (first + 1) % 0x500;
++        let head = (first + 1 + dependencies.iter().flatten().count() as u32) % 0x500;
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         fw.write_live(compute::SHARED_STATE, &count32.to_le_bytes())?;
+         fw.write_live(a.work, &work)?;
+@@ -1420,7 +1481,24 @@ fn submit_compute_queue(
+         let previous = a.stamp.checked_sub(0x100).ok_or(EINVAL)?;
+         fw.write_live(a.driver_stamp, &previous.to_le_bytes())?;
+         fw.write_live(a.firmware_stamp, &previous.to_le_bytes())?;
+-        fw.write_live(lane.ring + u64::from(first) * 8, &a.work.to_le_bytes())?;
++        let mut pos = first;
++        for (index, dep) in dependencies.iter().flatten().enumerate() {
++            // Between the threshold/timestamps and the CDM entry trampoline.
++            let address = a.work + 0x1900 + index as u64 * 0x40;
++            fw.write_live(
++                address,
++                &g16_fw::queue::dependency(
++                    dep.address,
++                    dep.value,
++                    dep.event,
++                    a.stamp,
++                    a.identity as u32,
++                ),
++            )?;
++            fw.write_live(lane.ring + u64::from(pos) * 8, &address.to_le_bytes())?;
++            pos = (pos + 1) % 0x500;
++        }
++        fw.write_live(lane.ring + u64::from(pos) * 8, &a.work.to_le_bytes())?;
+         let channel = priority as usize * 3 + 2;
+         let mut pending_lane = lane;
+         pending_lane.head = head;
+@@ -1455,6 +1533,7 @@ fn submit_compute_queue(
+         self.render_failed = false;
+         self.batch_works += 1;
+         self.trace_publication("compute", a.work)?;
++        self.trace_dependencies("compute", a.work, a.context, dependencies)?;
+         Ok(Receipt { id: a.work, stamp })
+     }
+ }
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 9b1a562cde31..aad5d4f1d5ae 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -22,14 +22,11 @@ pub(crate) struct Roots {
+ }
+ 
+ pub(crate) struct AddressSpace {
+-    // Forks borrow unchanged parent tables, so destroy them before those
+-    // tables and their pinned GEM/private backing.
+-    pub(crate) views: KVec<AddressSpace>,
+     pub(crate) low: UatPageTable,
+     pub(crate) high: UatPageTable,
+     // Drop the owned tables before releasing their mapped pages.
+     pages: KVec<(u64, Owned<Page>)>,
+-    snapshots: KVec<Owned<Page>>,
++    compute_scratch: core::ops::Range<u64>,
+     render_scratch: core::ops::Range<u64>,
+ }
+ 
+@@ -46,23 +43,7 @@ pub(crate) fn new() -> Result<Self> {
+             low: UatPageTable::new_with_ias(OAS, IAS)?,
+             high: UatPageTable::new_with_ias(OAS, IAS)?,
+             pages: KVec::new(),
+-            snapshots: KVec::new(),
+-            views: KVec::new(),
+-            render_scratch: 0..0,
+-        })
+-    }
+-
+-    /// # Safety
+-    /// Retain the fork in this parent's views before publishing it. The parent
+-    /// lock serializes shared-table edits and views are destroyed first.
+-    pub(crate) unsafe fn fork(&self) -> Result<Self> {
+-        Ok(Self {
+-            // SAFETY: The caller supplies the parent lifetime and serialization.
+-            low: unsafe { self.low.fork()? },
+-            high: unsafe { self.high.fork()? },
+-            pages: KVec::new(),
+-            snapshots: KVec::new(),
+-            views: KVec::new(),
++            compute_scratch: 0..0,
+             render_scratch: 0..0,
+         })
+     }
+@@ -175,6 +156,27 @@ pub(crate) fn prepare_render(&mut self, p: &mut crate::g16_render::Parameters) -
+         Ok(())
+     }
+ 
++    /// Compute commands use distinct private scratch addresses in the caller's
++    /// reserved kernel aperture. The persistent root and all backing remain
++    /// owned by the VM; allocating a later command never replaces a live PTE.
++    pub(crate) fn init_compute_private(&mut self, range: core::ops::Range<u64>) {
++        self.compute_scratch = range;
++    }
++
++    pub(crate) fn prepare_compute(&mut self, p: &mut crate::g16_compute::Parameters) -> Result {
++        let base = self.compute_scratch.start;
++        let end = base.checked_add(0x24000).ok_or(ENOMEM)?;
++        if end > self.compute_scratch.end {
++            return Err(ENOMEM);
++        }
++        // Failed allocations retain their pages and cannot reuse this range.
++        self.compute_scratch.start = end;
++        self.alloc_low(base, 0x24000, prot::PROT_GPU_SHARED_RW)?;
++        p.scratch = base;
++        p.marker = base + 0x20000;
++        Ok(())
++    }
++
+     /// Allocate all ten-block growth pages before changing visible mappings.
+     pub(crate) fn alloc_tvb_blocks(&mut self, base: u64, count: usize) -> Result<bool> {
+         if count == 0 || count > 10 || base & 0x7fff != 0 {
+@@ -238,38 +240,6 @@ pub(crate) fn write_low(&mut self, mut va: u64, mut bytes: &[u8]) -> Result {
+         Ok(())
+     }
+ 
+-    /// Preserve the caller DVA (its table can contain self-pointers), while
+-    /// firmware preemption writes go to a fresh context-owned physical page.
+-    pub(crate) fn snapshot(
+-        &mut self,
+-        memory: &impl crate::g16_cdm::Memory,
+-        address: u64,
+-    ) -> Result {
+-        if !self.snapshots.is_empty() {
+-            return Err(EEXIST);
+-        }
+-        let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+-        page.with_pointer_into_page(0, UAT_PGSZ, |ptr| {
+-            // SAFETY: The fresh unpublished page is exclusively owned here.
+-            memory.read(address, unsafe {
+-                core::slice::from_raw_parts_mut(ptr, UAT_PGSZ)
+-            })
+-        })?;
+-        clean_page(&page);
+-        let phys = page.phys();
+-        self.snapshots.push(page, GFP_KERNEL)?;
+-        // Retain backing before the first possible translation change.
+-        self.low.unmap_pages(address..address + UAT_PGSZ as u64)?;
+-        self.low.map_pages(
+-            address..address + UAT_PGSZ as u64,
+-            phys,
+-            prot::PROT_GPU_SHARED_RW,
+-            false,
+-        )?;
+-        self.sync();
+-        Ok(())
+-    }
+-
+     /// Publish page-table edits. Owned client pages are cleaned when initialized;
+     /// mapping changes do not need to sweep all existing client allocations.
+     /// Firmware-private storage is managed separately by FirmwareSpace.
+diff --git a/drivers/gpu/drm/asahi/m4_pgtable.rs b/drivers/gpu/drm/asahi/m4_pgtable.rs
+index 5c6ab57f189e..93324dbd9191 100644
+--- a/drivers/gpu/drm/asahi/m4_pgtable.rs
++++ b/drivers/gpu/drm/asahi/m4_pgtable.rs
+@@ -241,50 +241,9 @@ pub(crate) struct UatPageTable {
+     owned_tables: KVec<OwnedTable>,
+     dirty_tables: KVec<(PhysicalAddr, Cell<bool>)>,
+     invalidations: RefCell<KVec<Range<u64>>>,
+-    copy_on_write: bool,
+ }
+ 
+ impl UatPageTable {
+-    /// Copy the root and share unchanged child tables. Writes to the fork
+-    /// copy only the affected branch before modifying any inherited PTE.
+-    ///
+-    /// # Safety
+-    /// The source tables must outlive the fork. The caller serializes CPU
+-    /// access to shared tables and keeps their mapped backing alive.
+-    pub(crate) unsafe fn fork(&self) -> Result<Self> {
+-        if !self.ttb_owned || self.copy_on_write {
+-            return Err(EINVAL);
+-        }
+-        let mut copy = Self::new_with_ias(
+-            self.oas_mask.count_ones(),
+-            self.ias_mask.count_ones() as usize,
+-        )?;
+-        Self::copy_table(self.ttb, copy.ttb)?;
+-        copy.copy_on_write = true;
+-        Ok(copy)
+-    }
+-
+-    fn copy_table(source: PhysicalAddr, destination: PhysicalAddr) -> Result {
+-        // SAFETY: The source is owned or borrowed under fork's lifetime
+-        // contract; the destination is an exclusively owned unpublished page.
+-        let src = unsafe { Page::borrow_phys_unchecked(&source) };
+-        let dst = unsafe { Page::borrow_phys_unchecked(&destination) };
+-        src.with_pointer_into_page(0, UAT_PGSZ, |s| {
+-            dst.with_pointer_into_page(0, UAT_PGSZ, |d| {
+-                for i in 0..UAT_NPTE {
+-                    // SAFETY: Aligned PTEs within two distinct live pages.
+-                    unsafe {
+-                        (*d.cast::<Pte>().add(i)).store(
+-                            (*s.cast::<Pte>().add(i)).load(Ordering::Relaxed),
+-                            Ordering::Relaxed,
+-                        );
+-                    }
+-                }
+-                Ok(())
+-            })
+-        })
+-    }
+-
+     /// Allocate a root with the address width of this GPU generation.
+     /// G16 has 64 top-level entries (42 address bits per TTBR), while
+     /// G13/G14 use 8 entries (39 bits per TTBR).
+@@ -308,7 +267,6 @@ pub(crate) fn new_with_ias(oas: u32, ias: usize) -> Result<Self> {
+             owned_tables: KVec::new(),
+             dirty_tables,
+             invalidations: RefCell::new(KVec::new()),
+-            copy_on_write: false,
+         })
+     }
+ 
+@@ -356,7 +314,6 @@ pub(crate) fn new_with_ttb_and_ias(
+             owned_tables: KVec::new(),
+             dirty_tables: KVec::new(),
+             invalidations: RefCell::new(KVec::new()),
+-            copy_on_write: false,
+         })
+     }
+ 
+@@ -524,24 +481,7 @@ fn with_pages<F>(&mut self, iova_range: Range<u64>, walk: Walk, mut cb: F) -> Re
+                                 upte.store(upte_val, Ordering::Relaxed);
+                             }
+                             if upte_val & PTE_TYPE_BITS == PTE_TYPE_LEAF_TABLE {
+-                                let inherited = upte_val & self.oas_mask & (!UAT_PGMSK as u64);
+-                                if write && self.copy_on_write
+-                                    && !self.owned_tables.iter().any(|t| t.phys == inherited)
+-                                {
+-                                    self.mark_dirty(phys)?;
+-                                    let page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+-                                    let private = page.phys();
+-                                    Self::copy_table(inherited, private)?;
+-                                    self.owned_tables.push(OwnedTable {
+-                                        phys: private, parent: phys, index: upidx,
+-                                    }, GFP_KERNEL)?;
+-                                    let _ = Page::into_phys(page);
+-                                    self.mark_dirty(private)?;
+-                                    upte.store(private | PTE_TYPE_LEAF_TABLE, Ordering::Relaxed);
+-                                    Ok(Some(private))
+-                                } else {
+-                                    Ok(Some(inherited))
+-                                }
++                                Ok(Some(upte_val & self.oas_mask & (!UAT_PGMSK as u64)))
+                             } else if upte_val == 0 || !alloc {
+                                 pr_debug!("UATPageTable::with_pages: no level {}\n", level);
+                                 Ok(None)

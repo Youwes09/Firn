@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 9 Oct 2026 14:04:27 -0400
+Subject: [PATCH] drm/asahi: G16: compute_deps=2 keeps same-queue render waits
+ in firmware
+
+compute_deps=1 sends every render -> compute edge inside a submission
+through a host round trip (stamp, notification, pump wake, publish),
+~0.4 ms each against ~0.07 ms when the firmware chains them (Lethal
+36.5 -> 29.8 fps from #20 to #92). compute_deps=2 keeps waits on the
+queue's own render lanes as firmware items and resolves only other
+queues' stamps in the kernel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit e1b0217f4170a3bd807a29ffb471a55f7ff009d4)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  2 +-
+ drivers/gpu/drm/asahi/g16_runtime.rs | 19 +++++++++++++++++--
+ 2 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 0e127292e411..162da80a1527 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -194,7 +194,7 @@ fn probe<'bound>(
+         },
+         compute_deps: u32 {
+             default: 1,
+-            description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts)",
++            description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts); 2 as 1, but waits on the same queue's own render lanes stay firmware items (in-submission render -> compute edges without a host round trip)",
+         },
+         max_lane_works: u32 {
+             default: 64,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index ae02c95b1696..f9bddeff56de 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -2489,8 +2489,23 @@ fn resolve_compute_dependencies(
+             return Ok(*dependencies);
+         }
+         let own_lane = queue.lanes.as_ref().map(|lanes| lanes[2].firmware_stamp());
++        // compute_deps=2: a wait on this queue's own render lanes (the
++        // render -> compute edge inside one submission) stays a firmware
++        // item, so the firmware starts the compute right after the render
++        // instead of after a host round trip. Other queues stay kernel-side.
++        let own_render = queue
++            .lanes
++            .as_ref()
++            .map(|lanes| [lanes[0].firmware_stamp(), lanes[1].firmware_stamp()]);
++        let keep_own_render = crate::module_parameters::compute_deps.value() == 2;
++        let mut kept = [None; 2];
+         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+-        for dep in dependencies.iter().flatten() {
++        for (slot, dep) in dependencies.iter().enumerate() {
++            let Some(dep) = dep else { continue };
++            if keep_own_render && own_render.is_some_and(|r| r.contains(&dep.address)) {
++                kept[slot] = Some(*dep);
++                continue;
++            }
+             if own_lane != Some(dep.address) {
+                 let now = fw.read_u32(dep.address)?;
+                 let done = g16_stamp::reached(now, dep.value);
+@@ -2503,7 +2518,7 @@ fn resolve_compute_dependencies(
+             }
+         }
+         queue.deps.admit();
+-        Ok([None; 2])
++        Ok(kept)
+     }
+ 
+     pub(crate) fn submit_compute(

@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:26:27 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the render_preempt parameter
+
+render_preempt=0 gave render queues compute's non-preemptible profile.
+It was the default briefly after a Dota 2 firmware wedge (2026-10-06)
+and was reverted to preemptible renders (1) before production; nothing
+sets 0. Render queues keep the native preemptible TA/3D profile.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    | 4 ----
+ drivers/gpu/drm/asahi/g16_runtime.rs | 7 ++-----
+ 2 files changed, 2 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index ff04c816bddd..0f30e15086ce 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -205,10 +205,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
+         },
+-        render_preempt: u32 {
+-            default: 1,
+-            description: "1 lets firmware suspend and restart TA/3D work (preemptible render queues); 0 gives them compute's non-preemptible profile",
+-        },
+         dependency_kind: u32 {
+             default: 1,
+             description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 50d7287a1690..acbdbcf3be07 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -728,12 +728,9 @@ fn init_queues(
+             // Native TA/3D profiles allow firmware to suspend and restart
+             // renders. Their Work/scratch leases survive until the final
+             // notifier/driver stamp, including intervening partial runs.
+-            // Compute remains non-preemptible, matching the M1/M2 driver.
+-            // Preemptible renders can wedge the firmware when a compressed
+-            // render is timesliced against other contexts (Dota 2 with two
+-            // compositors, 2026-10-06), so they are off by default.
++            // Compute remains non-preemptible, matching the M1/M2 driver;
+             // Metal's compute queues use the native preemptible profile.
+-            let preemptible = stage != 2 && crate::module_parameters::render_preempt.value() != 0;
++            let preemptible = stage != 2;
+             if !preemptible {
+                 descriptor[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
+                 descriptor[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());

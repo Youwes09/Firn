@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 11:36:06 -0600
+Subject: [PATCH] arm64: dts: apple: t8132: Add the GPU's firmware ABI
+ placeholder
+
+The binding requires apple,firmware-abi, which the bootloader fills in
+as it hands the GPU over. Add the placeholder the other Apple GPU nodes
+carry.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-gpu.dtsi | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-gpu.dtsi b/arch/arm64/boot/dts/apple/t8132-gpu.dtsi
+index 938e028794c0..b0c0422d93ce 100644
+--- a/arch/arm64/boot/dts/apple/t8132-gpu.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132-gpu.dtsi
+@@ -38,6 +38,8 @@ gpu: gpu@302600000 {
+ 		memory-region-names = "ttbs", "pagetables", "l2",
+ 				      "handoff", "firmware";
+ 		#cooling-cells = <2>;
++		/* Filled in by the bootloader. */
++		apple,firmware-abi = <0 0 0>;
+ 		/* Enabled only after the loader has reserved the firmware state. */
+ 		status = "disabled";
+ 	};

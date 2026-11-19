@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 06:02:50 -0400
+Subject: [PATCH] drm/asahi: G16 hang report names each flight's command stream
+ and queue ordinal
+
+Add the VDM encoder (render) or CDM stream (compute) address and the
+Work's ordinal on its queue to the hang-flight lines, so stalls can be
+matched to the userspace commands that produced them.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 259fb4b8ce7162e9f347a87d60f65acff1dedf0d)
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 0ee9046f1396..3297bc87460f 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -209,6 +209,10 @@ pub(super) struct Flight {
+     id: u64,
+     owner: Arc<Mutex<FirmwareQueues>>,
+     context: u32,
++    /// Diagnostics: the command stream (VDM encoder or CDM) and the Work's
++    /// ordinal on its queue, to join hang reports with userspace traces.
++    stream: u64,
++    ordinal: u64,
+     started: Instant<Monotonic>,
+     stamps: [Option<Stamp>; 2],
+     driver_stamps: [Option<Stamp>; 2],
+@@ -966,9 +970,9 @@ fn dump_hang_state(&self) -> Result {
+         }
+         for flight in self.flights.iter().take(24) {
+             // blocked: bit 1 notifier, 2 ring, 3 channel, 4 control reply.
+-            dev_err!(self.dev.as_ref(), "G16: hang flight Work={:#x} context={} age_ms={} render={} blocked={:#x} notifier={:?}\n",
++            dev_err!(self.dev.as_ref(), "G16: hang flight Work={:#x} context={} age_ms={} render={} stream={:#x} ordinal={} blocked={:#x} notifier={:?}\n",
+                      flight.id, flight.context, flight.started.elapsed().as_millis(),
+-                     flight.render.is_some(), flight.blocked,
++                     flight.render.is_some(), flight.stream, flight.ordinal, flight.blocked,
+                      flight.notifier_count.map(|(addr, total)| (word(addr), total)));
+             for (stage, stamp) in flight.stamps.iter().enumerate() {
+                 if let Some(stamp) = stamp {
+@@ -1987,6 +1991,8 @@ fn submit_render_pool(
+                 id: va,
+                 owner: queues,
+                 context: a.context_id as u32,
++                stream: params.encoder,
++                ordinal: queue_ordinal,
+                 started: Instant::now(),
+                 notifier_count,
+                 stamps_seen: None,
+@@ -2402,6 +2408,8 @@ fn submit_compute_queue(
+                 id: a.work,
+                 owner: queues.clone(),
+                 context: a.context,
++                stream: params.cdm,
++                ordinal,
+                 started: Instant::now(),
+                 notifier_count: None,
+                 stamps_seen: None,

@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 10 Oct 2026 01:59:55 -0400
+Subject: [PATCH] drm/asahi: G16: Fail a command whose dependency can't be
+ reached
+
+The pump holds a render or compute whose awaited stamp isn't reached
+(compute_deps=1, render_deps=1), returning EBUSY and retrying after the
+next completion. With no Work in flight anywhere nothing can ever write
+that stamp, so the hold never clears: the job sits in the pump forever
+with an idle GPU, silently. On the Air under muvm a job sat there with
+nothing issued until GEM_CLOSE's drain timed out.
+
+Fail just that command with EDEADLK and log the stamp, its value and the
+wanted value. Both checks run before the runtime marks a publication in
+progress, so the error stays with that job.
+
+Folded in:
+- WIP drm/asahi: G16 fail a command whose dependency can't be reached
+- WIP drm/asahi: G16 an unreachable hold must persist 1 s before failing
+
+[WIP drm/asahi: G16 an unreachable hold must persist 1 s before failing]
+Require the same wait to stay unreached with nothing in flight for one
+second before failing the command, re-polling every 500 ms while such a
+hold is recorded. A recorded hold that later resolves is logged as a near
+miss (first 16), so a soak shows whether the condition ever races.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16.rs         |  6 +++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 71 +++++++++++++++++++++++++---
+ 2 files changed, 70 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 145379a5d57a..1388dc262f76 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -250,6 +250,9 @@ pub(crate) struct Bootstrap {
+     context_roots: [Option<crate::g16_vm::Roots>; 64],
+     context_users: [u32; 64],
+     pressure_reported: core::sync::atomic::AtomicU64,
++    hold_key: core::sync::atomic::AtomicU64,
++    hold_since_ns: core::sync::atomic::AtomicI64,
++    hold_near_misses: core::sync::atomic::AtomicU32,
+     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
+ }
+ 
+@@ -742,6 +745,9 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             context_roots: [None; 64],
+             context_users: [0; 64],
+             pressure_reported: core::sync::atomic::AtomicU64::new(0),
++            hold_key: core::sync::atomic::AtomicU64::new(0),
++            hold_since_ns: core::sync::atomic::AtomicI64::new(0),
++            hold_near_misses: core::sync::atomic::AtomicU32::new(0),
+             render_support: kernel::sync::Arc::new(
+                 core::sync::atomic::AtomicU64::new(0),
+                 GFP_KERNEL,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index f4193e870793..ae02c95b1696 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -283,6 +283,52 @@ fn fragment_stamp_base() -> u32 {
+ impl Bootstrap {
+     /// Report each exhausted resource once, without logging every retry or
+     /// enabling firmware KTrace (which changes command execution timing).
++    /// A Work held on a stamp waits for a completion to advance it. With no
++    /// Work in flight anywhere nothing can write that stamp, so the hold
++    /// would never clear and the pump would keep the job forever with an
++    /// idle GPU. If the same wait stays unreached with nothing in flight
++    /// for a second (the pump re-polls every 256 ms), fail just that
++    /// command and say why. A recorded hold that later resolves is counted
++    /// and logged as a near miss.
++    fn hold_check(&self, kind: &str, dep: &Stamp, now: u32, done: bool) -> Result {
++        let key = dep.address ^ (u64::from(dep.value) << 32).rotate_left(16);
++        let recorded = self.hold_key.load(Ordering::Relaxed);
++        if done {
++            if recorded == key {
++                self.hold_key.store(0, Ordering::Relaxed);
++                let misses = self.hold_near_misses.fetch_add(1, Ordering::Relaxed) + 1;
++                if misses <= 16 {
++                    dev_info!(self.dev.as_ref(),
++                              "G16: {} wait on stamp {:#x} want {:#x} resolved after being unreachable with nothing in flight (near miss #{})\n",
++                              kind, dep.address, dep.value, misses);
++                }
++            }
++            return Ok(());
++        }
++        if !self.flights.is_empty() {
++            if recorded == key {
++                self.hold_key.store(0, Ordering::Relaxed);
++            }
++            return Ok(());
++        }
++        let now_ns = monotonic_ns();
++        if recorded != key {
++            self.hold_key.store(key, Ordering::Relaxed);
++            self.hold_since_ns.store(now_ns, Ordering::Relaxed);
++            return Ok(());
++        }
++        if now_ns - self.hold_since_ns.load(Ordering::Relaxed) < 1_000_000_000 {
++            return Ok(());
++        }
++        self.hold_key.store(0, Ordering::Relaxed);
++        dev_err!(
++            self.dev.as_ref(),
++            "G16: {} wait on stamp {:#x} want {:#x} (now {:#x}, event {}) unreachable with nothing in flight for 1 s; failing the command\n",
++            kind, dep.address, dep.value, now, dep.event
++        );
++        Err(EDEADLK)
++    }
++
+     fn report_pressure(&self, bit: u64, resource: &str) {
+         // Every resource here is released when work retires. Backpressure with
+         // nothing in flight can therefore never clear: it means an accounting
+@@ -1432,8 +1478,11 @@ pub(crate) fn watchdog_remaining_ms(&self) -> u32 {
+             .min()
+             .unwrap_or(10000);
+         // Wedge detection samples render progress a few times per window.
++        // A recorded unreachable hold is re-checked within its grace second.
+         if self.flights.iter().any(|f| f.render.is_some()) {
+             watchdog.min(250)
++        } else if self.hold_key.load(Ordering::Relaxed) != 0 {
++            watchdog.min(500)
+         } else {
+             watchdog
+         }
+@@ -1780,7 +1829,12 @@ fn resolve_render_dependencies(
+             // always a tiling-stage wait.
+             let lane_ordered = slot == 0 && fragment_stage && own_fragment == Some(dep.address);
+             let ta_wait = slot == 0 && !fragment_stage && own_fragment == Some(dep.address);
+-            if !lane_ordered && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value) {
++            let now = if lane_ordered { 0 } else { fw.read_u32(dep.address)? };
++            let done = lane_ordered || g16_stamp::reached(now, dep.value);
++            if !lane_ordered {
++                self.hold_check("render", dep, now, done)?;
++            }
++            if !done {
+                 if ta_wait {
+                     queue.deps.ta_held += 1;
+                 } else {
+@@ -2437,12 +2491,15 @@ fn resolve_compute_dependencies(
+         let own_lane = queue.lanes.as_ref().map(|lanes| lanes[2].firmware_stamp());
+         let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+         for dep in dependencies.iter().flatten() {
+-            if own_lane != Some(dep.address)
+-                && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value)
+-            {
+-                queue.deps.compute_held += 1;
+-                queue.deps.defer();
+-                return Err(EBUSY);
++            if own_lane != Some(dep.address) {
++                let now = fw.read_u32(dep.address)?;
++                let done = g16_stamp::reached(now, dep.value);
++                self.hold_check("compute", dep, now, done)?;
++                if !done {
++                    queue.deps.compute_held += 1;
++                    queue.deps.defer();
++                    return Err(EBUSY);
++                }
+             }
+         }
+         queue.deps.admit();

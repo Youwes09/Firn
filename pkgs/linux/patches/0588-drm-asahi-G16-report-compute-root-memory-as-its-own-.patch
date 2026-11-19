@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 17:07:22 -0500
+Subject: [PATCH] drm/asahi: G16: report compute root memory as its own fdinfo
+ region
+
+drm-total-kernel summed the pages owned by both roots of each VM. Now
+that a VM's first compute command allocates a 32 MiB private compute
+pool, report the compute roots separately so the per-client cost of
+compute is visible: drm-total-kernel/drm-resident-kernel cover the
+render roots (render private storage and its pool, render scratch,
+tiler blocks), drm-total-compute/drm-resident-compute the compute
+roots (the private compute pool and compute scratch). The regions are
+disjoint; a client's driver-owned total is their sum.
+---
+ drivers/gpu/drm/asahi/g16_drm.rs | 27 +++++++++++++++------------
+ 1 file changed, 15 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 3522772d09b3..769bf3ab965a 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -687,22 +687,25 @@ fn open(device: &Device) -> Result<Pin<KBox<Self>>> {
+     }
+     const HAS_SHOW_FDINFO: bool = true;
+     /// GEM handles as the standard `memory` region, plus the pages the driver
+-    /// owns for this client's VMs (render private storage and its operand
+-    /// pool, scratch, tiler blocks) as the resident `kernel` region.
++    /// owns for this client's VMs as two resident regions: `kernel`, the
++    /// render roots (render private storage and its operand pool, render
++    /// scratch, tiler blocks), and `compute`, the compute roots (each private
++    /// compute pool and compute scratch). The regions are disjoint.
+     fn show_fdinfo(&self, file: &DrmFile, printer: &mut drm::file::Printer) {
+         printer.gem_memory_stats(file);
+-        let mut owned = 0u64;
++        let (mut render, mut compute) = (0u64, 0u64);
+         for vm in self.state.lock().vms.iter() {
+-            for space in [&vm.space, &vm.compute_space] {
+-                owned += space.lock().owned_bytes() as u64;
+-            }
++            render += vm.space.lock().owned_bytes() as u64;
++            compute += vm.compute_space.lock().owned_bytes() as u64;
++        }
++        for (owned, region) in [(render, c_str!("kernel")), (compute, c_str!("compute"))] {
++            let stats = drm::file::MemoryStats {
++                private: owned,
++                resident: owned,
++                ..Default::default()
++            };
++            printer.memory_stats(&stats, true, region);
+         }
+-        let stats = drm::file::MemoryStats {
+-            private: owned,
+-            resident: owned,
+-            ..Default::default()
+-        };
+-        printer.memory_stats(&stats, true, c_str!("kernel"));
+     }
+ }
+ 

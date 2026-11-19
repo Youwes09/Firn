@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Asahi Lina <lina@asahilina.net>
+Date: Sun, 26 May 2024 17:30:04 +0900
+Subject: [PATCH] arm64: Increase kernel stack size to 32K
+
+To work around stack overflow with the drm/asahi driver plus zram
+swap-out, TBD if we can refactor things enough to bring it under 16K
+again...
+
+Signed-off-by: Asahi Lina <lina@asahilina.net>
+(cherry picked from commit 76cb0e95c8407ebb3b664566bb2d488f03f9d890)
+---
+ arch/arm64/include/asm/memory.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/arm64/include/asm/memory.h b/arch/arm64/include/asm/memory.h
+index a2b7a33966ff..ff4a0425db10 100644
+--- a/arch/arm64/include/asm/memory.h
++++ b/arch/arm64/include/asm/memory.h
+@@ -112,7 +112,7 @@
+ 
+ #define DIRECT_MAP_PHYSMEM_END	__pa(PAGE_END - 1)
+ 
+-#define MIN_THREAD_SHIFT	(14 + KASAN_THREAD_SHIFT)
++#define MIN_THREAD_SHIFT	(15 + KASAN_THREAD_SHIFT)
+ 
+ /*
+  * VMAP'd stacks are allocated at page granularity, so we must ensure that such

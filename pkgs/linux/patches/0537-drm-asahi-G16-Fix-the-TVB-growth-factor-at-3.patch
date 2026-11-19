@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:27:49 -0400
+Subject: [PATCH] drm/asahi: G16: Fix the TVB growth factor at 3
+
+tvb_growth (default 3, as Apple8) was a debug override of the growth
+factor per firmware allocation request. Production never changed it.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ----
+ drivers/gpu/drm/asahi/g16_tvb.rs  | 3 +--
+ 2 files changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index bf87f8729d6b..a32151df196f 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -181,10 +181,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: GPU performance controller base pstate (0: ADT value; 10 is the top state)",
+         },
+-        tvb_growth: u32 {
+-            default: 3,
+-            description: "TVB growth factor per firmware allocation request (debug; 3 as Apple8)",
+-        },
+         tvb_max_blocks: u32 {
+             default: 2193,
+             description: "Maximum retained 128 KiB TVB blocks per context (11 through 6579)",
+diff --git a/drivers/gpu/drm/asahi/g16_tvb.rs b/drivers/gpu/drm/asahi/g16_tvb.rs
+index 0f79bc47d3e1..a06f1075f767 100644
+--- a/drivers/gpu/drm/asahi/g16_tvb.rs
++++ b/drivers/gpu/drm/asahi/g16_tvb.rs
+@@ -145,8 +145,7 @@ pub(crate) fn grow(
+         // pages. Give it the same 3x headroom used by Apple8's growth policy.
+         // M4 expands its page list when it consumes this event's reply, so
+         // publication stays on the verified allocation-event path.
+-        let factor = (crate::module_parameters::tvb_growth.value()).max(2);
+-        let mut new = old.saturating_mul(factor).min(limit).max(old);
++        let mut new = old.saturating_mul(3).min(limit).max(old);
+         if new > fw.read_u32(a.buffer_manager + 0x38)? || new * 8 > 0x10000 || new * 16 > 0x1c000 {
+             return Err(EIO);
+         }

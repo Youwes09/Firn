@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 10:23:53 -0400
+Subject: [PATCH] drm/asahi: G16: lifecycle parameter for per-render lifecycle
+ words (default: original constants)
+
+Every render published the same tiling and fragment lifecycle words
+(0x08009f52_0900a6ba/bb) and Work uuids, for every client. Metal's
+captures show a unique pair per render: the high word steps by one and
+the low word by two per render (fragment even, tiling odd), the same
+low word as the Work uuid. If firmware keys a Work by this identity, a
+repeat could leave a fragment Work unstarted with every wait met, which
+matches the A4 render stall.
+
+Derive both words from the device-wide render publication count, keeping
+the tag bytes. The lifecycle parameter (default 1) selects this; 0
+restores the constants. cc_pattern (default 0) is a separate experiment
+following Metal's per-render completion_control, 0 on every fifth render
+of a queue and 3 otherwise.
+
+Folded in:
+- drm/asahi: Give each G16 render its own lifecycle words
+- drm/asahi: G16 lifecycle defaults to the original constants
+
+[drm/asahi: G16 lifecycle defaults to the original constants]
+Per-render lifecycle words did not change the A4 render stall (block 28),
+so production keeps the constants every earlier kernel used. The
+per-render form stays available as lifecycle=1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  8 ++++++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 16 ++++++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 9564def81a7d..de273f64b281 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -124,6 +124,14 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
+         },
++        lifecycle: u32 {
++            default: 0,
++            description: "Experiment: render lifecycle words (regs 0x1ca10/0x14a1/0xa349 tiling, 0x160e0/0x1499/0xa341 fragment) and Work uuids. 1: unique per render, as Metal: two device-wide counters, the high word +1 and the low word +2 per render (fragment even, tiling odd). 0: the original constants for every render (production)",
++        },
++        cc_pattern: u32 {
++            default: 0,
++            description: "Experiment: 1 overrides completion_control with Metal's observed per-render pattern, 0 on every fifth render of a queue and 3 otherwise. 0: completion_control as configured",
++        },
+         ta3d_item: u32 {
+             default: 0,
+             description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 3297bc87460f..dbab14f9b1d0 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1865,6 +1865,22 @@ fn submit_render_pool(
+         a.fragment_user_timestamp_end = timestamps[3];
+         // From here any publication failure quarantines the roots.
+         self.render_failed = true;
++        if crate::module_parameters::lifecycle.value() != 0 {
++            // Metal never repeats these: each render takes the next value of
++            // two device-wide counters, keeping the tag in the top byte. Our
++            // original constants gave every render of every client the same
++            // identity.
++            let n = self.render_publication as u32;
++            let high = 0x0800_0000 | (0x9f52u32.wrapping_add(n) & 0xffff);
++            let low = 0x0900_0000 | (0xa6bau32.wrapping_add(n.wrapping_mul(2)) & 0xfffe);
++            params.fragment_lifecycle = (u64::from(high) << 32) | u64::from(low);
++            params.tiling_lifecycle = (u64::from(high) << 32) | u64::from(low + 1);
++            a.fragment_uuid = u64::from(low);
++            a.tiling_uuid = u64::from(low + 1);
++        }
++        if crate::module_parameters::cc_pattern.value() != 0 {
++            params.completion_control = if queue_ordinal % 5 == 1 { 0 } else { 3 };
++        }
+         let mut ta = params.tiling_work(&a).ok_or(EINVAL)?;
+         let mut frag = params.fragment_work(&a).ok_or(EINVAL)?;
+         // Keep firmware's internal profiling destinations distinct from the

@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:26:27 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the context_sticky debug parameter
+
+context_sticky=1 kept firmware context slots bound to their VM, giving
+new VMs never-bound slots first. Production never set it; a VM takes its
+preferred slot when idle, else the first idle one, as before.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    | 4 ----
+ drivers/gpu/drm/asahi/g16_runtime.rs | 8 +-------
+ 2 files changed, 1 insertion(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 0f30e15086ce..32d53907bccc 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -201,10 +201,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
+         },
+-        context_sticky: u32 {
+-            default: 0,
+-            description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
+-        },
+         dependency_kind: u32 {
+             default: 1,
+             description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index acbdbcf3be07..125615273eb7 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1948,15 +1948,9 @@ pub(crate) fn invalidate_client(&self, client: &g16_vm::AddressSpace) {
+ 
+     fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<u32> {
+         let existing = (1..64).find(|&i| self.context_roots[i].is_some_and(|r| r.low == roots.low));
+-        let sticky = crate::module_parameters::context_sticky.value() != 0;
+         let slot = existing
+             .or_else(|| {
+-                if sticky {
+-                    // Debug: never rebind a slot while an unbound one exists.
+-                    (1..64)
+-                        .find(|&i| self.context_roots[i].is_none())
+-                        .or_else(|| (1..64).find(|&i| self.context_users[i] == 0))
+-                } else if self.context_users[preferred] == 0 {
++                if self.context_users[preferred] == 0 {
+                     Some(preferred)
+                 } else {
+                     (1..64).find(|&i| self.context_users[i] == 0)

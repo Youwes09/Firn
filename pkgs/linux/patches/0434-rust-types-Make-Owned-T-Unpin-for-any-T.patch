@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 3 Oct 2026 22:48:21 -0400
+Subject: [PATCH] rust: types: Make Owned<T> Unpin for any T
+
+Owned<T> holds T through a pointer, like KBox<T>, so it is Unpin for any T.
+Without this, Owned<Page> (Page now wraps Opaque) is !Unpin and so is any
+structure holding one, which v7.3's Mutex guards cannot mutably deref.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RvQieG9SGoR3ZeSdSguHnB
+---
+ rust/kernel/types.rs | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/rust/kernel/types.rs b/rust/kernel/types.rs
+index 2c0d10cf71ce..65f45dc66050 100644
+--- a/rust/kernel/types.rs
++++ b/rust/kernel/types.rs
+@@ -479,6 +479,9 @@ pub struct Owned<T: Ownable> {
+     _p: PhantomData<T>,
+ }
+ 
++// `Owned<T>` owns `T` through a pointer, like `KBox<T>`: moving it never moves the `T`.
++impl<T: Ownable> Unpin for Owned<T> {}
++
+ // SAFETY: It is safe to send `Owned<T>` to another thread when the underlying `T` is `Send` because
+ // it effectively means sharing `&mut T` (which is safe because `T` is `Send`).
+ unsafe impl<T: Ownable + Send> Send for Owned<T> {}

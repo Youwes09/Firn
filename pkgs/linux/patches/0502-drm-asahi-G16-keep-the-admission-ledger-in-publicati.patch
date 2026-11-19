@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 12 Oct 2026 07:56:58 -0400
+Subject: [PATCH] drm/asahi: G16: keep the admission ledger in publication
+ order
+
+Ledger::remove searched the (lane, head) and (channel, target) lists and
+swap_removed the match, scrambling their order, at 0.5 us per Work on
+Dota (#179). Retirement is mostly oldest first, so removing in place keeps
+the lists in publication order and the entry being retired is usually
+found at the front; the shift moves only small pairs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index a2cef52d425e..866d357fa95d 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -397,13 +397,15 @@ fn remove(&mut self, f: &Flight) -> Result {
+             if book.works == 0 {
+                 self.lanes.swap_remove(i);
+             }
++            // Publication order, and retirement is mostly oldest first: the
++            // entry is usually at the front. remove() keeps that order.
+             let i = self.heads.iter().position(|&e| e == (pointers, head)).ok_or(EIO)?;
+-            self.heads.swap_remove(i);
++            self.heads.remove(i).map_err(|_| EIO)?;
+         }
+         for &(channel, target) in &f.channels {
+             if channel != usize::MAX {
+                 let i = self.targets.iter().position(|&e| e == (channel, target)).ok_or(EIO)?;
+-                self.targets.swap_remove(i);
++                self.targets.remove(i).map_err(|_| EIO)?;
+             }
+         }
+         Ok(())

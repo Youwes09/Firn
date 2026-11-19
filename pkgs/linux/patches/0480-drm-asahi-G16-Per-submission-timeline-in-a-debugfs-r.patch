@@ -1,0 +1,557 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 08:58:07 -0400
+Subject: [PATCH] drm/asahi: G16: Per-submission timeline in a debugfs ring
+ (timeline=1/2)
+
+Debug parameter for attributing GPU idle at submission boundaries. When
+set, each submission logs one line as its fence signals: the CNTVCT tick
+at the ioctl, input fences still pending at the ioctl, microseconds from
+the ioctl to the scheduler running the job, to its first and last
+publication and to completion, and admission deferrals with their reasons
+(backpressure bits; 0x100 a dependency hold). Off by default.
+
+Folded in:
+- WIP drm/asahi: G16 per-submission timeline (timeline=1)
+- WIP drm/asahi: G16 timeline lines in microseconds, with pid and file id
+- WIP drm/asahi: G16 timeline=2 splits completion and kick latency
+- WIP drm/asahi: G16 timeline records into a debugfs binary ring
+
+[WIP drm/asahi: G16 timeline lines in microseconds, with pid and file id]
+CNTVCT runs at 1 GHz on T8132, not 24 MHz: #150's deltas were in 24 ns
+units. Also name the client: pid, and a per-file id since every muvm guest
+submits from the one krun process.
+
+[WIP drm/asahi: G16 timeline=2 splits completion and kick latency]
+timeline=2 adds, per submission: the doorbell after its first
+publication, and for the completion message that retired it the IRQ
+time (recv_message_early, stamp only), RTKit's workqueue delivery, the
+pump's wake and the retire scan. With GPU timestamps on the same 1 GHz
+counter this attributes GPU end -> fence signal and publish -> GPU start.
+
+[WIP drm/asahi: G16 timeline records into a debugfs binary ring]
+timeline=1/2 no longer printk one line per submission (~1.5k lines/s
+under ER). Each retired submission is stored as a 160-byte record of
+absolute CNTVCT ticks in a fixed ring (timeline_records, default
+131072, allocated at probe only when timeline is set), read from
+debugfs asahi_m4/timeline. The format is documented in g16_timeline.rs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |   9 ++
+ drivers/gpu/drm/asahi/g16.rs          |  22 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 148 +++++++++++++++++++++++++-
+ drivers/gpu/drm/asahi/g16_notify.rs   |   9 ++
+ drivers/gpu/drm/asahi/g16_runtime.rs  |   6 ++
+ drivers/gpu/drm/asahi/g16_timeline.rs | 118 ++++++++++++++++++++
+ 6 files changed, 309 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_timeline.rs
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 00f57a04fa42..120cd17e8f8c 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -15,6 +15,7 @@
+ mod g16_power;
+ mod g16_render;
+ mod g16_stamp;
++mod g16_timeline;
+ mod g16_tvb;
+ mod g16_vm;
+ #[path = "m4_mem.rs"]
+@@ -280,5 +281,13 @@ fn probe<'bound>(
+             default: 1,
+             description: "1 advertises soft faults to userspace (needs fault_control=3; Mesa with hk 243c5ac0c43 and 31b9d1d5bfb); 0 hides them",
+         },
++        timeline: u32 {
++            default: 0,
++            description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
++        },
++        timeline_records: u32 {
++            default: 131072,
++            description: "Debug: timeline ring capacity in records (160 bytes each), allocated at probe only when timeline is nonzero",
++        },
+     },
+ }
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 1388dc262f76..672e8d414da8 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -152,8 +152,27 @@ fn shmem_map(
+         })
+     }
+ 
++    fn recv_message_early(
++        data: <Self::Data as ForeignOwnable>::Borrowed<'_>,
++        ep: u8,
++        msg: u64,
++    ) -> bool {
++        // timeline=2 only stamps the IRQ; RTKit's thread still delivers it.
++        if crate::module_parameters::timeline.value() >= 2 && ep == 0x20 && msg == 0x0042_0000_0000_0000 {
++            data.notifications
++                .last_irq
++                .store(crate::g16_drm::ticks(), core::sync::atomic::Ordering::Relaxed);
++        }
++        false
++    }
++
+     fn recv_message(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, ep: u8, msg: u64) {
+         if ep == 0x20 && msg == 0x0042_0000_0000_0000 {
++            if crate::module_parameters::timeline.value() >= 2 {
++                data.notifications
++                    .last_rx
++                    .store(crate::g16_drm::ticks(), core::sync::atomic::Ordering::Relaxed);
++            }
+             // RTKit delivers this callback in process context after the
+             // mailbox receive barrier. The worker drains the firmware rings.
+             data.notifications.notify(false);
+@@ -250,6 +269,8 @@ pub(crate) struct Bootstrap {
+     context_roots: [Option<crate::g16_vm::Roots>; 64],
+     context_users: [u32; 64],
+     pressure_reported: core::sync::atomic::AtomicU64,
++    /// Backpressure bits seen since the last take_pressure() (timeline=1).
++    pressure_seen: core::sync::atomic::AtomicU64,
+     hold_key: core::sync::atomic::AtomicU64,
+     hold_since_ns: core::sync::atomic::AtomicI64,
+     hold_near_misses: core::sync::atomic::AtomicU32,
+@@ -745,6 +766,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             context_roots: [None; 64],
+             context_users: [0; 64],
+             pressure_reported: core::sync::atomic::AtomicU64::new(0),
++            pressure_seen: core::sync::atomic::AtomicU64::new(0),
+             hold_key: core::sync::atomic::AtomicU64::new(0),
+             hold_since_ns: core::sync::atomic::AtomicI64::new(0),
+             hold_near_misses: core::sync::atomic::AtomicU32::new(0),
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index fe6b7b8f17c8..625f50e28974 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -147,6 +147,10 @@ pub(crate) struct Data {
+     runtime: Mutex<crate::g16::Bootstrap>,
+     #[pin]
+     engine: Mutex<Engine>,
++    /// timeline=1/2: the record ring and its debugfs file (dropped before the
++    /// directory).
++    timeline: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Ring>>>>,
++    _debugfs: Option<kernel::debugfs::Dir>,
+ }
+ 
+ #[vtable]
+@@ -191,6 +195,16 @@ pub(crate) fn register<'a>(
+         pdev.dma_set_mask_and_coherent(DmaMask::try_new(42)?)?;
+     }
+     let runtime = crate::g16::Bootstrap::new(pdev)?;
++    let (timeline, debugfs) = if crate::module_parameters::timeline.value() != 0 {
++        let dir = kernel::debugfs::Dir::new(c_str!("asahi_m4"));
++        let ring = crate::g16_timeline::Ring::new(
++            crate::module_parameters::timeline_records.value() as usize,
++        )?;
++        let file = KBox::pin_init(dir.read_binary_file(c_str!("timeline"), ring), GFP_KERNEL)?;
++        (Some(file), Some(dir))
++    } else {
++        (None, None)
++    };
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+@@ -199,7 +213,9 @@ pub(crate) fn register<'a>(
+         failed: AtomicBool::new(false),
+         notifications: runtime.notifications.clone(),
+         runtime <- kernel::new_mutex!(runtime),
+-        engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }), });
++        engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }),
++        timeline,
++        _debugfs: debugfs, });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     let bound: &'a platform::Device<Bound> = pdev;
+     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
+@@ -1237,15 +1253,83 @@ struct Execution {
+     timestamps: KVec<[u64; 4]>,
+     completion: dma_fence::Fence,
+     started: AtomicBool,
++    /// timeline=1: CNTVCT at the ioctl and when the scheduler ran the job,
++    /// the public queue, and input fences in total and still pending then.
++    trace: Trace,
+     #[pin]
+     work: Work<Execution>,
+ }
+ 
+ impl_has_work! { impl HasWork<Self> for Execution { self.work } }
+ 
++#[derive(Default)]
++struct Trace {
++    ioctl: u64,
++    run: AtomicU64,
++    queue: u32,
++    inputs: u32,
++    pending: u32,
++}
++
++/// The CPU's virtual counter (1 GHz on T8132).
++pub(crate) fn ticks() -> u64 {
++    let value: u64;
++    // SAFETY: Reading CNTVCT_EL0 has no side effects.
++    unsafe { core::arch::asm!("isb", "mrs {}, cntvct_el0", out(reg) value) };
++    value
++}
++
++fn trace_record(ring: &crate::g16_timeline::Ring, job: &Running) {
++    let t = &job.execution.trace;
++    let pid = match job.execution.parameters.first() {
++        Some(Parameters::Render(p)) => p.tgid,
++        Some(Parameters::Compute(p)) => p.tgid,
++        None => 0,
++    };
++    ring.push(&crate::g16_timeline::Record {
++        exec: job.execution.id,
++        pid: pid as u32,
++        // A per-file id: muvm guests all submit from the one krun process.
++        file: (Arc::as_ptr(&job.execution._owner) as usize >> 4) as u64 & 0xffff_ffff,
++        queue: t.queue,
++        cmds: job.execution.parameters.len() as u32,
++        pending: t.pending,
++        inputs: t.inputs,
++        busy: job.busy,
++        error: job.error.is_some(),
++        why: job.why,
++        ticks: [
++            t.ioctl,
++            t.run.load(Ordering::Relaxed),
++            job.first,
++            job.last,
++            ticks(),
++            job.kick,
++            job.irq,
++            job.rx,
++            job.wake,
++            job.seen,
++        ],
++    });
++}
++
+ struct Running {
+     execution: Arc<Execution>,
+     next: usize,
++    /// timeline=1: publication times, deferrals and their reasons
++    /// (backpressure bits; 0x100 a dependency hold).
++    first: u64,
++    last: u64,
++    busy: u32,
++    why: u64,
++    /// timeline=2: doorbell after the first publication, and for the
++    /// notification that retired the last Work: IRQ, RTKit delivery, pump
++    /// wake and the retire scan that saw it.
++    kick: u64,
++    irq: u64,
++    rx: u64,
++    wake: u64,
++    seen: u64,
+     pending: usize,
+     error: Option<Error>,
+     history: [KVec<Option<crate::g16::Stamp>>; 2],
+@@ -1312,6 +1396,13 @@ fn run(this: Arc<Self>) {
+                         .find(|r| r.execution.id == issued.owner)
+                         .ok_or(EIO)?;
+                     job.pending -= 1;
++                    if job.pending == 0 && crate::module_parameters::timeline.value() >= 2 {
++                        let n = &this.device.notifications;
++                        job.seen = ticks();
++                        job.irq = n.last_irq.load(Ordering::Relaxed);
++                        job.rx = n.last_rx.load(Ordering::Relaxed);
++                        job.wake = n.last_wake.load(Ordering::Relaxed);
++                    }
+                     if let Err(error) = result {
+                         job.error = Some(error);
+                     }
+@@ -1374,7 +1465,16 @@ fn run(this: Arc<Self>) {
+                         };
+                         let receipt = match receipt {
+                             Ok(receipt) => receipt,
+-                            Err(EBUSY) if !runtime.render_failed() => continue,
++                            Err(EBUSY) if !runtime.render_failed() => {
++                                if crate::module_parameters::timeline.value() != 0 {
++                                    job.busy += 1;
++                                    job.why |= match runtime.take_pressure() {
++                                        0 => 0x100,
++                                        bits => bits,
++                                    };
++                                }
++                                continue;
++                            }
+                             Err(error) if !runtime.render_failed() => {
+                                 pr_err!(
+                                     "G16: command {} preparation failed: {:?}\n",
+@@ -1392,6 +1492,13 @@ fn run(this: Arc<Self>) {
+                             id: receipt.id,
+                             owner: execution.id,
+                         };
++                        if crate::module_parameters::timeline.value() != 0 {
++                            let now = ticks();
++                            if job.next == 0 {
++                                job.first = now;
++                            }
++                            job.last = now;
++                        }
+                         job.next += 1;
+                         job.pending += 1;
+                         engine.issued.push(issued, GFP_KERNEL)?;
+@@ -1414,6 +1521,12 @@ fn run(this: Arc<Self>) {
+                     }
+                 }
+                 runtime.flush()?;
++                if crate::module_parameters::timeline.value() >= 2 {
++                    let now = ticks();
++                    for job in engine.jobs.iter_mut().filter(|j| j.first != 0 && j.kick == 0) {
++                        job.kick = now;
++                    }
++                }
+                 Ok(progress)
+             })();
+             if let Err(error) = result {
+@@ -1447,6 +1560,9 @@ fn run(this: Arc<Self>) {
+                     .expect("index found under engine lock");
+                 drop(runtime);
+                 drop(engine);
++                if let Some(ring) = &this.device.timeline {
++                    trace_record(ring, &job);
++                }
+                 if let Some(error) = job.error {
+                     job.execution.completion.set_error(error);
+                 }
+@@ -1465,6 +1581,9 @@ fn run(this: Arc<Self>) {
+                     generation.expect("checked before servicing jobs"),
+                     timeout_ms,
+                 );
++                if crate::module_parameters::timeline.value() >= 2 {
++                    this.device.notifications.last_wake.store(ticks(), Ordering::Relaxed);
++                }
+             }
+         }
+     }
+@@ -1489,6 +1608,9 @@ struct SubmissionJob {
+ impl sched::JobImpl for SubmissionJob {
+     fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+         let execution = &job.execution;
++        if crate::module_parameters::timeline.value() != 0 {
++            execution.trace.run.store(ticks(), Ordering::Relaxed);
++        }
+         // Firmware jobs cannot be replayed after a fault without a reboot.
+         if execution.started.swap(true, Ordering::AcqRel) {
+             return Err(EIO);
+@@ -1504,6 +1626,15 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+                 Running {
+                     execution: execution.clone(),
+                     next: 0,
++                    first: 0,
++                    last: 0,
++                    busy: 0,
++                    why: 0,
++                    kick: 0,
++                    irq: 0,
++                    rx: 0,
++                    wake: 0,
++                    seen: 0,
+                     pending: 0,
+                     error: None,
+                     history,
+@@ -1689,6 +1820,17 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+                 }
+             }
+         }
++        let mut trace = Trace::default();
++        if crate::module_parameters::timeline.value() != 0 {
++            trace.ioctl = ticks();
++            trace.queue = data.queue_id;
++            trace.inputs = dependencies.len() as u32;
++            trace.pending = dependencies
++                .iter()
++                // SAFETY: The vector holds a live reference to each fence.
++                .filter(|f| !unsafe { bindings::dma_fence_is_signaled(f.raw()) })
++                .count() as u32;
++        }
+         let inner = file.inner();
+         let mut admission = device.admission.lock();
+         if device.failed.load(Ordering::Acquire) {
+@@ -1830,7 +1972,7 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+                 render_space: vm.space.clone(), space: vm.compute_space.clone(), _bindings: bindings,
+                 support: vm.render_support.clone(),
+                 parameters, timestamps, completion: worker_completion,
+-                started: AtomicBool::new(false), work <- new_work!("m4-execution"),
++                started: AtomicBool::new(false), trace, work <- new_work!("m4-execution"),
+             }),
+             GFP_KERNEL,
+         )?;
+diff --git a/drivers/gpu/drm/asahi/g16_notify.rs b/drivers/gpu/drm/asahi/g16_notify.rs
+index 5cc4e40381b5..2f62cfd79a66 100644
+--- a/drivers/gpu/drm/asahi/g16_notify.rs
++++ b/drivers/gpu/drm/asahi/g16_notify.rs
+@@ -3,11 +3,17 @@
+ 
+ //! RTKit and scheduler wakeups for the single G16 submission worker.
+ 
++use core::sync::atomic::AtomicU64;
+ use kernel::sync::{CondVar, CondVarTimeoutResult, Mutex};
+ use kernel::{prelude::*, time::msecs_to_jiffies};
+ 
+ #[pin_data]
+ pub(crate) struct Notifications {
++    /// timeline=2: CNTVCT of the latest completion message at IRQ time, when
++    /// RTKit's workqueue delivered it, and when the pump last woke.
++    pub(crate) last_irq: AtomicU64,
++    pub(crate) last_rx: AtomicU64,
++    pub(crate) last_wake: AtomicU64,
+     #[pin]
+     state: Mutex<State>,
+     #[pin]
+@@ -22,6 +28,9 @@ struct State {
+ impl Notifications {
+     pub(crate) fn new() -> impl PinInit<Self> {
+         pin_init!(Self {
++            last_irq: AtomicU64::new(0),
++            last_rx: AtomicU64::new(0),
++            last_wake: AtomicU64::new(0),
+             state <- kernel::new_mutex!(State { generation: 0, crashed: false }),
+             changed <- kernel::new_condvar!(),
+         })
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index b63464d5e0bf..79b797862049 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -329,7 +329,13 @@ fn hold_check(&self, kind: &str, dep: &Stamp, now: u32, done: bool) -> Result {
+         Err(EDEADLK)
+     }
+ 
++    /// Backpressure bits recorded since the previous call (timeline=1).
++    pub(crate) fn take_pressure(&self) -> u64 {
++        self.pressure_seen.swap(0, Ordering::Relaxed)
++    }
++
+     fn report_pressure(&self, bit: u64, resource: &str) {
++        self.pressure_seen.fetch_or(bit, Ordering::Relaxed);
+         // Every resource here is released when work retires. Backpressure with
+         // nothing in flight can therefore never clear: it means an accounting
+         // leak, and submission stalls indefinitely with an idle GPU. Always
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+new file mode 100644
+index 000000000000..c66dc46ded16
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -0,0 +1,118 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright The Gravity Linux Contributors
++
++//! Per-submission timeline records (asahi_m4.timeline=1/2), kept in a
++//! fixed-size ring and read as binary from debugfs
++//! (`/sys/kernel/debug/asahi_m4/timeline`).
++//!
++//! The file is a header of `HEADER_WORDS` little-endian u64 words followed by
++//! `capacity` records of `RECORD_WORDS` u64 words, in slot order:
++//!
++//! header: magic, version, record bytes, capacity, records written, 0, 0, 0
++//! record: seq (1-based, 0 = empty slot), exec id, pid, file id,
++//!         queue | cmds << 32, pending inputs | total inputs << 32,
++//!         deferrals | error << 32, deferral reasons,
++//!         then CNTVCT ticks (1 GHz, 0 = never) at: ioctl, scheduler run,
++//!         first and last publication, completion, doorbell, IRQ, RTKit
++//!         delivery, pump wake, retire scan; two reserved words.
++//!
++//! Slot = (seq - 1) % capacity, so after wrap-around the oldest records are
++//! overwritten. Reads hold the ring lock, so read after the measurement window.
++
++use kernel::debugfs::BinaryWriter;
++use kernel::fs::file;
++use kernel::prelude::*;
++use kernel::sync::Mutex;
++use kernel::uaccess::UserSliceWriter;
++
++const MAGIC: u64 = u64::from_le_bytes(*b"G16TLRNG");
++const VERSION: u64 = 1;
++const HEADER_WORDS: usize = 8;
++pub(crate) const RECORD_WORDS: usize = 20;
++
++/// One submission, as `trace_line` used to print it, with absolute ticks.
++pub(crate) struct Record {
++    pub(crate) exec: u64,
++    pub(crate) pid: u32,
++    pub(crate) file: u64,
++    pub(crate) queue: u32,
++    pub(crate) cmds: u32,
++    pub(crate) pending: u32,
++    pub(crate) inputs: u32,
++    pub(crate) busy: u32,
++    pub(crate) error: bool,
++    pub(crate) why: u64,
++    /// ioctl, run, first, last, done, kick, irq, rx, wake, seen.
++    pub(crate) ticks: [u64; 10],
++}
++
++struct Inner {
++    words: KVVec<u64>,
++    written: u64,
++    capacity: u64,
++}
++
++#[pin_data]
++pub(crate) struct Ring {
++    #[pin]
++    inner: Mutex<Inner>,
++}
++
++impl Ring {
++    pub(crate) fn new(capacity: usize) -> Result<impl PinInit<Self>> {
++        let capacity = capacity.max(1);
++        let len = capacity
++            .checked_mul(RECORD_WORDS)
++            .and_then(|n| n.checked_add(HEADER_WORDS))
++            .ok_or(EINVAL)?;
++        let mut words = KVVec::with_capacity(len, GFP_KERNEL)?;
++        words.resize(len, 0, GFP_KERNEL)?;
++        words[0] = MAGIC;
++        words[1] = VERSION;
++        words[2] = (RECORD_WORDS * 8) as u64;
++        words[3] = capacity as u64;
++        let inner = Inner {
++            words,
++            written: 0,
++            capacity: capacity as u64,
++        };
++        Ok(pin_init!(Self {
++            inner <- kernel::new_mutex!(inner),
++        }))
++    }
++
++    pub(crate) fn push(&self, r: &Record) {
++        let mut g = self.inner.lock();
++        g.written += 1;
++        let seq = g.written;
++        let base = HEADER_WORDS + ((seq - 1) % g.capacity) as usize * RECORD_WORDS;
++        g.words[4] = seq;
++        let w = &mut g.words[base..base + RECORD_WORDS];
++        w[0] = seq;
++        w[1] = r.exec;
++        w[2] = r.pid as u64;
++        w[3] = r.file;
++        w[4] = r.queue as u64 | (r.cmds as u64) << 32;
++        w[5] = r.pending as u64 | (r.inputs as u64) << 32;
++        w[6] = r.busy as u64 | (r.error as u64) << 32;
++        w[7] = r.why;
++        w[8..18].copy_from_slice(&r.ticks);
++        w[18] = 0;
++        w[19] = 0;
++    }
++}
++
++impl BinaryWriter for Ring {
++    fn write_to_slice(
++        &self,
++        writer: &mut UserSliceWriter,
++        offset: &mut file::Offset,
++    ) -> Result<usize> {
++        let g = self.inner.lock();
++        // SAFETY: u64 has no padding; the slice covers exactly `words`.
++        let bytes = unsafe {
++            core::slice::from_raw_parts(g.words.as_ptr().cast::<u8>(), g.words.len() * 8)
++        };
++        writer.write_slice_file(bytes, offset)
++    }
++}

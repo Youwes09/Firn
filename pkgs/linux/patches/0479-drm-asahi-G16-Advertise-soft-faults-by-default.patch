@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 05:38:19 -0400
+Subject: [PATCH] drm/asahi: G16: Advertise soft faults by default
+
+fault_control=3 has been the default since Oct 7. The Mesa soft-fault
+bugs that kept this off are fixed (hk robust UBOs 243c5ac0c43, strict
+sparse residency 31b9d1d5bfb). On #144 with Mesa 1ecf668, soft_faults=1
+showed 0 G16 fault lines over 2x Lethal and 2x Dota (Lethal 31.7/31.9
+vs 31.2/31.2 fps). Requires that Mesa on every device's system driver.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 1d05e7ed5a92..00f57a04fa42 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -277,8 +277,8 @@ fn probe<'bound>(
+             description: "Firmware fault control word (region C +0xe28): 3 as macOS; 0 hard faults",
+         },
+         soft_faults: u32 {
+-            default: 0,
+-            description: "Debug: 1 advertises soft faults to userspace (needs fault_control=3)",
++            default: 1,
++            description: "1 advertises soft faults to userspace (needs fault_control=3; Mesa with hk 243c5ac0c43 and 31b9d1d5bfb); 0 hides them",
+         },
+     },
+ }

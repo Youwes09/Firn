@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 16 Oct 2026 10:12:18 -0400
+Subject: [PATCH] drm/asahi: G16: share task name diagnostics
+
+K11: use one fixed-array task-comm extraction and one NUL/UTF-8 formatter. GEM-close still logs the calling thread; VM creation and submissions still use its group leader. Keep the 16-byte bound and invalid-UTF-8 fallback.
+---
+ drivers/gpu/drm/asahi/g16_drm.rs     | 21 +++++----------------
+ drivers/gpu/drm/asahi/g16_runtime.rs |  6 ++----
+ drivers/gpu/drm/asahi/m4_util.rs     | 13 +++++++++++++
+ 3 files changed, 20 insertions(+), 20 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index ad89bd1e8ed6..050f46d20fbc 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -407,11 +407,7 @@ fn close(obj: &Object, file: &DrmFile) {
+                 // unusable; other clients keep running.
+                 vm.render_broken = true;
+                 let task = kernel::current!();
+-                // SAFETY: comm is a NUL-padded fixed array; a concurrent
+-                // rename can at worst tear this log string.
+-                let comm = unsafe { (*task.as_ptr()).comm };
+-                let comm: [u8; 16] = core::array::from_fn(|i| comm[i] as u8);
+-                let len = comm.iter().position(|&c| c == 0).unwrap_or(16);
++                let comm = crate::util::task_comm(&task);
+                 // Where the unfinished work is: in the pump (issued or held on
+                 // a stamp) or still in drm_sched waiting for its input fences.
+                 let unsignaled = vm.pending.iter().filter(|f| {
+@@ -434,7 +430,7 @@ fn close(obj: &Object, file: &DrmFile) {
+                 }
+                 pr_err!(
+                     "G16: closing a GEM object: VM {} work didn't complete ({:?}) in {}[{}]; keeping its mappings and failing that VM's further submissions\n",
+-                    vm.id, error, core::str::from_utf8(&comm[..len]).unwrap_or("?"), task.pid()
++                    vm.id, error, crate::util::comm_str(&comm), task.pid()
+                 );
+                 pr_err!(
+                     "G16: VM {}: {} of {} submissions unfinished: {} in the pump ({} started), {} waiting for input fences\n",
+@@ -613,17 +609,13 @@ fn vm_create(
+         if crate::module_parameters::debug_ctx.value() != 0 {
+             let task = kernel::current!();
+             let leader = task.group_leader();
+-            // SAFETY: comm is a NUL-padded fixed array; a concurrent rename
+-            // can at worst tear this debug string.
+-            let comm = unsafe { (*leader.as_ptr()).comm };
+-            let comm: [u8; 16] = core::array::from_fn(|i| comm[i] as u8);
+-            let len = comm.iter().position(|&c| c == 0).unwrap_or(16);
++            let comm = crate::util::task_comm(leader);
+             pr_info!(
+                 "G16: file {} vm {} by tgid {} ({}): render root {:#x} compute root {:#x}\n",
+                 inner.id,
+                 id,
+                 leader.pid(),
+-                core::str::from_utf8(&comm[..len]).unwrap_or("?"),
++                crate::util::comm_str(&comm),
+                 space.lock().roots().low,
+                 compute_space.lock().roots().low
+             );
+@@ -1277,10 +1269,7 @@ fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Resul
+ fn current_comm() -> [u8; 16] {
+     let task = kernel::current!();
+     let leader = task.group_leader();
+-    // SAFETY: comm is a NUL-padded fixed array; a concurrent rename can at
+-    // worst tear this diagnostic string.
+-    let comm = unsafe { (*leader.as_ptr()).comm };
+-    core::array::from_fn(|i| comm[i] as u8)
++    crate::util::task_comm(leader)
+ }
+ 
+ fn drain(pending: &mut KVec<dma_fence::Fence>) -> Result {
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 9f752ccb601f..06c5446d2b0c 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -4,6 +4,8 @@
+ 
+ //! G16 ring publication and independent firmware retirement.
+ 
++use crate::util::comm_str;
++
+ use kernel::io::Io;
+ use super::Bootstrap;
+ use crate::{g16_compute as compute, g16_fw, g16_render as render, g16_stamp, g16_vm};
+@@ -3473,10 +3475,6 @@ pub(crate) fn flush_render_ring(&mut self, vm_root: u64) {
+ }
+ 
+ /// Diagnostics: a process name from a NUL-padded comm.
+-fn comm_str(comm: &[u8; 16]) -> &str {
+-    let len = comm.iter().position(|&c| c == 0).unwrap_or(16);
+-    core::str::from_utf8(&comm[..len]).unwrap_or("?")
+-}
+ 
+ /// Diagnostics: one retired Work, kept to explain later reuse of its slot
+ /// and its Work memory in hang reports.
+diff --git a/drivers/gpu/drm/asahi/m4_util.rs b/drivers/gpu/drm/asahi/m4_util.rs
+index 8851eaf385bd..940d3d078af2 100644
+--- a/drivers/gpu/drm/asahi/m4_util.rs
++++ b/drivers/gpu/drm/asahi/m4_util.rs
+@@ -74,3 +74,16 @@ pub(crate) fn put32(out: &mut [u8], offset: usize, value: u32) {
+ pub(crate) fn put64(out: &mut [u8], offset: usize, value: u64) {
+     out[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+ }
++
++/// Snapshot a task name for diagnostics; callers choose thread or leader.
++pub(crate) fn task_comm(task: &kernel::task::Task) -> [u8; 16] {
++    // SAFETY: comm is a fixed array in the live task. A concurrent rename
++    // can at worst tear this diagnostic string.
++    let comm = unsafe { (*task.as_ptr()).comm };
++    core::array::from_fn(|i| comm[i] as u8)
++}
++
++pub(crate) fn comm_str(comm: &[u8; 16]) -> &str {
++    let len = comm.iter().position(|&c| c == 0).unwrap_or(16);
++    core::str::from_utf8(&comm[..len]).unwrap_or("?")
++}

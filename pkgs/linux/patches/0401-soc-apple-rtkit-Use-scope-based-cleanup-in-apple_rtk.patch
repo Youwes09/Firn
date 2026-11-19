@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 13 Feb 2025 22:44:11 +0100
+Subject: [PATCH] soc: apple: rtkit: Use scope-based cleanup in
+ apple_rtkit_crashlog_rx()
+
+Use scope-based cleanup for the crashlog buffer to simplify the function
+and avoid problems like the one fixed in commit 1fb9f14458c0 ("soc:
+apple: rtkit: Fix use-after-free in apple_rtkit_crashlog_rx()").
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+(cherry picked from commit b519530f6f22ed884c9854908763da404b36afd6)
+---
+ drivers/soc/apple/rtkit.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/drivers/soc/apple/rtkit.c b/drivers/soc/apple/rtkit.c
+index febda8e3faf3..7588490afe00 100644
+--- a/drivers/soc/apple/rtkit.c
++++ b/drivers/soc/apple/rtkit.c
+@@ -370,7 +370,7 @@ static void apple_rtkit_memcpy(struct apple_rtkit *rtk, void *dst,
+ static void apple_rtkit_crashlog_rx(struct apple_rtkit *rtk, u64 msg)
+ {
+ 	u8 type = FIELD_GET(APPLE_RTKIT_SYSLOG_TYPE, msg);
+-	u8 *bfr;
++	u8 *bfr __free(kfree) = NULL;
+ 
+ 	if (type != APPLE_RTKIT_CRASHLOG_CRASH) {
+ 		dev_warn(rtk->dev, "RTKit: Unknown crashlog message: %llx\n",
+@@ -404,8 +404,6 @@ static void apple_rtkit_crashlog_rx(struct apple_rtkit *rtk, u64 msg)
+ 	rtk->crashed = true;
+ 	if (rtk->ops->crashed)
+ 		rtk->ops->crashed(rtk->cookie, bfr, rtk->crashlog_buffer.size);
+-
+-	kfree(bfr);
+ }
+ 
+ static void apple_rtkit_ioreport_rx(struct apple_rtkit *rtk, u64 msg)

@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:25:55 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the compute_preempt debug parameter
+
+compute_preempt=1 gave compute queues the native preemptible profile, as
+Metal uses. Production never set it; compute queues stay non-preemptible.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    | 4 ----
+ drivers/gpu/drm/asahi/g16_runtime.rs | 9 ++-------
+ 2 files changed, 2 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 9775d14e73db..ff04c816bddd 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -197,10 +197,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Identify the GPU without starting firmware or registering DRM",
+         },
+-        compute_preempt: u32 {
+-            default: 0,
+-            description: "Debug: 1 gives compute queues the native preemptible profile (Metal uses it for compute; this driver forces compute non-preemptible)",
+-        },
+         debug_ctx: u32 {
+             default: 0,
+             description: "Debug: 1 logs each VM's owning process and every firmware context slot rebind",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 4de0225cd235..50d7287a1690 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -732,13 +732,8 @@ fn init_queues(
+             // Preemptible renders can wedge the firmware when a compressed
+             // render is timesliced against other contexts (Dota 2 with two
+             // compositors, 2026-10-06), so they are off by default.
+-            // Metal's compute queues use the native preemptible profile; the
+-            // debug compute_preempt=1 does the same here.
+-            let preemptible = if stage == 2 {
+-                crate::module_parameters::compute_preempt.value() != 0
+-            } else {
+-                crate::module_parameters::render_preempt.value() != 0
+-            };
++            // Metal's compute queues use the native preemptible profile.
++            let preemptible = stage != 2 && crate::module_parameters::render_preempt.value() != 0;
+             if !preemptible {
+                 descriptor[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
+                 descriptor[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());

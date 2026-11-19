@@ -1,0 +1,433 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 27 Oct 2026 01:26:43 -0400
+Subject: [PATCH] drm/asahi: G16: share one completion notifier per submission
+ (shared_notifier=1)
+
+Metal gives each command buffer one completion notifier, shared by its
+renders' TA and 3D Works and taken from a recycled pool (HV capture of
+macOS 25G83, 2026-10-27: renders in one command buffer share the
+notifier, renders in different ones never do). The 2026-10-03 shared
+notifier was instead one per queue with a cumulative count, so the
+firmware announced nothing until the whole queue drained.
+
+Make shared_notifier=1 the Metal layout: the renders of one submission
+share the notifier slot of its first published render, which writes the
+header with the Work count of every render still to come in the
+submission (two per render); the others write only their driver stamps.
+Each render retires once the notifier's completed count reaches its
+running total, as the queue-shared path did. The owner Work's storage
+stays leased until the last render using its notifier retires.
+
+The default stays 0, a notifier per render.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit ec0d1a382c8ee6c10dbfa7557a2c923aef118d58)
+---
+ drivers/gpu/drm/asahi/g16.rs                 |  6 ++
+ drivers/gpu/drm/asahi/g16_drm_pump.rs        | 10 ++
+ drivers/gpu/drm/asahi/g16_runtime.rs         | 20 ++++
+ drivers/gpu/drm/asahi/g16_runtime_compute.rs |  1 +
+ drivers/gpu/drm/asahi/g16_runtime_queues.rs  | 10 +-
+ drivers/gpu/drm/asahi/g16_runtime_render.rs  | 98 ++++++++++++++------
+ drivers/gpu/drm/asahi/g16_runtime_retire.rs  | 53 ++++++++++-
+ 7 files changed, 162 insertions(+), 36 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index b391dc1a2c87..8978f39078fa 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -269,6 +269,10 @@ pub(crate) struct Bootstrap {
+     /// Retired Work slots: VA and the client root their alias was last
+     /// mapped into (the device alias is mapped on first use).
+     free_work: [KVec<(u64, u64)>; 2],
++    /// Work slots carved from arenas so far; free_work keeps room for all.
++    work_slots: [usize; 2],
++    /// shared_notifier=1: per-submission notifiers, capacity MAX_FLIGHTS.
++    job_notifiers: KVec<render_runtime::JobNotifier>,
+     compute_publication: u64,
+     queue_events: Arc<core::sync::atomic::AtomicU64>,
+     /// Queue storage returned by dropped queues, awaiting context destruction.
+@@ -819,6 +823,8 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             next_object_va: render_runtime::OBJECT_BASE,
+             work_arenas: [0..0, 0..0],
+             free_work: [KVec::new(), KVec::new()],
++            work_slots: [0, 0],
++            job_notifiers: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
+             compute_publication: crate::module_parameters::fw_counter_start.value(),
+             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
+             retired_queues: Arc::pin_init(kernel::new_mutex!(KVec::new()), GFP_KERNEL)?,
+diff --git a/drivers/gpu/drm/asahi/g16_drm_pump.rs b/drivers/gpu/drm/asahi/g16_drm_pump.rs
+index cd594ccbf4ca..46fbbe2200c4 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_pump.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_pump.rs
+@@ -273,6 +273,16 @@ fn run(this: Arc<Self>) {
+                                 execution.support.as_deref().ok_or(EIO)?,
+                                 execution.timestamps[job.next],
+                                 &dependencies,
++                                // The submission's identity and how many of its
++                                // renders, this one included, are still to come:
++                                // with shared_notifier=1 they share a notifier.
++                                (
++                                    execution.id,
++                                    execution.parameters[job.next..]
++                                        .iter()
++                                        .filter(|p| matches!(p, Parameters::Render(_)))
++                                        .count() as u32,
++                                ),
+                             ),
+                             Parameters::Compute(p) => runtime.submit_compute(
+                                 execution.firmware.clone(),
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 5f1ca9f8bb6b..6a9fe64df32b 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -247,6 +247,9 @@ pub(super) struct Flight {
+     /// Shared-notifier renders: the notifier's completed-Work counter and the
+     /// total that includes this render. Other flights own a per-Work notifier.
+     notifier_count: Option<(u64, u32)>,
++    /// shared_notifier=1: the Work whose notifier slot this render's
++    /// submission shares (see `JobNotifier`).
++    job_notifier: Option<u64>,
+     /// Retirement trace (fw_trace & 16): when the stage stamps were first seen
+     /// complete, and which later conditions still blocked retirement.
+     stamps_seen: Option<Instant<Monotonic>>,
+@@ -257,6 +260,23 @@ pub(super) struct Flight {
+     lane_items: [u32; 2],
+ }
+ 
++/// shared_notifier=1: one completion notifier per submission, as Metal has
++/// one per command buffer. It lives in the notifier slot of the submission's
++/// first published render Work (the owner), whose storage is kept until
++/// every render using the notifier has retired.
++pub(crate) struct JobNotifier {
++    job: u64,
++    owner: u64,
++    /// The owner's free_work root, set once the owner itself has retired.
++    owner_root: Option<u64>,
++    /// Works counted into the notifier so far (two per render).
++    works: u32,
++    /// The Work count the owner wrote into the notifier header.
++    promised: u32,
++    /// Published renders using the notifier and not yet retired.
++    refs: u32,
++}
++
+ /// Dependency items of one submission attempt, counted into dep_stats only
+ /// when it publishes: a deferred (EBUSY) command is resolved again on its
+ /// next try.
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_compute.rs b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+index eca9b22bb219..aa159064a7b1 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+@@ -268,6 +268,7 @@ pub(super) fn submit_compute_queue(
+                 comm: params.comm,
+                 started: Instant::now(),
+                 notifier_count: None,
++                job_notifier: None,
+                 stamps_seen: None,
+                 blocked: 0,
+                 dependencies: *dependencies,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_queues.rs b/drivers/gpu/drm/asahi/g16_runtime_queues.rs
+index 0963c713bef4..0aefca68654c 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_queues.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_queues.rs
+@@ -33,11 +33,14 @@ pub(super) fn allocate_work(&mut self, render: bool) -> Result<(u64, Option<u64>
+         if let Some((va, root)) = self.free_work[index].pop() {
+             return Ok((va, Some(root)));
+         }
+-        // Retirement must not allocate. Space for every outstanding lease
+-        // also covers all of them completing before another acquisition.
+-        self.free_work[index].reserve(self.flights.len() + 1, GFP_KERNEL)?;
+         let stride = if render { 0x1c000 } else { 0x8000 };
+         if self.work_arenas[index].is_empty() {
++            // Retirement must not allocate, so the free list keeps room for
++            // every slot ever carved. Counting flights instead misses slots
++            // still leased after their own flight retired (a submission's
++            // notifier owner, held for its later renders).
++            let slots = self.work_slots[index] + 16;
++            self.free_work[index].reserve(slots - self.free_work[index].len(), GFP_KERNEL)?;
+             let base = self.next_work_va;
+             let end = base.checked_add(16 * stride).ok_or(ENOSPC)?;
+             if end > WORK_BASE + WORK_WINDOW {
+@@ -67,6 +70,7 @@ pub(super) fn allocate_work(&mut self, render: bool) -> Result<(u64, Option<u64>
+             }
+             fw.sync();
+             self.work_arenas[index] = base..end;
++            self.work_slots[index] = slots;
+         }
+         let va = self.work_arenas[index].start;
+         self.work_arenas[index].start += stride;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_render.rs b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+index 00f674dde505..3c158fe130c6 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_render.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+@@ -85,6 +85,7 @@ pub(crate) fn submit_render(
+         support: &Support,
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
++        job: (u64, u32),
+     ) -> Result<Receipt> {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_RENDER);
+         if self.render_failed {
+@@ -147,6 +148,7 @@ pub(crate) fn submit_render(
+             support,
+             timestamps,
+             dependencies,
++            job,
+         );
+         if queue.pending == 0 {
+             queue.events = None;
+@@ -166,6 +168,7 @@ pub(super) fn submit_render_queue(
+         support: &Support,
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
++        job: (u64, u32),
+     ) -> Result<Receipt> {
+         let mut guard = owner.lock();
+         let client = &mut *guard;
+@@ -189,6 +192,7 @@ pub(super) fn submit_render_queue(
+             scene,
+             timestamps,
+             dependencies,
++            job,
+         );
+         self.encodings = encodings;
+         if result.is_err() && !self.render_failed {
+@@ -213,6 +217,7 @@ pub(super) fn submit_render_pool(
+         scene: u32,
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
++        job: (u64, u32),
+     ) -> Result<Receipt> {
+         if self.render_failed {
+             return Err(EIO);
+@@ -260,16 +265,33 @@ pub(super) fn submit_render_pool(
+         // by the queue, with a cumulative count (shared_notifier=1, for
+         // comparison), is only announced once every Work published to it
+         // has completed: a busy queue then waited for the safety poll.
+-        if crate::g16_timeline::shared_notifier() {
+-            a.event_control = render_notifier(lanes);
+-            a.event_count_array = render_notifier_count(lanes);
+-            a.tiling_driver_stamp = lanes[0].driver_stamp();
+-            a.fragment_driver_stamp = lanes[1].driver_stamp();
++        a.event_control = va + 0x200;
++        a.event_count_array = va + 0x300;
++        a.tiling_driver_stamp = va + 0x18000;
++        a.fragment_driver_stamp = va + 0x18040;
++        // shared_notifier=1: the submission's renders share the notifier of
++        // its first published render (the owner), as Metal shares one per
++        // command buffer. The owner writes the header with the count of
++        // every render it will cover; the others only their driver stamps.
++        let job_owner = if crate::g16_timeline::shared_notifier() {
++            let owner = self.job_notifiers.iter().find(|j| j.job == job.0).map(|j| j.owner);
++            let owner_va = owner.unwrap_or(va);
++            a.event_control = owner_va + 0x200;
++            a.event_count_array = owner_va + 0x300;
++            Some((owner_va, owner.is_none()))
+         } else {
+-            a.event_control = va + 0x200;
+-            a.event_count_array = va + 0x300;
+-            a.tiling_driver_stamp = va + 0x18000;
+-            a.fragment_driver_stamp = va + 0x18040;
++            None
++        };
++        // The notifier header this render writes: its own (count 2), the
++        // submission's (count of its remaining renders' Works), or none.
++        let header_count = match job_owner {
++            None => Some(2u32),
++            Some((_, true)) => Some(job.1.max(1) * 2),
++            Some((_, false)) => None,
++        };
++        // Fail before publication: past it, a render must have its Flight.
++        if matches!(job_owner, Some((_, true))) && self.job_notifiers.len() == self.job_notifiers.capacity() {
++            return Err(EIO);
+         }
+ 
+         a.tiling_firmware_stamp = lanes[0].firmware_stamp();
+@@ -396,18 +418,36 @@ pub(super) fn submit_render_pool(
+         self.note_dependency_events(dependencies, own);
+         let (heads, epochs, lane_items) = self.publish_render(
+             &a, &ta, &frag, queue, initbm, pool.blocks, dependencies,
+-            params.vdm_barrier_fragment,
++            params.vdm_barrier_fragment, header_count,
+         )?;
+         pool.initialized = true;
+         support.submissions.store(next_submitted, Ordering::Relaxed);
+         self.render_publication = self.render_publication.wrapping_add(1);
+         queue.render_count = queue_ordinal.wrapping_add(1);
+-        let notifier_count = if a.event_control == render_notifier(queue.lanes.as_ref().ok_or(EIO)?) {
+-            queue.notified_works = queue.notified_works.wrapping_add(2);
+-            Some((a.event_control + 0xc, queue.notified_works))
+-        } else {
+-            None
++        // A shared notifier's completed count (+0xc) reaches this render's
++        // running total within the submission once both its Works are done.
++        let notifier_count = match job_owner {
++            None => None,
++            Some((owner_va, first)) => {
++                if first {
++                    self.job_notifiers
++                        .push_within_capacity(JobNotifier {
++                            job: job.0,
++                            owner: owner_va,
++                            owner_root: None,
++                            works: 0,
++                            promised: header_count.unwrap_or(2),
++                            refs: 0,
++                        })
++                        .map_err(|_| EIO)?;
++                }
++                let entry = self.job_notifiers.iter_mut().find(|j| j.owner == owner_va).ok_or(EIO)?;
++                entry.works += 2;
++                entry.refs += 1;
++                Some((a.event_control + 0xc, entry.works))
++            }
+         };
++        let job_notifier = job_owner.map(|(owner_va, _)| owner_va);
+         let lanes = queue.lanes.as_mut().ok_or(EIO)?;
+         for stage in 0..2 {
+             lanes[stage].head = heads[stage];
+@@ -437,6 +477,7 @@ pub(super) fn submit_render_pool(
+                 comm: params.comm,
+                 started: Instant::now(),
+                 notifier_count,
++                job_notifier,
+                 stamps_seen: None,
+                 blocked: 0,
+                 dependencies: *dependencies,
+@@ -497,6 +538,7 @@ pub(super) fn publish_render(
+         blocks: u32,
+         dependencies: &[Option<Stamp>; 2],
+         vdm_barrier_fragment: bool,
++        header_count: Option<u32>,
+     ) -> Result<([u32; 2], [u32; 2], [u32; 2])> {
+         let priority = queue.priority;
+         let lanes = queue.lanes.as_ref().ok_or(EIO)?;
+@@ -520,15 +562,16 @@ pub(super) fn publish_render(
+         // lookup per destination region and one barrier pair, rather than a
+         // lookup and two barriers for each of about twenty writes.
+         let context = (a.context_id as u32).to_le_bytes();
+-        let notified = queue.notified_works.wrapping_add(2).to_le_bytes();
+         // The notifier header: the Work's own notifier and driver stamps, or
+         // (shared_notifier=1) two words into the queue's shared notifier.
+-        let shared = a.event_control == render_notifier(lanes);
++        // The notifier header: the full header with its Work count when this
++        // render owns the notifier (its own, or its submission's first), else
++        // only this render's driver stamps.
+         let count_array = a.event_count_array.to_le_bytes();
+         let fragment_stamp = (a.fragment_stamp as u32).to_le_bytes();
+         let zero = 0u32.to_le_bytes();
+         let flags = 0x50u32.to_le_bytes();
+-        let two = 2u32.to_le_bytes();
++        let count = header_count.unwrap_or(2).to_le_bytes();
+         let tiling_previous = g16_stamp::previous(a.tiling_stamp as u32).to_le_bytes();
+         let fragment_previous = g16_stamp::previous(a.fragment_stamp as u32).to_le_bytes();
+         let own: [(u64, &[u8]); 8] = [
+@@ -537,11 +580,15 @@ pub(super) fn publish_render(
+             (a.event_control + 12, &zero[..]),
+             (a.event_control + 0x10, &flags[..]),
+             (a.event_control + 0x24, &context[..]),
+-            (a.event_count_array, &two[..]),
++            (a.event_count_array, &count[..]),
+             (a.tiling_driver_stamp, &tiling_previous[..]),
+             (a.fragment_driver_stamp, &fragment_previous[..]),
+         ];
+-        let header = if shared { 2 } else { own.len() };
++        let (own, header): (&[(u64, &[u8])], usize) = if header_count.is_some() {
++            (&own[..], own.len())
++        } else {
++            (&own[6..], 2)
++        };
+         let preludes = [a.tiling_prelude(blocks), a.fragment_prelude()];
+         let tiling_micro = a.tiling_microsequence();
+         let fragment_micro = a.fragment_microsequence();
+@@ -590,22 +637,15 @@ pub(super) fn publish_render(
+         // where the ring wraps). Computed on demand: no list on the job
+         // worker's stack, and nothing to allocate.
+         let (ta, frag): (&[u8], &[u8]) = (ta, frag);
+-        let (context, notified, preludes) = (&context, &notified, &preludes);
++        let preludes = &preludes;
+         let (tiling_micro, fragment_micro) = (&tiling_micro, &fragment_micro);
+         let (items, entries) = (&items, &entries);
+         let rings = [lanes[0].ring, lanes[1].ring];
+         let per_stage = move |stage: usize| 3 + item_counts[stage] + entry_counts[stage];
+-        let own = &own;
+         let count = header + per_stage(0) + per_stage(1);
+         let write = move |n: usize| {
+             if n < header {
+-                return if !shared {
+-                    own[n]
+-                } else if n == 0 {
+-                    (a.event_control + 0x24, &context[..])
+-                } else {
+-                    (a.event_count_array, &notified[..])
+-                };
++                return own[n];
+             }
+             let n = n - header + 2;
+             let (stage, k) = if n - 2 < per_stage(0) { (0, n - 2) } else { (1, n - 2 - per_stage(0)) };
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_retire.rs b/drivers/gpu/drm/asahi/g16_runtime_retire.rs
+index 29fe26968233..4c495edc1b34 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_retire.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_retire.rs
+@@ -316,10 +316,55 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             self.diagnostics.retire_next = self.diagnostics.retire_next.wrapping_add(1);
+             flight.client.lock().release_scratch(flight.scratch)?;
+-            // allocate_work reserved a slot for every outstanding lease.
+-            self.free_work[usize::from(render_work)]
+-                .push_within_capacity((id, root))
+-                .map_err(|_| EIO)?;
++            // allocate_work reserved a slot for every outstanding lease. A
++            // render whose submission shares its notifier keeps the owner
++            // Work's storage leased until the last render using it retires.
++            let mut free = [Some((id, root)), None];
++            if let Some(owner_va) = flight.job_notifier {
++                if let Some(p) = self.job_notifiers.iter().position(|j| j.owner == owner_va) {
++                    let entry = &mut self.job_notifiers[p];
++                    entry.refs = entry.refs.saturating_sub(1);
++                    if id == owner_va {
++                        entry.owner_root = Some(root);
++                        free[0] = None;
++                    }
++                    if entry.refs == 0 {
++                        if let Some(owner_root) = entry.owner_root {
++                            // Fewer renders published than the header
++                            // promised (a submission cut short): the slot is
++                            // reused while the firmware may still hold the
++                            // notifier. Research: report its +0x94 word.
++                            if entry.works < entry.promised {
++                                use core::sync::atomic::{AtomicU32, Ordering};
++                                static REPORTED: AtomicU32 = AtomicU32::new(0);
++                                if REPORTED.fetch_add(1, Ordering::Relaxed) < 16 {
++                                    // A diagnostic must never fail retirement:
++                                    // an unreadable word prints as 0xffffffff.
++                                    let word = self
++                                        ._firmware_space
++                                        .as_ref()
++                                        .and_then(|fw| fw.read_u32(owner_va + 0x200 + 0x94).ok())
++                                        .unwrap_or(u32::MAX);
++                                    pr_info!(
++                                        "G16: job notifier {:#x} freed at {}/{} Works, +0x94={:#x}\n",
++                                        owner_va,
++                                        entry.works,
++                                        entry.promised,
++                                        word
++                                    );
++                                }
++                            }
++                            free[1] = Some((owner_va, owner_root));
++                            self.job_notifiers.swap_remove(p);
++                        }
++                    }
++                }
++            }
++            for (va, root) in free.into_iter().flatten() {
++                self.free_work[usize::from(render_work)]
++                    .push_within_capacity((va, root))
++                    .map_err(|_| EIO)?;
++            }
+             self.retired.push_within_capacity((id, limited)).map_err(|_| ENOMEM)?;
+         }
+         crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_SCAN, scan_before);

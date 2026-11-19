@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 17 Sep 2026 20:37:30 -0400
+Subject: [PATCH] drm/asahi: support fragment-stage render barriers on M4
+
+Expose a feature bit and render flag for deferring render dependencies until fragment execution. Keep compute dependencies before tiling and account for barrier entries on each firmware queue.
+
+Validation: the barrier-only GPU object builds with ARCH=arm64 LLVM=1.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 84462e19ddcddd04ac37e01ecbf25602f2d64d5c; G16 driver files only: UAPI in this branch)
+---
+ drivers/gpu/drm/asahi/g16_drm.rs     |  6 ++-
+ drivers/gpu/drm/asahi/g16_queue.rs   |  4 +-
+ drivers/gpu/drm/asahi/g16_render.rs  |  1 +
+ drivers/gpu/drm/asahi/g16_runtime.rs | 55 +++++++++++++++++-----------
+ 4 files changed, 40 insertions(+), 26 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 26c30041591b..22a864dcbb1b 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -438,7 +438,7 @@ fn get_params(
+             return Err(EINVAL);
+         }
+         let mut params = uapi::drm_asahi_params_global {
+-            features: 0,
++            features: uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_BARRIER.into(),
+             gpu_generation: 16,
+             gpu_variant: b'G' as u32,
+             gpu_revision: device.gpu_revision,
+@@ -1636,9 +1636,10 @@ fn render_parameters(&self, c: &uapi::drm_asahi_cmd_render) -> Result<render::Pa
+         use uapi::{
+             drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT as DBIAS_IS_INT,
+             drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES as PROCESS_EMPTY_TILES,
++            drm_asahi_render_flags_DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT as VDM_BARRIER_FRAGMENT,
+         };
+ 
+-        if c.flags & !(PROCESS_EMPTY_TILES | DBIAS_IS_INT) != 0
++        if c.flags & !(PROCESS_EMPTY_TILES | DBIAS_IS_INT | VDM_BARRIER_FRAGMENT) != 0
+             || c.vertex_helper.binary != 0
+             || c.vertex_helper.cfg != 0
+             || c.vertex_helper.data != 0
+@@ -1649,6 +1650,7 @@ fn render_parameters(&self, c: &uapi::drm_asahi_cmd_render) -> Result<render::Pa
+             return Err(ENOTSUPP);
+         }
+         let mut p = render::Parameters::default();
++        p.vdm_barrier_fragment = c.flags & VDM_BARRIER_FRAGMENT != 0;
+         p.set_private(self.kernel.start, self.kernel.end)
+             .ok_or(EINVAL)?;
+         p.width = u64::from(c.width_px);
+diff --git a/drivers/gpu/drm/asahi/g16_queue.rs b/drivers/gpu/drm/asahi/g16_queue.rs
+index e270a49adfd7..57aeed024d23 100644
+--- a/drivers/gpu/drm/asahi/g16_queue.rs
++++ b/drivers/gpu/drm/asahi/g16_queue.rs
+@@ -98,8 +98,8 @@ impl Queue {
+     out
+ }
+ 
+-/// General G16 dependency, before a consumer TA or CDM Work. Type 1 participates
+-/// in firmware's dynamic dependency graph; the internal TA-to-fragment prelude
++/// General G16 dependency, before a consumer TA, fragment or CDM Work. Type 1
++/// participates in firmware's dynamic dependency graph; the internal TA-to-fragment prelude
+ /// retains type 0 for partial-render scheduling.
+ pub(crate) fn dependency(
+     stamp: u64,
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index c913be4924ce..bb25223b5699 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -8,6 +8,7 @@
+ 
+ #[derive(Clone, Copy, Default)]
+ pub(crate) struct Parameters {
++    pub(crate) vdm_barrier_fragment: bool,
+     pub(crate) request_tvb_growth: bool,
+     pub(crate) fragment_sync_grow: bool,
+     pub(crate) process_empty_tiles: bool,
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 93ff250e0097..b8b881fde0f9 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1259,8 +1259,10 @@ fn submit_render_pool(
+             .as_mut()
+             .ok_or(EIO)?
+             .write_live(a.render_shared_state, &use_count.to_le_bytes())?;
+-        let (heads, epochs) =
+-            self.publish_render(&a, &ta, &frag, queue, initbm, pool.blocks, dependencies)?;
++        let (heads, epochs) = self.publish_render(
++            &a, &ta, &frag, queue, initbm, pool.blocks, dependencies,
++            params.vdm_barrier_fragment,
++        )?;
+         pool.initialized = true;
+         support.submissions.store(next_submitted, Ordering::Relaxed);
+         self.render_publication = self.render_publication.wrapping_add(1);
+@@ -1336,15 +1338,25 @@ fn publish_render(
+         initbm: bool,
+         blocks: u32,
+         dependencies: &[Option<Stamp>; 2],
++        vdm_barrier_fragment: bool,
+     ) -> Result<([u32; 2], [u32; 2])> {
+         let priority = queue.priority;
+         let lanes = queue.lanes.as_ref().ok_or(EIO)?;
+         let publication = self.render_publication;
+         let firsts = [lanes[0].head, lanes[1].head];
++        // Only the render dependency can move to fragment. Compute output
++        // may feed the vertex stage, and input fences were already consumed
++        // by the scheduler before either lane was published.
++        let stage_dependencies = if vdm_barrier_fragment {
++            [[None, dependencies[1]], [dependencies[0], None]]
++        } else {
++            [*dependencies, [None, None]]
++        };
+         let heads = [
+-            (firsts[0] + 1 + u32::from(initbm) + dependencies.iter().flatten().count() as u32)
++            (firsts[0] + 1 + u32::from(initbm)
++                + stage_dependencies[0].iter().flatten().count() as u32)
+                 % 0x500,
+-            (firsts[1] + 2) % 0x500,
++            (firsts[1] + 2 + stage_dependencies[1].iter().flatten().count() as u32) % 0x500,
+         ];
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         fw.write_live(a.event_control, &a.event_count_array.to_le_bytes())?;
+@@ -1397,24 +1409,23 @@ fn publish_render(
+                 fw.write_live(micro, &a.fragment_microsequence())?;
+             }
+             let mut pos = firsts[stage];
+-            if stage == 0 {
+-                // The prelude page leaves +0x40..+0xc0 free before its
+-                // microsequence. All barrier bytes share the Work's lifetime.
+-                for (index, dep) in dependencies.iter().flatten().enumerate() {
+-                    let address = prelude + 0x40 + index as u64 * 0x40;
+-                    fw.write_live(
+-                        address,
+-                        &g16_fw::queue::dependency(
+-                            dep.address,
+-                            dep.value,
+-                            dep.event,
+-                            a.tiling_stamp as u32,
+-                            a.tiling_uuid as u32,
+-                        ),
+-                    )?;
+-                    fw.write_live(ring + u64::from(pos) * 8, &address.to_le_bytes())?;
+-                    pos = (pos + 1) % 0x500;
+-                }
++            // The prelude page leaves +0x40..+0xc0 free before its
++            // microsequence. All barrier bytes share the Work's lifetime.
++            for (index, dep) in stage_dependencies[stage].iter().flatten().enumerate() {
++                let address = prelude + 0x40 + index as u64 * 0x40;
++                let (stamp, uuid) = if stage == 0 {
++                    (a.tiling_stamp, a.tiling_uuid)
++                } else {
++                    (a.fragment_stamp, a.fragment_uuid)
++                };
++                fw.write_live(
++                    address,
++                    &g16_fw::queue::dependency(
++                        dep.address, dep.value, dep.event, stamp as u32, uuid as u32,
++                    ),
++                )?;
++                fw.write_live(ring + u64::from(pos) * 8, &address.to_le_bytes())?;
++                pos = (pos + 1) % 0x500;
+             }
+             if stage == 1 || initbm {
+                 fw.write_live(ring + u64::from(pos) * 8, &prelude.to_le_bytes())?;

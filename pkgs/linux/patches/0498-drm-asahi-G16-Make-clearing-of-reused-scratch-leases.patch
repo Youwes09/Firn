@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 12 Oct 2026 04:27:07 -0400
+Subject: [PATCH] drm/asahi: G16: Make clearing of reused scratch leases
+ selectable (scratch_zero, default 1)
+
+Every reused render and compute scratch lease is zeroed in full on the
+publication path: tilemap, TPC and metadata pages per render, 0x24000
+bytes per compute Work. On Dota (#174) that memset was 2.6 us of the
+pump's 20 us per Work. It was added with lease reuse, to match freshly
+allocated (zeroed) pages, not for a known requirement; upstream Apple8
+never clears the tilemap, TPC or heap metadata per scene.
+
+asahi_m4.scratch_zero (runtime: debugfs scratch_zero) selects how much
+to clear: 2 (default, unchanged) the whole lease, 1 only the render
+metadata pages and the compute marker page, 0 nothing.
+
+Leases never change owner: the free list and its pages belong to one
+VM's AddressSpace, created by that DRM file's VM_CREATE, whose pages are
+allocated zeroed and freed with it. Skipping the clear therefore only
+ever exposes a client's own earlier scratch to itself.
+
+Folded in:
+- drm/asahi: G16: make clearing of reused scratch leases selectable
+- drm/asahi: G16: scratch_zero defaults to 1 (production #185)
+
+[drm/asahi: G16: scratch_zero defaults to 1 (production #185)]
+#181's full VK CTS on the Air at scratch_zero=1 met every kernel
+criterion (overnight-20261012-k181). Same code as #181, only the default
+changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 10 ++++++++++
+ drivers/gpu/drm/asahi/g16_timeline.rs |  4 ++++
+ drivers/gpu/drm/asahi/g16_vm.rs       | 20 ++++++++++++++------
+ 4 files changed, 32 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 40c7bd23d087..ae535168a46c 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -301,6 +301,10 @@ fn probe<'bound>(
+             default: 50,
+             description: "With Work outstanding, recheck completion at least every this many ms, so a late or lost completion notification costs milliseconds (0: only the 250 ms render / 10 s watchdog windows). Counters poll_timeouts/poll_retired in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/safety_poll_ms",
+         },
++        scratch_zero: u32 {
++            default: 1,
++            description: "Reused render/compute scratch leases (tilemap, TPC, metadata pages; compute scratch and marker): 2 zeroes the whole lease, as fresh pages are; 1 (default; full VK CTS clean on #181, 2026-10-12) zeroes only the render metadata pages and the compute marker page; 0 zeroes nothing (upstream Apple8 never clears these per scene). Runtime: debugfs asahi_m4/scratch_zero",
++        },
+         read_opt: u32 {
+             default: 1,
+             description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, dep_elide's reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 810f8ce23441..bfff1ec73da1 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -164,6 +164,7 @@ pub(crate) struct Data {
+     _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _read_opt: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _safety_poll: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
++    _scratch_zero: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+@@ -272,6 +273,14 @@ pub(crate) fn register<'a>(
+         dir.read_write_file(c_str!("safety_poll_ms"), crate::g16_timeline::FlagKnob::SAFETY_POLL_MS),
+         GFP_KERNEL,
+     )?;
++    crate::g16_timeline::SCRATCH_ZERO.store(
++        crate::module_parameters::scratch_zero.value().min(2),
++        Ordering::Relaxed,
++    );
++    let scratch_zero = KBox::pin_init(
++        dir.read_write_file(c_str!("scratch_zero"), crate::g16_timeline::FlagKnob::SCRATCH_ZERO),
++        GFP_KERNEL,
++    )?;
+     let dep_stats = KBox::pin_init(
+         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
+         GFP_KERNEL,
+@@ -316,6 +325,7 @@ pub(crate) fn register<'a>(
+         _kick_first: kick_first,
+         _read_opt: read_opt,
+         _safety_poll: safety_poll,
++        _scratch_zero: scratch_zero,
+         _profile_knob: profile_knob,
+         _lane_cap: lane_cap,
+         _debugfs: dir, });
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 7d441de4ac45..6f99debfdb2e 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -346,6 +346,9 @@ pub(crate) fn init_caps(queue: u32, lane: u32) -> Result {
+ /// per pump pass after admission.
+ pub(crate) static EARLY_SIGNAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+ 
++/// How much of a reused scratch lease to zero (asahi_m4.scratch_zero).
++pub(crate) static SCRATCH_ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(2);
++
+ /// A 0/1 debugfs switch over a static.
+ pub(crate) struct FlagKnob {
+     cell: &'static core::sync::atomic::AtomicU32,
+@@ -360,6 +363,7 @@ impl FlagKnob {
+     pub(crate) const KICK_FIRST: Self = Self { cell: &KICK_FIRST, name: "kick_first", max: 1 };
+     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
+     pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
++    pub(crate) const SCRATCH_ZERO: Self = Self { cell: &SCRATCH_ZERO, name: "scratch_zero", max: 2 };
+ }
+ 
+ impl kernel::debugfs::Writer for FlagKnob {
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index caae05baa06e..726a6ae5c239 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -161,7 +161,8 @@ pub(crate) fn prepare_render(
+             .checked_add(tpc)
+             .and_then(|n| n.checked_add(5 * UAT_PGSZ))
+             .ok_or(ENOMEM)?;
+-        let scratch = self.lease_scratch(true, size)?;
++        // Only the trailing metadata pages may need clearing (scratch_zero=1).
++        let scratch = self.lease_scratch(true, size, tilemap + tpc)?;
+         let base = scratch.range.start;
+         p.tilemap = base;
+         p.tpc = base + tilemap as u64;
+@@ -191,14 +192,15 @@ pub(crate) fn prepare_compute(
+         p: &mut crate::g16_compute::Parameters,
+     ) -> Result<Scratch> {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_PREPARE_COMPUTE);
+-        let scratch = self.lease_scratch(false, 0x24000)?;
++        let scratch = self.lease_scratch(false, 0x24000, 0x20000)?;
+         let base = scratch.range.start;
+         p.scratch = base;
+         p.marker = base + 0x20000;
+         Ok(scratch)
+     }
+ 
+-    fn lease_scratch(&mut self, render: bool, size: usize) -> Result<Scratch> {
++    /// `metadata`: the lease offset from which scratch_zero=1 still clears.
++    fn lease_scratch(&mut self, render: bool, size: usize, metadata: usize) -> Result<Scratch> {
+         if size == 0 || size & (UAT_PGSZ - 1) != 0 {
+             return Err(EINVAL);
+         }
+@@ -217,9 +219,15 @@ fn lease_scratch(&mut self, render: bool, size: usize) -> Result<Scratch> {
+             } else {
+                 self.scratch_free[index][slot].start = end;
+             }
+-            // All previous GPU writes have retired. Reinitialize the entire
+-            // leased range without touching PTEs or neighbouring active jobs.
+-            for va in (start..end).step_by(UAT_PGSZ) {
++            // All previous GPU writes have retired. Reinitialize the leased
++            // range (all of it by default, as fresh pages are zeroed) without
++            // touching PTEs or neighbouring active jobs.
++            let clear_from = match crate::g16_timeline::SCRATCH_ZERO.load(core::sync::atomic::Ordering::Relaxed) {
++                0 => end,
++                1 => (start + metadata as u64).min(end),
++                _ => start,
++            };
++            for va in (clear_from..end).step_by(UAT_PGSZ) {
+                 let page = self.pages.get(&va).ok_or(EIO)?;
+                 page.with_page_mapped(|ptr| {
+                     // SAFETY: The lease owns this full page exclusively.

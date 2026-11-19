@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 10:28:07 -0600
+Subject: [PATCH] drm/asahi: G16: Keep region C's submission counters
+
+macOS's driver keeps two counters in region C: +0x7c, the submissions in
+flight, raised when one starts and lowered when it ends, and +0x80, every
+submission started, which held 17982 in macOS 26.6.2's state after boot.
+Ours stayed zero. Keep both.
+
+The firmware reads them: with both kept, headless vkmark on the J713
+scores 6000 to 6124 over three runs, against 5319 and 5604 without.
+
+The counters' meaning is from interface notes by Ibrahim Syed
+<ibrahim.syed787b@gmail.com>, written from macOS's GPU driver.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16.rs                 |  3 +++
+ drivers/gpu/drm/asahi/g16_fw.rs              |  4 ++++
+ drivers/gpu/drm/asahi/g16_runtime_compute.rs |  1 +
+ drivers/gpu/drm/asahi/g16_runtime_publish.rs | 13 +++++++++++++
+ drivers/gpu/drm/asahi/g16_runtime_render.rs  |  1 +
+ drivers/gpu/drm/asahi/g16_runtime_retire.rs  |  1 +
+ 6 files changed, 23 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 46d951b123b6..12c7a9077b83 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -282,6 +282,8 @@ pub(crate) struct Bootstrap {
+     /// from the later of this and its publication.
+     progress: Option<kernel::time::Instant<kernel::time::Monotonic>>,
+     batch_works: usize,
++    /// Submissions started since boot, mirrored in region C.
++    submissions: u32,
+     context_roots: [Option<crate::g16_vm::Roots>; 64],
+     context_users: [u32; 64],
+     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
+@@ -857,6 +859,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             ledger: KBox::new(render_runtime::Ledger::with_capacity(render_runtime::MAX_FLIGHTS)?, GFP_KERNEL)?,
+             progress: None,
+             batch_works: 0,
++            submissions: 0,
+             context_roots: [None; 64],
+             context_users: [0; 64],
+             render_support: kernel::sync::Arc::new(
+diff --git a/drivers/gpu/drm/asahi/g16_fw.rs b/drivers/gpu/drm/asahi/g16_fw.rs
+index 253bcdcf0306..d5e852bd3f42 100644
+--- a/drivers/gpu/drm/asahi/g16_fw.rs
++++ b/drivers/gpu/drm/asahi/g16_fw.rs
+@@ -21,6 +21,10 @@
+ pub(crate) const OPERAND_TABLE: u64 = 0x70_0040_8000;
+ pub(crate) const TIMESTAMP_BASE: u64 = 0xffff_fc21_8140_0000;
+ pub(crate) const TIMESTAMP_SIZE: u64 = 0x400_0000;
++/// Region C submission counters, kept as macOS keeps them: submissions in
++/// flight, and every submission started since boot.
++pub(crate) const REGION_C_ACTIVE: u64 = 0x7c;
++pub(crate) const REGION_C_STARTED: u64 = 0x80;
+ 
+ /// Control message releasing firmware's GPU context ID binding for a context
+ /// object. The fields are copied from bytes firmware maintains in the context.
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_compute.rs b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+index 86ed256153b3..0960d890479e 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+@@ -289,6 +289,7 @@ pub(super) fn submit_compute_queue(
+         // Capacity was reserved with the flight in reserve_flight.
+         let flight = self.flights.last().ok_or(EIO)?;
+         self.ledger.add(flight)?;
++        self.count_submissions(1)?;
+         self.render_failed = false;
+         self.batch_works += 1;
+         self.trace_publication("compute", a.work)?;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_publish.rs b/drivers/gpu/drm/asahi/g16_runtime_publish.rs
+index 6978864eb63b..f14a62dfe22a 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_publish.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_publish.rs
+@@ -322,6 +322,19 @@ pub(crate) fn flush(&mut self) -> Result {
+         Ok(())
+     }
+ 
++    /// Publish region C's submission counters, as macOS does: the number of
++    /// submissions in flight, and a count of every one started.
++    pub(super) fn count_submissions(&mut self, started: u32) -> Result {
++        self.submissions = self.submissions.wrapping_add(started);
++        let region_c = g16_fw::RootPointers::bootstrap().region_c;
++        let words = [
++            (g16_fw::REGION_C_ACTIVE, (self.flights.len() as u32).to_le_bytes()),
++            (g16_fw::REGION_C_STARTED, self.submissions.to_le_bytes()),
++        ];
++        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
++        fw.write_batch(words.len(), |n| (region_c + words[n].0, &words[n].1[..]))
++    }
++
+     pub(crate) fn poison(&mut self) {
+         self.render_failed = true;
+     }
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_render.rs b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+index 2809542abe73..1fd79acd09dc 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_render.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+@@ -551,6 +551,7 @@ pub(super) fn submit_render_pool(
+         // Capacity was reserved with the flight in reserve_flight.
+         let flight = self.flights.last().ok_or(EIO)?;
+         self.ledger.add(flight)?;
++        self.count_submissions(1)?;
+         self.render_failed = false;
+         self.batch_works += 1;
+         self.trace_publication("render", va)?;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_retire.rs b/drivers/gpu/drm/asahi/g16_runtime_retire.rs
+index ec10832b9d30..dc1eaf7f91c3 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_retire.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_retire.rs
+@@ -335,6 +335,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             // every later flight, tens of KB per Work under load).
+             let flight = self.flights.swap_remove(index);
+             self.ledger.remove(&flight)?;
++            self.count_submissions(0)?;
+             let root = match &flight.render {
+                 Some(render) => render.root,
+                 None => flight.client.lock().roots().low,

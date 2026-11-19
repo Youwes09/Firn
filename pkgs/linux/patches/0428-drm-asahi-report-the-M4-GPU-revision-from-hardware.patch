@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 15 Sep 2026 00:52:36 -0400
+Subject: [PATCH] drm/asahi: report the M4 GPU revision from hardware
+
+Read the revision byte from ID_VERSION during GPU initialization and pass
+it through GET_PARAMS instead of reporting every T8132 GPU as A0. Reject
+all-zero and all-one register values and log the detected ID and revision.
+
+The built kernel reports revision 0x11 (B1) on the T8132 M4 mini.
+
+Assisted-By: OpenAI Codex (GPT-6 Astra)
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+(cherry picked from commit 7c3d0bb604fe641d62577bd6276e50e5b3cc7754)
+---
+ drivers/gpu/drm/asahi/g16.rs     | 11 +++++++++++
+ drivers/gpu/drm/asahi/g16_drm.rs |  4 +++-
+ 2 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index d4f0bce6c9c2..46a7b78cf1f9 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -197,6 +197,7 @@ pub(crate) struct Bootstrap {
+     _opening_client: Option<crate::g16_vm::AddressSpace>,
+     timestamp_ranges: KVec<core::ops::Range<u64>>,
+     opening_notification_pending: bool,
++    pub(crate) gpu_revision: u32,
+     pub(crate) core_mask: u32,
+     pub(crate) maximum_frequency_khz: u32,
+     tvb_pools: KVec<crate::g16_tvb::Tvb>,
+@@ -287,6 +288,15 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         }
+         let sgx_guard = sgx.try_access().ok_or(ENODEV)?;
+         let sgx_io = &*sgx_guard;
++        let gpu_id = sgx_io.relaxed().read32(crate::ID_VERSION);
++        if gpu_id == 0 || gpu_id == u32::MAX {
++            dev_err!(dev, "Invalid GPU ID {:#010x}\n", gpu_id);
++            return Err(ENODEV);
++        }
++        // ID_VERSION retains the revision byte used by the Asahi UAPI:
++        // 0x00 = A0, 0x10 = B0, 0x11 = B1. This is not the firmware enum.
++        let gpu_revision = (gpu_id >> 8) & 0xff;
++        dev_info!(dev, "G16: GPU ID={:#010x} revision={:#04x}\n", gpu_id, gpu_revision);
+         for offset in [0x1000104, 0x1000108] {
+             sgx_io.relaxed().write32(sgx_io.relaxed().read32(offset) | 1, offset);
+         }
+@@ -655,6 +665,7 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+             _opening_client: Some(opening_client),
+             timestamp_ranges: KVec::new(),
+             opening_notification_pending: true,
++            gpu_revision,
+             core_mask: platform.core_mask,
+             maximum_frequency_khz: platform.freq_a[10] * 1000,
+             tvb_pools: KVec::new(),
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 1c5a0280410e..c749bc0d8e65 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -120,6 +120,7 @@ struct TimestampBuffer {
+ 
+ #[pin_data]
+ pub(crate) struct Data {
++    gpu_revision: u32,
+     core_mask: u32,
+     maximum_frequency_khz: u32,
+     scheduler: sched::Scheduler<SubmissionJob>,
+@@ -173,6 +174,7 @@ pub(crate) fn register(pdev: &platform::Device<Core>) -> Result<DeviceRef> {
+     }
+     let runtime = crate::g16::Bootstrap::new(pdev)?;
+     let data = try_pin_init!(Data {
++        gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+         scheduler: sched::Scheduler::new(pdev.as_ref(), 4, 128, 0, 30000, c_str!("asahi_m4"))?,
+         admission <- kernel::new_mutex!(KVec::new()),
+@@ -441,7 +443,7 @@ fn get_params(
+             features: 0,
+             gpu_generation: 16,
+             gpu_variant: b'G' as u32,
+-            gpu_revision: 0,
++            gpu_revision: device.gpu_revision,
+             chip_id: 0x8132,
+             num_dies: 1,
+             num_clusters_total: 1,

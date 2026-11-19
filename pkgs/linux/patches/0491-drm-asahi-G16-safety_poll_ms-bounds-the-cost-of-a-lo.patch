@@ -1,0 +1,226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 18:25:35 -0400
+Subject: [PATCH] drm/asahi: G16: safety_poll_ms bounds the cost of a lost
+ completion notification
+
+Instead of a bare 'notification wait timed out; polling retirement',
+print after the poll how many Works it retired and the oldest flight's
+age since the last retirement progress. Retired work after a timeout
+means a completion notification was late or lost; nothing retired means
+slow work. asahi-03 saw bursts of the bare line in synchronization CTS
+at fw_cache_maint 1 and 0.
+
+Folded in:
+- WIP drm/asahi: G16 notification-timeout line reports what the poll found
+- WIP drm/asahi: G16 safety_poll_ms: bound the cost of a lost completion notification
+
+[WIP drm/asahi: G16 safety_poll_ms: bound the cost of a lost completion notification]
+With work outstanding the pump waited up to 250 ms (renders) or the
+10 s watchdog (compute) for a completion notification. Synchronization
+CTS logged bursts of notification timeouts at both fw_cache_maint
+values; if notifications are late or lost, a frame could stall for
+seconds. safety_poll_ms (default 50, runtime debugfs; 0 = previous
+windows) rechecks completion at least that often while flights are
+outstanding. dep_stats gains poll_timeouts and poll_retired; the
+timeout line is printed only when a poll retired work or the oldest
+flight is >= 1 s old.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 +++
+ drivers/gpu/drm/asahi/g16_drm.rs      | 45 +++++++++++++++++++++------
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 19 ++++++++++-
+ drivers/gpu/drm/asahi/g16_timeline.rs | 16 ++++++++--
+ 4 files changed, 72 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 13f31e1e23a9..c7e8fbc95e66 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -297,6 +297,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
+         },
++        safety_poll_ms: u32 {
++            default: 50,
++            description: "With Work outstanding, recheck completion at least every this many ms, so a late or lost completion notification costs milliseconds (0: only the 250 ms render / 10 s watchdog windows). Counters poll_timeouts/poll_retired in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/safety_poll_ms",
++        },
+         read_opt: u32 {
+             default: 1,
+             description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, dep_elide's reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index ab51867bb956..f935731b1dba 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -158,6 +158,7 @@ pub(crate) struct Data {
+     _dep_stats: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::DepStats>>>,
+     _kick_first: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _read_opt: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
++    _safety_poll: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _profile_knob: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::FlagKnob>>>,
+     _lane_cap: Pin<KBox<kernel::debugfs::File<crate::g16_timeline::CapKnob>>>,
+     _debugfs: kernel::debugfs::Dir,
+@@ -258,6 +259,14 @@ pub(crate) fn register<'a>(
+         dir.read_write_file(c_str!("read_opt"), crate::g16_timeline::FlagKnob::READ_OPT),
+         GFP_KERNEL,
+     )?;
++    crate::g16_timeline::SAFETY_POLL_MS.store(
++        crate::module_parameters::safety_poll_ms.value().min(10000),
++        Ordering::Relaxed,
++    );
++    let safety_poll = KBox::pin_init(
++        dir.read_write_file(c_str!("safety_poll_ms"), crate::g16_timeline::FlagKnob::SAFETY_POLL_MS),
++        GFP_KERNEL,
++    )?;
+     let dep_stats = KBox::pin_init(
+         dir.read_only_file(c_str!("dep_stats"), crate::g16_timeline::DepStats),
+         GFP_KERNEL,
+@@ -300,6 +309,7 @@ pub(crate) fn register<'a>(
+         _dep_stats: dep_stats,
+         _kick_first: kick_first,
+         _read_opt: read_opt,
++        _safety_poll: safety_poll,
+         _profile_knob: profile_knob,
+         _lane_cap: lane_cap,
+         _debugfs: dir, });
+@@ -1459,20 +1469,22 @@ fn run(this: Arc<Self>) {
+             let mut runtime = this.device.runtime.lock();
+             let result = (|| -> Result<bool> {
+                 let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_PUMP);
+-                match wake_result {
+-                    // No notification within the watchdog window: poll the
+-                    // stamps. Retirement's watchdog reports a real hang; a
+-                    // lost notification simply retires the finished work.
+-                    Err(e) if e == ETIMEDOUT => {
+-                        pr_warn!("G16: notification wait timed out; polling retirement\n");
+-                    }
+-                    other => other?,
+-                }
++                // No notification within the watchdog window: poll the stamps.
++                // Retirement's watchdog reports a real hang; a lost
++                // notification simply retires the finished work. Report what
++                // the poll found: retired work means a notification was late
++                // or lost, nothing retired means slow work.
++                let timed_out = match wake_result {
++                    Err(e) if e == ETIMEDOUT => Some(runtime.oldest_flight_ms()),
++                    Err(e) => return Err(e),
++                    Ok(()) => None,
++                };
+                 generation?;
+                 if this.device.failed.load(Ordering::Acquire) {
+                     return Err(EIO);
+                 }
+                 let mut progress = false;
++                let mut polled_retired = 0u32;
+                 while let Some((id, result)) = runtime.retire().inspect_err(|error| {
+                     pr_err!("G16: firmware retirement failed: {:?}\n", error);
+                 })? {
+@@ -1495,6 +1507,21 @@ fn run(this: Arc<Self>) {
+                         job.error = Some(error);
+                     }
+                     progress = true;
++                    polled_retired += 1;
++                }
++                if let Some(age) = timed_out {
++                    use crate::g16_timeline as t;
++                    t::POLL_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
++                    t::POLL_RETIRED.fetch_add(u64::from(polled_retired), Ordering::Relaxed);
++                    // A safety poll every few ms is routine; report only polls
++                    // that found finished work, or long waits.
++                    if polled_retired != 0 || age >= 1000 {
++                        pr_warn!(
++                            "G16: notification wait timed out; polling retired {} Work(s), oldest flight {} ms\n",
++                            polled_retired,
++                            age
++                        );
++                    }
+                 }
+                 Ok(progress)
+             })();
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 070fe16b740e..7f82166e2402 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1631,6 +1631,15 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+ 
+     /// Notifications do not extend the watchdog. Only retirement progress
+     /// resets it, so trace traffic cannot keep a stuck command alive.
++    /// Age of the oldest flight since the last retirement progress (ms).
++    pub(crate) fn oldest_flight_ms(&self) -> u64 {
++        self.flights
++            .iter()
++            .map(|flight| flight.started.elapsed().as_millis() as u64)
++            .max()
++            .unwrap_or(0)
++    }
++
+     pub(crate) fn watchdog_remaining_ms(&self) -> u32 {
+         let watchdog = self
+             .flights
+@@ -1640,12 +1649,20 @@ pub(crate) fn watchdog_remaining_ms(&self) -> u32 {
+             .unwrap_or(10000);
+         // Wedge detection samples render progress a few times per window.
+         // A recorded unreachable hold is re-checked within its grace second.
+-        if self.flights.iter().any(|f| f.render.is_some()) {
++        let watchdog = if self.flights.iter().any(|f| f.render.is_some()) {
+             watchdog.min(250)
+         } else if self.hold_key.load(Ordering::Relaxed) != 0 {
+             watchdog.min(500)
+         } else {
+             watchdog
++        };
++        // safety_poll_ms: with work outstanding, recheck at least this often,
++        // so a late or lost completion notification costs milliseconds.
++        let safety = crate::g16_timeline::SAFETY_POLL_MS.load(Ordering::Relaxed);
++        if safety != 0 && !self.flights.is_empty() {
++            watchdog.min(safety)
++        } else {
++            watchdog
+         }
+     }
+ }
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index c8fa8970d47a..b544a024befc 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -359,6 +359,7 @@ impl FlagKnob {
+     pub(crate) const DEP_ELIDE: Self = Self { cell: &DEP_ELIDE, name: "dep_elide", max: 7 };
+     pub(crate) const KICK_FIRST: Self = Self { cell: &KICK_FIRST, name: "kick_first", max: 1 };
+     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
++    pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
+ }
+ 
+ impl kernel::debugfs::Writer for FlagKnob {
+@@ -412,14 +413,16 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         use core::sync::atomic::Ordering::Relaxed;
+         writeln!(
+             f,
+-            "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\ndep_elide {}",
++            "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\ndep_elide {}\npoll_timeouts {}\npoll_retired {}",
+             DEP_WORKS.load(Relaxed),
+             DEP_ITEMS.load(Relaxed),
+             DEP_SAME_LANE.load(Relaxed),
+             DEP_REPEAT.load(Relaxed),
+             DEP_REACHED.load(Relaxed),
+             DEP_DROPPED.load(Relaxed),
+-            DEP_ELIDE.load(Relaxed)
++            DEP_ELIDE.load(Relaxed),
++            POLL_TIMEOUTS.load(Relaxed),
++            POLL_RETIRED.load(Relaxed)
+         )
+     }
+ }
+@@ -445,3 +448,12 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+ pub(crate) fn read_opt() -> bool {
+     READ_OPT.load(core::sync::atomic::Ordering::Relaxed) != 0
+ }
++
++/// With work outstanding, the pump rechecks completion at least every this
++/// many ms (asahi_m4.safety_poll_ms, runtime: debugfs `asahi_m4/safety_poll_ms`;
++/// 0 = only the watchdog windows of #170). Counters in dep_stats:
++/// poll_timeouts (waits that timed out), poll_retired (Works those polls
++/// retired, i.e. completions whose notification was late or lost).
++pub(crate) static SAFETY_POLL_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(50);
++pub(crate) static POLL_TIMEOUTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static POLL_RETIRED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

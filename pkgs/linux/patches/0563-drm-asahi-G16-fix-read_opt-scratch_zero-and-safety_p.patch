@@ -1,0 +1,272 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 25 Oct 2026 00:14:54 -0400
+Subject: [PATCH] drm/asahi: G16: fix read_opt, scratch_zero and safety_poll_ms
+ at their defaults
+
+These were same-boot A/B knobs whose results are settled, and every boot
+runs their defaults:
+- read_opt=1: cached admission cursors, the notifier count read through the
+  retire snapshot, the already-reached test from the last scan, and wedge
+  sampling at most every 50 ms;
+- scratch_zero=1: a reused lease clears only its metadata pages (full VK
+  CTS clean since #181);
+- safety_poll_ms=50: the pump rechecks completion every 50 ms with work
+  outstanding.
+Remove the parameters, their debugfs files and the alternative paths.
+Production behaviour is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     | 12 ----------
+ drivers/gpu/drm/asahi/g16.rs          |  4 ++--
+ drivers/gpu/drm/asahi/g16_drm.rs      |  3 ---
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 33 +++++++++------------------
+ drivers/gpu/drm/asahi/g16_timeline.rs | 30 ++++--------------------
+ drivers/gpu/drm/asahi/g16_vm.rs       | 17 ++++++--------
+ 6 files changed, 24 insertions(+), 75 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index e7e53cd36390..10ecf43c9d00 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -192,18 +192,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 times publish-path sections into debugfs asahi_m4/publish_profile (two serialized counter reads per section, per firmware read). Runtime: debugfs asahi_m4/profile",
+         },
+-        safety_poll_ms: u32 {
+-            default: 50,
+-            description: "With Work outstanding, recheck completion at least every this many ms, so a late or lost completion notification costs milliseconds (0: only the 250 ms render / 10 s watchdog windows). Counters poll_timeouts/poll_retired in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/safety_poll_ms",
+-        },
+-        scratch_zero: u32 {
+-            default: 1,
+-            description: "Reused render/compute scratch leases (tilemap, TPC, metadata pages; compute scratch and marker): 2 zeroes the whole lease, as fresh pages are; 1 (default; full VK CTS clean on #181, 2026-10-12) zeroes only the render metadata pages and the compute marker page; 0 zeroes nothing (upstream Apple8 never clears these per scene). Runtime: debugfs asahi_m4/scratch_zero",
+-        },
+-        read_opt: u32 {
+-            default: 1,
+-            description: "1 (default) cuts per-pass firmware reads: cached admission lane cursors (reread when they show no room), the shared render-notifier count through the retire snapshot, the dependency-item reached test from the last scan, and wedge sampling at most every 50 ms instead of every pump pass; 0 restores #167's reads. Runtime: debugfs asahi_m4/read_opt",
+-        },
+         timeline_records: u32 {
+             default: 131072,
+             description: "Debug: timeline ring capacity in records (160 bytes each), allocated at probe only when timeline is nonzero",
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 87791ef2d26f..9800f745bc7f 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -216,7 +216,7 @@ fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _log: Option<&[u8
+ struct Diagnostics {
+     /// A4 wedge detection state (check_wedge).
+     wedge_since: Option<kernel::time::Instant<kernel::time::Monotonic>>,
+-    /// read_opt: when check_wedge last sampled (it reads every render
++    /// When check_wedge last sampled (at most every 50 ms; it reads every render
+     /// flight's stamps and every channel's registers).
+     wedge_sampled: Option<kernel::time::Instant<kernel::time::Monotonic>>,
+     wedge_signature: u64,
+@@ -274,7 +274,7 @@ pub(crate) struct Bootstrap {
+     /// Queue storage returned by dropped queues, awaiting context destruction.
+     /// It holds a reserved slot for every region, so dropping never allocates.
+     retired_queues: Arc<kernel::sync::Mutex<KVec<u64>>>,
+-    /// The last retire scan's firmware words (read_opt), on the heap: this
++    /// The last retire scan's firmware words, on the heap: this
+     /// struct is built by value on the probe stack.
+     pub(crate) last_scan: KBox<render_runtime::WordSnapshot>,
+     queue_regions: usize,
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 2fed520469cd..fb49db0a0521 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -273,9 +273,6 @@ pub(crate) fn register<'a>(
+     use crate::g16_timeline::FlagKnob;
+     let knobs = [
+         (c_str!("profile"), FlagKnob::PROFILE, crate::module_parameters::profile.value()),
+-        (c_str!("read_opt"), FlagKnob::READ_OPT, crate::module_parameters::read_opt.value()),
+-        (c_str!("safety_poll_ms"), FlagKnob::SAFETY_POLL_MS, crate::module_parameters::safety_poll_ms.value()),
+-        (c_str!("scratch_zero"), FlagKnob::SCRATCH_ZERO, crate::module_parameters::scratch_zero.value()),
+         (c_str!("fail_prep"), FlagKnob::FAIL_PREP, 0),
+         (c_str!("fail_retire"), FlagKnob::FAIL_RETIRE, 0),
+         (c_str!("fail_skip"), FlagKnob::FAIL_SKIP, 0),
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index a4bbfddd99c9..543dff90b7cc 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -42,7 +42,7 @@ pub(crate) struct FirmwareQueues {
+     /// Per lane (TA, 3D, compute), the latest stamps its published Works
+     /// waited on as firmware items, keyed by address.
+     waited: [[Option<Stamp>; 2]; 3],
+-    /// read_opt: the last (read, done) cursors admission read per lane;
++    /// The last (read, done) cursors admission read per lane;
+     /// u32::MAX until read. Cursors only advance, so a stale view
+     /// underestimates room.
+     cursors: [core::cell::Cell<(u32, u32)>; 3],
+@@ -1050,8 +1050,7 @@ fn reserve_flight(
+                 let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+                 let before = crate::g16_timeline::reads();
+                 let (mut read, mut done) = queue.cursors[stage].get();
+-                if !crate::g16_timeline::read_opt()
+-                    || read >= 0x500
++                if read >= 0x500
+                     || done >= 0x500
+                     || !ring_room(lane.head, read, done, entries[stage], 0x500)
+                 {
+@@ -1665,11 +1664,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                 let notified = match flight.notifier_count {
+                     // The shared notifier has counted this render's Works.
+                     Some((completed, total)) => {
+-                        let count = if crate::g16_timeline::read_opt() {
+-                            snapshot.read(fw, completed)?
+-                        } else {
+-                            fw.read_u32(completed)?
+-                        };
++                        let count = snapshot.read(fw, completed)?;
+                         (count.wrapping_sub(total) as i32) >= 0
+                     }
+                     None => {
+@@ -1824,8 +1819,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+         // Wedge detection needs a few samples per wedge_ms window (default
+         // 2 s), not one per pump pass: each sample reads two stamps per
+         // outstanding render and 36 channel registers.
+-        let sample = !crate::g16_timeline::read_opt()
+-            || self.diagnostics.wedge_sampled.is_none_or(|t| t.elapsed().as_millis() >= 50);
++        let sample = self.diagnostics.wedge_sampled.is_none_or(|t| t.elapsed().as_millis() >= 50);
+         if sample {
+             self.diagnostics.wedge_sampled = Some(Instant::now());
+             let before = crate::g16_timeline::reads();
+@@ -1889,11 +1883,10 @@ pub(crate) fn watchdog_remaining_ms(&self) -> u32 {
+         } else {
+             watchdog
+         };
+-        // safety_poll_ms: with work outstanding, recheck at least this often,
+-        // so a late or lost completion notification costs milliseconds.
+-        let safety = crate::g16_timeline::SAFETY_POLL_MS.load(Ordering::Relaxed);
+-        if safety != 0 && !self.flights.is_empty() {
+-            watchdog.min(safety)
++        // With work outstanding, recheck at least this often, so a late or
++        // lost completion notification costs milliseconds.
++        if !self.flights.is_empty() {
++            watchdog.min(crate::g16_timeline::SAFETY_POLL_MS)
+         } else {
+             watchdog
+         }
+@@ -2242,13 +2235,9 @@ fn elide_item(
+             true
+         } else {
+             let before = t::reads();
+-            let now = if t::read_opt() {
+-                // The last retire scan's value: stamps only advance, so a
+-                // value that already reached the target still does.
+-                self.last_scan.peek(dep.address)
+-            } else {
+-                Some(self._firmware_space.as_ref().ok_or(EIO)?.read_u32(dep.address)?)
+-            };
++            // The last retire scan's value: stamps only advance, so a value
++            // that already reached the target still does.
++            let now = self.last_scan.peek(dep.address);
+             t::attribute(&t::P_RD_ELIDE, before);
+             let reached = now.is_some_and(|v| g16_stamp::reached(v, dep.value));
+             if reached {
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 421b147c8981..d4f0673679e7 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -340,9 +340,6 @@ pub(crate) fn init_caps(queue: u32, lane: u32) -> Result {
+     Ok(())
+ }
+ 
+-/// How much of a reused scratch lease to zero (asahi_m4.scratch_zero).
+-pub(crate) static SCRATCH_ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(2);
+-
+ /// Test: one-shot failure injection for queue-failure tests (debugfs
+ /// `fail_prep`, `fail_retire`, `fail_skip`). Writing a TGID arms the next
+ /// command of that process to fail preparation with EINVAL, or to retire
+@@ -384,9 +381,6 @@ pub(crate) fn init(&self, value: u32) {
+     }
+ 
+     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
+-    pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
+-    pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
+-    pub(crate) const SCRATCH_ZERO: Self = Self { cell: &SCRATCH_ZERO, name: "scratch_zero", max: 2 };
+     pub(crate) const FAIL_PREP: Self = Self { cell: &FAIL_PREP, name: "fail_prep", max: i32::MAX as u32 };
+     pub(crate) const FAIL_RETIRE: Self = Self { cell: &FAIL_RETIRE, name: "fail_retire", max: i32::MAX as u32 };
+     pub(crate) const FAIL_SKIP: Self = Self { cell: &FAIL_SKIP, name: "fail_skip", max: 4096 };
+@@ -464,27 +458,11 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+     }
+ }
+ 
+-/// Fewer firmware reads per pass (asahi_m4.read_opt, runtime: debugfs
+-/// `asahi_m4/read_opt`; 0 restores #167's reads):
+-/// - admission reuses the last lane cursors it read and rereads them only when
+-///   they show no room (cursors only advance, so a stale view is conservative);
+-/// - retirement reads the shared render-notifier count through the scan
+-///   snapshot;
+-/// - the dependency-item already-reached test uses the last retire scan's values and
+-///   keeps the item when the stamp wasn't seen there, with no read.
+-pub(crate) static READ_OPT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+-
+-#[inline(always)]
+-pub(crate) fn read_opt() -> bool {
+-    READ_OPT.load(core::sync::atomic::Ordering::Relaxed) != 0
+-}
+-
+ /// With work outstanding, the pump rechecks completion at least every this
+-/// many ms (asahi_m4.safety_poll_ms, runtime: debugfs `asahi_m4/safety_poll_ms`;
+-/// 0 = only the watchdog windows of #170). Counters in dep_stats:
+-/// poll_timeouts (waits that timed out), poll_retired (Works those polls
+-/// retired, i.e. completions whose notification was late or lost).
+-pub(crate) static SAFETY_POLL_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(50);
++/// many ms, so a late or lost notification costs milliseconds. Counters in
++/// dep_stats: poll_timeouts (waits that timed out), poll_retired (Works those
++/// polls retired, i.e. completions whose notification was late or lost).
++pub(crate) const SAFETY_POLL_MS: u32 = 50;
+ pub(crate) static POLL_TIMEOUTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static POLL_RETIRED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ /// Rate limit for "retired 0" poll warnings (slow work, not a fault): the
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 97e45991c511..f604f9c48691 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -201,7 +201,7 @@ pub(crate) fn prepare_render(
+                 crate::g16_mesh::Profile::PAYLOAD_BYTES
+             } else { 0 }))
+             .ok_or(ENOMEM)?;
+-        // Only the trailing metadata pages may need clearing (scratch_zero=1).
++        // Only the trailing metadata pages need clearing.
+         let scratch = self.lease_scratch(true, size, tilemap + tpc)?;
+         let base = scratch.range.start;
+         p.tilemap = base;
+@@ -218,7 +218,7 @@ pub(crate) fn prepare_render(
+         if let Some(mesh) = &mut p.mesh {
+             mesh.payload = meta + 0x14000;
+             // The lease lasts through both TA and fragment retirement. Clear
+-            // the entire payload even when the ordinary scratch_zero knob is 0.
++            // the entire payload, not only the metadata pages.
+             for offset in (0..crate::g16_mesh::Profile::PAYLOAD_BYTES).step_by(256) {
+                 self.write_low(mesh.payload + offset as u64, &[0; 256])?;
+             }
+@@ -247,7 +247,7 @@ pub(crate) fn prepare_compute(
+         Ok(scratch)
+     }
+ 
+-    /// `metadata`: the lease offset from which scratch_zero=1 still clears.
++    /// `metadata`: the lease offset from which a reused lease is cleared.
+     fn lease_scratch(&mut self, render: bool, size: usize, metadata: usize) -> Result<Scratch> {
+         if size == 0 || size & (UAT_PGSZ - 1) != 0 {
+             return Err(EINVAL);
+@@ -267,14 +267,11 @@ fn lease_scratch(&mut self, render: bool, size: usize, metadata: usize) -> Resul
+             } else {
+                 self.scratch_free[index][slot].start = end;
+             }
+-            // All previous GPU writes have retired. Reinitialize the leased
+-            // range (all of it by default, as fresh pages are zeroed) without
++            // All previous GPU writes have retired. Reinitialize the
++            // metadata pages of the leased range (the tilemap, TPC and compute
++            // scratch need no clearing; full VK CTS clean, #181) without
+             // touching PTEs or neighbouring active jobs.
+-            let clear_from = match crate::g16_timeline::SCRATCH_ZERO.load(core::sync::atomic::Ordering::Relaxed) {
+-                0 => end,
+-                1 => (start + metadata as u64).min(end),
+-                _ => start,
+-            };
++            let clear_from = (start + metadata as u64).min(end);
+             for va in (clear_from..end).step_by(UAT_PGSZ) {
+                 let page = self.pages.get(&va).ok_or(EIO)?;
+                 page.with_page_mapped(|ptr| {

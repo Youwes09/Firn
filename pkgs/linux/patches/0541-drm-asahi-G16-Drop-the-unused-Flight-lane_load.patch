@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:30:41 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the unused Flight::lane_load()
+
+The admission ledger keeps per-lane totals since Works are admitted from
+it rather than from flight scans; nothing calls lane_load() any more and
+the build warned about it.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 18 ++----------------
+ 1 file changed, 2 insertions(+), 16 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 8a26b5bf60b2..de355789f4ff 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -275,27 +275,13 @@ pub(super) struct Flight {
+     lane_items: [u32; 2],
+ }
+ 
+-impl Flight {
+-    /// Works plus firmware dependency items this flight holds on `lane`
+-    /// (identified by its pointers): one Work per lane it uses, plus the items
+-    /// queued there (a render's move to its fragment lane with
+-    /// VDM_BARRIER_FRAGMENT).
+-    fn lane_load(&self, lane: u64) -> usize {
+-        self.queues
+-            .iter()
+-            .zip(self.lane_items)
+-            .filter(|((pointers, _), _)| *pointers == lane && lane != 0)
+-            .map(|(_, items)| 1 + items as usize)
+-            .sum()
+-    }
+-}
+-
+ /// Per-lane totals of the unretired flights on that lane.
+ struct LaneBook {
+     pointers: u64,
+     /// Flights using the lane.
+     works: u32,
+-    /// Works plus the dependency items they queued here (`Flight::lane_load`).
++    /// Works plus the dependency items they queued here: one per flight using
++    /// the lane, plus the items it queued on it.
+     load: u32,
+     /// Works plus all their dependencies, for flights whose first lane this
+     /// is: one queue's total is the sum over its lanes (`QUEUE_CAP`).

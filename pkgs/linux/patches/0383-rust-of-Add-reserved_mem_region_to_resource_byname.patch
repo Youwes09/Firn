@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Fri, 11 Jul 2025 20:23:49 +0200
+Subject: [PATCH] rust: of: Add reserved_mem_region_to_resource_byname()
+
+Creates Resource from a reserved memory region. Depends on commit
+f4fcfdda2fd8 ("of: reserved_mem: Add functions to parse
+"memory-region"") from v6.16-rc1.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+(cherry picked from commit 6f913ee2afecbf3901477972629beacedc7169ae)
+---
+ rust/bindings/bindings_helper.h |  1 +
+ rust/kernel/of.rs               | 27 +++++++++++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/rust/bindings/bindings_helper.h b/rust/bindings/bindings_helper.h
+index a21505b96b1d..a76011f2a181 100644
+--- a/rust/bindings/bindings_helper.h
++++ b/rust/bindings/bindings_helper.h
+@@ -76,6 +76,7 @@
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
++#include <linux/of_reserved_mem.h>
+ #include <linux/pci.h>
+ #include <linux/phy.h>
+ #include <linux/pid_namespace.h>
+diff --git a/rust/kernel/of.rs b/rust/kernel/of.rs
+index 7cd0607c0b25..e3271fb58a2f 100644
+--- a/rust/kernel/of.rs
++++ b/rust/kernel/of.rs
+@@ -16,6 +16,9 @@
+ use core::marker::PhantomData;
+ use core::num::NonZeroU32;
+ 
++use crate::error::to_result;
++use crate::io::resource::Resource;
++
+ /// IdTable type for OF drivers.
+ pub type IdTable<T> = &'static dyn kernel::device_id::IdTable<DeviceId, T>;
+ 
+@@ -213,6 +216,30 @@ pub fn parse_phandle(&self, name: &CStr, index: usize) -> Option<Node> {
+         }
+     }
+ 
++    #[allow(unused_variables)]
++    /// Get a reserved memory region as a resource
++    pub fn reserved_mem_region_to_resource_byname(&self, name: &CStr) -> Result<Resource> {
++        #[cfg(not(CONFIG_OF))]
++        {
++            Err(ENOENT)
++        }
++        #[cfg(CONFIG_OF)]
++        {
++            let res = Resource::zeroed();
++            // SAFETY: This function is safe to call as long as the arguments are valid pointers.
++            let ret = unsafe {
++                bindings::of_reserved_mem_region_to_resource_byname(
++                    self.raw_node,
++                    name.as_char_ptr(),
++                    res.as_raw(),
++                )
++            };
++            to_result(ret)?;
++
++            Ok(res)
++        }
++    }
++
+     #[allow(unused_variables)]
+     /// Look up a node property by name, returning a `Property` object if found.
+     pub fn find_property(&self, propname: &CStr) -> Option<Property<'_>> {

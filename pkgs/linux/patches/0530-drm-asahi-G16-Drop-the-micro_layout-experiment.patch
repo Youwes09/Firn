@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:24:58 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the micro_layout experiment
+
+micro_layout=1 wrote the microsequence scene slot and per-Work counters
+as macOS does. Production never set it; the original counter fields are
+unchanged. Addresses::scene() only served that mode.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs             |  4 ---
+ drivers/gpu/drm/asahi/g16_render.rs           | 30 ++-----------------
+ .../drivers/gpu/asahi/test-scene-offset.py    |  1 -
+ 3 files changed, 3 insertions(+), 32 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 495e87f7ef6f..8f261414f849 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -213,10 +213,6 @@ fn probe<'bound>(
+             default: 4,
+             description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention)",
+         },
+-        micro_layout: u32 {
+-            default: 0,
+-            description: "Microsequence scene and Work counter fields: 0=original, 1=as macOS (scene slot, per-Work counters)",
+-        },
+         render_barrier: u32 {
+             default: 0,
+             description: "Debug render-to-render barriers: 1=apply every render's vdm_barrier at fragment, 2=omit fragment waits already ordered by the queue's fragment lane",
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index f08d8addbf43..88ba70fe99a9 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -464,21 +464,14 @@ impl Addresses {
+             u64_at(&mut out, offset, value);
+         }
+         u32_at(&mut out, 0x44, self.context_id as u32);
+-        if macos_counters() {
+-            // As macOS: the setup command carries the scene slot, and the
+-            // start command carries this Work's position in the queue.
+-            u32_at(&mut out, 0x48, 1);
+-            u32_at(&mut out, 0x58, self.scene() as u32);
+-        } else {
+-            u32_at(&mut out, 0x48, self.tiling_counter as u32);
+-        }
++        u32_at(&mut out, 0x48, self.tiling_counter as u32);
+         u64_at(&mut out, 0x50, self.buffer_manager_slot);
+         u64_at(&mut out, 0x64, work + 0x784);
+         u64_at(&mut out, 0x6c, work + 0x8a8);
+         u32_at(&mut out, 0x7c, self.tiling_uuid as u32);
+         u64_at(&mut out, 0x190, self.support);
+         u64_at(&mut out, 0x1a8, self.tiling_status_page);
+-        u64_at(&mut out, 0x1b8, if macos_counters() { self.tiling_counter as u32 as u64 } else { 1 });
++        u64_at(&mut out, 0x1b8, 1);
+         u32_at(&mut out, 0x1c0, self.tiling_event as u32);
+         u32_at(&mut out, 0x1cc, 0x80000003);
+         for (offset, value) in [
+@@ -554,13 +547,7 @@ impl Addresses {
+             u64_at(&mut out, offset, value);
+         }
+         u32_at(&mut out, 0x5c, self.context_id as u32);
+-        if macos_counters() {
+-            u32_at(&mut out, 0x60, 1);
+-            u32_at(&mut out, 0x70, self.scene() as u32);
+-            u32_at(&mut out, 0x1d8, self.fragment_counter as u32);
+-        } else {
+-            u32_at(&mut out, 0x60, self.tiling_counter as u32);
+-        }
++        u32_at(&mut out, 0x60, self.tiling_counter as u32);
+         u64_at(&mut out, 0x68, self.buffer_manager_slot);
+         u64_at(&mut out, 0x7c, work + 0xa58);
+         u64_at(&mut out, 0x84, work + 0xbf0);
+@@ -624,17 +611,6 @@ impl Addresses {
+     }
+ }
+ 
+-fn macos_counters() -> bool {
+-    crate::module_parameters::micro_layout.value() != 0
+-}
+-
+-impl Addresses {
+-    /// Scene slot selected by this render's BufferThing record.
+-    fn scene(&self) -> u64 {
+-        (self.buffer_thing & 0x3fff) / 0x80
+-    }
+-}
+-
+ fn tagged_page(address: u64) -> u64 {
+     (1 << 56) | (address >> 8)
+ }
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py b/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py
+index c514aba82a32..b9db5d3e4dc5 100644
+--- a/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-scene-offset.py
+@@ -33,7 +33,6 @@ type Result<T> = std::result::Result<T, Error>;
+ mod module_parameters {
+     pub struct Parameter(u32);
+     impl Parameter { pub fn value(&self) -> u32 { self.0 } }
+-    pub static micro_layout: Parameter = Parameter(0);
+     pub static notifier_flush: Parameter = Parameter(0);
+ }
+ // Only fragment_work uses this shim; the test calls the register builders.

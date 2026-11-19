@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 27 Oct 2026 19:50:32 -0400
+Subject: [PATCH] drm/asahi: enable G16 firmware-managed idle transitions
+
+(cherry picked from commit da8c556da4e13f2f1efaa8ff92f6349fd4f65bbb)
+(cherry picked from commit ebb32088471b2f95e19d626172f491b85a07baa1)
+---
+ drivers/gpu/drm/asahi/g16_platform.rs | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index ec9de72462f4..168f2d6bc02d 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -13,6 +13,7 @@
+ const REGISTER_LIMIT: u64 = 0xffff_fc21_8100_0000;
+ const MCC_BASE: u64 = 0x2201c4000;
+ const MCC_SIZE: u32 = 0x18000;
++const REGION_C_IDLE_ENABLE: usize = 0x30;
+ 
+ 
+ 
+@@ -360,6 +361,10 @@ pub(crate) fn hwdata(&self) -> Result<KVec<u8>> {
+ 
+     pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+         let mut out = zeroed(PAGE as usize)?;
++        // Let firmware request automatic idle transitions. With this word
++        // zero, T8132 keeps PMGR GFX ACTUAL at 15 even with no queued work.
++        // Setting it to one permits idle state 0 and wake on new submissions.
++        put32(&mut out, REGION_C_IDLE_ENABLE, 1);
+         for (off, value) in [
+             (0x78, 1),
+             (0x7ec, 1),

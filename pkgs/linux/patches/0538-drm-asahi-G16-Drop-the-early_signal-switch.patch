@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 20 Oct 2026 00:28:55 -0400
+Subject: [PATCH] drm/asahi: G16: Drop the early_signal switch
+
+early_signal chose the pump's fence-signalling order: 0 signalled one
+finished submission per pass after admission, 2 published first and then
+signalled every finished submission in one batch. Production runs 1,
+signalling every finished submission before each admission pass, which
+is now the only order. The asahi_m4/early_signal debugfs toggle, one of
+the perf A/B switches, is gone with it.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  4 ----
+ drivers/gpu/drm/asahi/g16_drm.rs      | 18 +-----------------
+ drivers/gpu/drm/asahi/g16_timeline.rs |  6 ------
+ 3 files changed, 1 insertion(+), 27 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index a32151df196f..be3637b0d515 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -233,10 +233,6 @@ fn probe<'bound>(
+             default: 6,
+             description: "Bitmask: drop firmware dependency items that are redundant: 1 on the same lane's earlier Work, 2 already reached at publish, 4 already waited on by this lane's previous Work. Counters in debugfs asahi_m4/dep_stats. Runtime: debugfs asahi_m4/dep_elide",
+         },
+-        early_signal: u32 {
+-            default: 1,
+-            description: "Fence signalling order in the pump: 0 one finished submission per pass after admission (the earlier behaviour); 1 every finished submission before admission; 2 publish first, then every finished submission in one batch. Runtime: debugfs asahi_m4/early_signal",
+-        },
+         timeline_records: u32 {
+             default: 131072,
+             description: "Debug: timeline ring capacity in records (160 bytes each), allocated at probe only when timeline is nonzero",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index becab41c708d..bc841fd0fd13 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -231,7 +231,6 @@ pub(crate) fn register<'a>(
+     )?;
+     use crate::g16_timeline::FlagKnob;
+     let knobs = [
+-        (c_str!("early_signal"), FlagKnob::EARLY_SIGNAL, crate::module_parameters::early_signal.value()),
+         (c_str!("profile"), FlagKnob::PROFILE, crate::module_parameters::profile.value()),
+         (c_str!("dep_elide"), FlagKnob::DEP_ELIDE, crate::module_parameters::dep_elide.value()),
+         (c_str!("read_opt"), FlagKnob::READ_OPT, crate::module_parameters::read_opt.value()),
+@@ -1672,9 +1671,7 @@ fn run(this: Arc<Self>) {
+             // Signal every finished job before admitting more work, with the
+             // locks dropped: a completed fence must not wait behind a
+             // publication pass. Upstream signals from its event path.
+-            let mut finished = if result.is_ok()
+-                && crate::g16_timeline::EARLY_SIGNAL.load(Ordering::Relaxed) == 1
+-            {
++            let mut finished = if result.is_ok() {
+                 engine.take_finished()
+             } else {
+                 KVec::new()
+@@ -1833,19 +1830,6 @@ fn run(this: Arc<Self>) {
+                 }
+                 return;
+             }
+-            // early_signal=2: publish first (above), then signal every
+-            // finished job in one batch with the locks dropped.
+-            if crate::g16_timeline::EARLY_SIGNAL.load(Ordering::Relaxed) == 2 {
+-                let mut finished = engine.take_finished();
+-                if !finished.is_empty() {
+-                    drop(runtime);
+-                    drop(engine);
+-                    for job in finished.drain_all() {
+-                        this.signal_finished(job);
+-                    }
+-                    continue;
+-                }
+-            }
+             if let Some(index) = engine.jobs.iter().position(|j| {
+                 j.pending == 0 && (j.error.is_some() || j.next == j.execution.parameters.len())
+             }) {
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index e970389b91d9..3cea3f07179e 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -340,11 +340,6 @@ pub(crate) fn init_caps(queue: u32, lane: u32) -> Result {
+     Ok(())
+ }
+ 
+-/// Signal finished jobs before each admission pass (asahi_m4.early_signal,
+-/// runtime: debugfs `asahi_m4/early_signal`). 0 restores signalling one job
+-/// per pump pass after admission.
+-pub(crate) static EARLY_SIGNAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+-
+ /// How much of a reused scratch lease to zero (asahi_m4.scratch_zero).
+ pub(crate) static SCRATCH_ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(2);
+ 
+@@ -360,7 +355,6 @@ pub(crate) fn init(&self, value: u32) {
+         self.cell.store(value.min(self.max), core::sync::atomic::Ordering::Relaxed);
+     }
+ 
+-    pub(crate) const EARLY_SIGNAL: Self = Self { cell: &EARLY_SIGNAL, name: "early_signal", max: 2 };
+     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
+     pub(crate) const DEP_ELIDE: Self = Self { cell: &DEP_ELIDE, name: "dep_elide", max: 7 };
+     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };

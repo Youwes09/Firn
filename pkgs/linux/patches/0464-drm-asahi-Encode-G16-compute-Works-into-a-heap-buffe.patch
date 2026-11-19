@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 15:00:46 -0400
+Subject: [PATCH] drm/asahi: Encode G16 compute Works into a heap buffer
+
+As for render Works: fill a caller-provided buffer instead of returning
+the 0x8c0-byte encoding by value through the submission frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_compute.rs | 24 +++++++++++++-----------
+ drivers/gpu/drm/asahi/g16_runtime.rs |  4 +++-
+ 2 files changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_compute.rs b/drivers/gpu/drm/asahi/g16_compute.rs
+index 40d8a6067cd3..3aa4c2581b23 100644
+--- a/drivers/gpu/drm/asahi/g16_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_compute.rs
+@@ -160,15 +160,17 @@ fn valid(&self) -> bool {
+             && (self.sampler_count == 0) == (self.sampler == 0)
+     }
+ 
+-    pub(crate) fn work(&self, a: &Addresses) -> Option<[u8; 0x8c0]> {
++    pub(crate) fn work(&self, a: &Addresses, out: &mut [u8]) -> Option<()> {
+         if !self.valid() {
+             return None;
+         }
+-        let mut out = [0; 0x8c0];
+-        u32_at(&mut out, 0, 3);
+-        u64_at(&mut out, 4, a.counter);
+-        u32_at(&mut out, 12, a.context);
+-        u64_at(&mut out, 16, a.notifier);
++        if out.len() != 0x8c0 {
++            return None;
++        }
++        u32_at(&mut *out, 0, 3);
++        u64_at(&mut *out, 4, a.counter);
++        u32_at(&mut *out, 12, a.context);
++        u64_at(&mut *out, 16, a.notifier);
+         let registers = [
+             (0x1a510, self.save_area),
+             (0x1a420, a.cdm_entry.unwrap_or(self.cdm)),
+@@ -196,8 +198,8 @@ fn valid(&self) -> bool {
+             (0x0a351, a.register_identity),
+         ];
+         for (index, (reg, value)) in registers.iter().enumerate() {
+-            u32_at(&mut out, 0x20 + index * 12, *reg);
+-            u64_at(&mut out, 0x24 + index * 12, *value);
++            u32_at(&mut *out, 0x20 + index * 12, *reg);
++            u64_at(&mut *out, 0x24 + index * 12, *value);
+         }
+         for (off, value) in [
+             (0x720, a.register_table),
+@@ -219,7 +221,7 @@ fn valid(&self) -> bool {
+             (0x86a, a.support),
+             (0x883, 0),
+         ] {
+-            u64_at(&mut out, off, value);
++            u64_at(&mut *out, off, value);
+         }
+         for (off, value) in [
+             (0x728, 24 | (288 << 16)),
+@@ -244,11 +246,11 @@ fn valid(&self) -> bool {
+             (0x874, 0x21b00),
+             (0x87c, 0x11700),
+         ] {
+-            u32_at(&mut out, off, value);
++            u32_at(&mut *out, off, value);
+         }
+         out[0x872] = 1;
+         out[0x88b] = 1;
+-        Some(out)
++        Some(())
+     }
+ 
+     pub(crate) fn microsequence(&self, a: &Addresses) -> [u8; 0x300] {
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index b7a14c3d10ec..ea295e73dc71 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -2479,7 +2479,9 @@ fn submit_compute_queue(
+         let own = queue.lanes.map_or([0; 3], |l| l.map(|lane| lane.firmware_stamp()));
+         self.note_dependency_events(dependencies, own);
+         a.cdm_entry = Some(alias + compute::ENTRY_OFFSET);
+-        let work = params.work(&a).ok_or(EINVAL)?;
++        let mut work = KVec::new();
++        work.extend_with(0x8c0, 0u8, GFP_KERNEL)?;
++        params.work(&a, &mut work).ok_or(EINVAL)?;
+         // Timestamp's user destinations must lie in the validated special-
+         // object aperture. Firmware writes nanoseconds directly, as on M1/M2.
+         // Firmware consumes this pointer pair, so it lives in the Work's

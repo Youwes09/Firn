@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 19:53:23 -0600
+Subject: [PATCH] drm/asahi: G16: Take automatic idle timing from the device
+ tree
+
+Automatic idle ran with idle prediction off and every timing field zero
+apart from the fender delay, so the GPU powered down between frames.
+Fill region C +0x34 (idle prediction) and the timing fields at +0x7c4 to
++0x7e8 and +0x9b8 to +0x9c0 from their /arm-io/sgx properties, which m1n1
+passes as apple,sgx-<name>. The J713's ADT has none of them, so each
+falls back to the value macOS 26.6.2 writes there (captured by Niklas
+Sheth). The fields' meanings and properties are from interface notes by
+Syd Garlathy <s@ll.dev>, written from macOS's drivers.
+
+On the J713 this raises the vkmark score from 3656 to 5498, and the GPU
+still powers off when idle and wakes for new work.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_platform.rs | 29 +++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 856dcff3bba1..ee15df758144 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -14,7 +14,26 @@
+ const MCC_BASE: u64 = 0x2201c4000;
+ const MCC_SIZE: u32 = 0x18000;
+ const REGION_C_IDLE_ENABLE: usize = 0x30;
+-const REGION_C_CLOCK_GATED_OFF_DELAY_MS: usize = 0x9bc;
++const REGION_C_IDLE_PREDICTION: usize = 0x34;
++
++/// Automatic idle timing, from `/arm-io/sgx`: region C offset, property and
++/// the value macOS 26.6.2 writes on the J713, whose ADT has none of them.
++/// Weights and confidences are binary32, the rest unsigned.
++const IDLE_TIMING: [(usize, &CStr, u32); 13] = [
++    (0x7c4, c_str!("apple,sgx-gpu-idleoff-standby-timer"), 1250), // us
++    (0x7c8, c_str!("apple,sgx-gpu-idleoff-prob-init-val"), 0x3f80_0000), // 1.0
++    (0x7cc, c_str!("apple,sgx-gpu-idleoff-fn-hit"), 0x3f4c_cccd), // 0.8
++    (0x7d0, c_str!("apple,sgx-gpu-idleoff-fi-hit"), 0x3e4c_cccd), // 0.2
++    (0x7d4, c_str!("apple,sgx-gpu-idleoff-fn-miss"), 0x3f66_6666), // 0.9
++    (0x7d8, c_str!("apple,sgx-gpu-idleoff-fi-miss"), 0x3dcc_cccd), // 0.1
++    (0x7dc, c_str!("apple,sgx-gpu-idleoff-nei-hit"), 0x3e80_0000), // 0.25
++    (0x7e0, c_str!("apple,sgx-gpu-idleoff-min_conf"), 0x3f33_3333), // 0.7
++    (0x7e4, c_str!("apple,sgx-gpu-idleoff-high-conf"), 0x3f66_6666), // 0.9
++    (0x7e8, c_str!("apple,sgx-gpu-idleoff-reset-iter"), 6),
++    (0x9b8, c_str!("apple,sgx-gpu-idle-off-delay-ms"), 2),
++    (0x9bc, c_str!("apple,sgx-gpu-fender-idle-off-delay-ms"), 40),
++    (0x9c0, c_str!("apple,sgx-gpu-fw-early-wake-timeout-ms"), 5),
++];
+ 
+ 
+ 
+@@ -382,9 +401,11 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+         // zero, T8132 keeps PMGR GFX ACTUAL at 15 even with no queued work.
+         // Setting it to one permits idle state 0 and wake on new submissions.
+         put32(&mut out, REGION_C_IDLE_ENABLE, 1);
+-        // Keep GFX clock-gated briefly before powering it off. On T8132,
+-        // 40 permits ACTUAL 4 between frames and state 0 after quiet time.
+-        put32(&mut out, REGION_C_CLOCK_GATED_OFF_DELAY_MS, 40);
++        // Predict idle periods rather than using fixed timing, as macOS does.
++        put32(&mut out, REGION_C_IDLE_PREDICTION, 1);
++        for (off, name, default) in IDLE_TIMING {
++            put32(&mut out, off, adt_word(&self.node, name, Some(default))?);
++        }
+         // Performance-state limits, in hundredths of a state.
+         let top_state = 100 * self.max_pstate();
+         for (off, value) in [

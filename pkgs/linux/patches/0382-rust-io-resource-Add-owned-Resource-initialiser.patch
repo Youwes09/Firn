@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Sat, 12 Jul 2025 12:37:30 +0200
+Subject: [PATCH] rust: io: resource: Add owned Resource initialiser
+
+Some C functions like of_reserved_mem_region_to_resource_byname() expect
+a pointer to a `struct resource` so provide ::zeroed() as initialiser
+and ::as_raw() so other parts in the kernel crate can use functions
+which expect such a pointer.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+(cherry picked from commit ecfe14f109e44ec7e5bef5d696c40030aed24d94)
+---
+ rust/kernel/io/resource.rs | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/rust/kernel/io/resource.rs b/rust/kernel/io/resource.rs
+index 758ce62b3cce..36c3eb06bd54 100644
+--- a/rust/kernel/io/resource.rs
++++ b/rust/kernel/io/resource.rs
+@@ -79,6 +79,18 @@ unsafe impl Sync for Region {}
+ pub struct Resource(Opaque<bindings::resource>);
+ 
+ impl Resource {
++    /// Create a new zeroed [`Resource`]
++    pub(crate) fn zeroed() -> Self {
++        Resource {
++            0: Opaque::<bindings::resource>::zeroed(),
++        }
++    }
++
++    /// Gets the raw pointer to the wrapped `bindings::resource`.
++    pub(crate) fn as_raw(&self) -> *mut bindings::resource {
++        self.0.get()
++    }
++
+     /// Creates a reference to a [`Resource`] from a valid pointer.
+     ///
+     /// # Safety

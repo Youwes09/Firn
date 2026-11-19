@@ -9,7 +9,7 @@ let
 
   rules = {
     "kernel is this repository's source build" = kernel.modDirVersion == "7.4.0-rc1-firn";
-    "the kernel builds no GPU or speaker codec driver" =
+    "the kernel builds no speaker codec driver, nor Asahi's pre-M4 GPU driver" =
       lib.all
         (
           option:
@@ -42,7 +42,7 @@ let
       cfg.boot.loader.external.enable && !cfg.boot.loader.grub.enable;
     "no audio server is enabled" =
       !cfg.services.pipewire.enable && !(cfg.services.pulseaudio.enable or false);
-    "no graphics stack is enabled" = !cfg.hardware.graphics.enable;
+    "the GPU driver is built" = (kernel.config.CONFIG_DRM_ASAHI_M4 or "n") == "m";
   };
   failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) rules);
 in

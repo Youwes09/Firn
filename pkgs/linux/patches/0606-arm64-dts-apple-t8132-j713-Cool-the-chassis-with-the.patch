@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 18 Nov 2026 10:43:17 -0600
+Subject: [PATCH] arm64: dts: apple: t8132-j713: Cool the chassis with the GPU
+ too
+
+Under GPU load the chassis passed the 45 C the CPUs are held to. Make
+the GPU a cooling device and give it a share of the chassis zone's
+budget, weighted like the P cores.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ arch/arm64/boot/dts/apple/t8132-gpu.dtsi |  1 +
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 10 +++++++++-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm64/boot/dts/apple/t8132-gpu.dtsi b/arch/arm64/boot/dts/apple/t8132-gpu.dtsi
+index a7cefeb2cf38..938e028794c0 100644
+--- a/arch/arm64/boot/dts/apple/t8132-gpu.dtsi
++++ b/arch/arm64/boot/dts/apple/t8132-gpu.dtsi
+@@ -37,6 +37,7 @@ gpu: gpu@302600000 {
+ 				<&uat_handoff>, <&gpu_firmware>;
+ 		memory-region-names = "ttbs", "pagetables", "l2",
+ 				      "handoff", "firmware";
++		#cooling-cells = <2>;
+ 		/* Enabled only after the loader has reserved the firmware state. */
+ 		status = "disabled";
+ 	};
+diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
+index 559dce81d796..f0c0dd38c241 100644
+--- a/arch/arm64/boot/dts/apple/t8132-j713.dts
++++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
+@@ -87,7 +87,8 @@ map0 {
+ 		 * Under sustained all-core load macOS lets TVS1 reach 45 C, then
+ 		 * holds it there at about 7.8 W. Near that power an E core does 1.6
+ 		 * times the work per watt of a P core, so the E cores get the larger
+-		 * share.
++		 * share. The GPU heats the same chassis and is weighted like the P
++		 * cores.
+ 		 */
+ 		chassis-thermal {
+ 			polling-delay-passive = <1000>;
+@@ -131,6 +132,13 @@ map1 {
+ 						<&cpu_p3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+ 					contribution = <1024>;
+ 				};
++
++				map2 {
++					trip = <&chassis_control>;
++					cooling-device =
++						<&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++					contribution = <1024>;
++				};
+ 			};
+ 		};
+ 	};

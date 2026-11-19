@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 22 Oct 2026 22:52:35 -0400
+Subject: [PATCH] drm/asahi: uapi: Move the fragment barrier bits to the
+ downstream range
+
+DRM_ASAHI_FEATURE_FRAGMENT_BARRIER (bit 1) and
+DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT (bit 3) are G16 extensions, but
+they sat in the next free bits of upstream's allocations. If upstream
+Mesa used render flag 3 for something else, this driver would silently
+apply a fragment-stage barrier to it.
+
+Move both to bit 29, below the FEW_PRIMITIVES bits at 30, and group the
+downstream values under one comment in each enum. Bits 1 and 3 are not
+kept as aliases. Userspace sends the flag only when the kernel
+advertises the feature bit, so a mismatched kernel and Mesa fall back to
+fully serialized renders.
+
+A build-time assert in g16_drm.rs and a selftest keep downstream values
+in bits 24..30 and upstream values below bit 24. The selftest also checks
+the accepted render flags and, with MESA_UAPI_HEADER, that Mesa's copy
+is byte-identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs              | 24 ++++++++
+ include/uapi/drm/asahi_drm.h                  | 51 ++++++++++-------
+ .../gpu/asahi/test-uapi-downstream-bits.py    | 57 +++++++++++++++++++
+ 3 files changed, 111 insertions(+), 21 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-uapi-downstream-bits.py
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index cd8a6d0e06c2..f2b7105c633b 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -22,6 +22,30 @@
+ use kernel::workqueue::{self, impl_has_work, new_work, Work, WorkItem};
+ use kernel::{bindings, c_str, device::{Bound, Core}, drm, platform, prelude::*, scatterlist, uapi};
+ 
++// Downstream UAPI values (asahi_drm.h) are single bits allocated from bit 30
++// downwards; upstream's start at bit 0. Keep the two ranges apart.
++const _: () = {
++    use uapi::*;
++    let upstream = drm_asahi_feature_DRM_ASAHI_FEATURE_SOFT_FAULTS as u64
++        | drm_asahi_render_flags_DRM_ASAHI_RENDER_VERTEX_SCRATCH as u64
++        | drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES as u64
++        | drm_asahi_render_flags_DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING as u64
++        | drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT as u64;
++    let downstream = [
++        drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES as u64,
++        drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_BARRIER as u64,
++        drm_asahi_render_flags_DRM_ASAHI_RENDER_FEW_PRIMITIVES as u64,
++        drm_asahi_render_flags_DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT as u64,
++    ];
++    assert!(upstream < 1 << 24);
++    let mut i = 0;
++    while i < downstream.len() {
++        let bit = downstream[i];
++        assert!(bit.is_power_of_two() && bit >= 1 << 24 && bit <= 1 << 30);
++        i += 1;
++    }
++};
++
+ enum Command {
+     Render(uapi::drm_asahi_cmd_render),
+     Compute(uapi::drm_asahi_cmd_compute),
+diff --git a/include/uapi/drm/asahi_drm.h b/include/uapi/drm/asahi_drm.h
+index 078ce0a21248..9fa88d1b8e05 100644
+--- a/include/uapi/drm/asahi_drm.h
++++ b/include/uapi/drm/asahi_drm.h
+@@ -214,21 +214,25 @@ enum drm_asahi_feature {
+ 	 */
+ 	DRM_ASAHI_FEATURE_SOFT_FAULTS = (1UL) << 0,
+ 
+-	/**
+-	 * @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER: Render commands accept
+-	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT to defer render dependencies
+-	 * until the fragment stage.
++	/*
++	 * Downstream (G16) extensions. They are allocated from bit 30
++	 * downwards, clear of upstream's allocations from bit 0 upwards.
++	 * Upstream userspace must not use these values. Keep this header
++	 * byte-identical with Mesa's include/drm-uapi/asahi_drm.h.
+ 	 */
+-	DRM_ASAHI_FEATURE_FRAGMENT_BARRIER = (1UL) << 1,
+ 
+ 	/**
+ 	 * @DRM_ASAHI_FEATURE_FEW_PRIMITIVES: Render commands accept
+ 	 * @DRM_ASAHI_RENDER_FEW_PRIMITIVES.
+-	 *
+-	 * Downstream (G16) extension. Downstream-only bits are allocated from
+-	 * bit 30 downwards to stay clear of upstream allocations.
+ 	 */
+ 	DRM_ASAHI_FEATURE_FEW_PRIMITIVES = (1UL) << 30,
++
++	/**
++	 * @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER: Render commands accept
++	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT to defer render dependencies
++	 * until the fragment stage.
++	 */
++	DRM_ASAHI_FEATURE_FRAGMENT_BARRIER = (1UL) << 29,
+ };
+ 
+ /**
+@@ -805,17 +809,6 @@ enum drm_asahi_render_flags {
+ 	 */
+ 	DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING = (1U << 2),
+ 
+-	/**
+-	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT: Apply the command header's
+-	 * vdm_barrier before fragment execution instead of before tiling.
+-	 * The cdm_barrier and submission input fences still precede tiling.
+-	 * Tiling commands on the same queue execute in submission order.
+-	 * Userspace must ensure that this command's tiling accesses do not
+-	 * depend on earlier fragment execution, including write-after-read
+-	 * hazards. Requires @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER.
+-	 */
+-	DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT = (1U << 3),
+-
+ 	/**
+ 	 * @DRM_ASAHI_RENDER_DBIAS_IS_INT: Use integer depth bias formula.
+ 	 *
+@@ -830,6 +823,13 @@ enum drm_asahi_render_flags {
+ 	 */
+ 	DRM_ASAHI_RENDER_DBIAS_IS_INT = (1U << 18),
+ 
++	/*
++	 * Downstream (G16) extensions. They are allocated from bit 30
++	 * downwards, clear of upstream's allocations from bit 0 upwards.
++	 * Upstream userspace must not use these values. Keep this header
++	 * byte-identical with Mesa's include/drm-uapi/asahi_drm.h.
++	 */
++
+ 	/**
+ 	 * @DRM_ASAHI_RENDER_FEW_PRIMITIVES: The render's control streams submit
+ 	 * at most four primitives in total, counting every draw and instance,
+@@ -839,10 +839,19 @@ enum drm_asahi_render_flags {
+ 	 * This selects a faster fragment-stage tile dispatch mode for such
+ 	 * passes. Setting it for a larger pass can hang the GPU. Requires
+ 	 * @DRM_ASAHI_FEATURE_FEW_PRIMITIVES.
+-	 *
+-	 * Downstream (G16) extension, allocated from the top of the flag space.
+ 	 */
+ 	DRM_ASAHI_RENDER_FEW_PRIMITIVES = (1U << 30),
++
++	/**
++	 * @DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT: Apply the command header's
++	 * vdm_barrier before fragment execution instead of before tiling.
++	 * The cdm_barrier and submission input fences still precede tiling.
++	 * Tiling commands on the same queue execute in submission order.
++	 * Userspace must ensure that this command's tiling accesses do not
++	 * depend on earlier fragment execution, including write-after-read
++	 * hazards. Requires @DRM_ASAHI_FEATURE_FRAGMENT_BARRIER.
++	 */
++	DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT = (1U << 29),
+ };
+ 
+ /**
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-uapi-downstream-bits.py b/tools/testing/selftests/drivers/gpu/asahi/test-uapi-downstream-bits.py
+new file mode 100755
+index 000000000000..027566bd2886
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-uapi-downstream-bits.py
+@@ -0,0 +1,57 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Check the downstream (G16) values in include/uapi/drm/asahi_drm.h.
++
++Downstream feature bits and render flags are single bits allocated from bit 30
++downwards, after the "Downstream (G16) extensions" comment in each enum.
++Upstream's values stay below bit 24. The G16 render path accepts exactly the
++expected render flags; the old downstream bits (feature 1, render flag 3) are
++not aliases. With MESA_UAPI_HEADER set, Mesa's copy must be byte-identical.
++"""
++from pathlib import Path
++import os
++import re
++
++root = next(p for p in Path(__file__).resolve().parents
++            if (p / 'include/uapi/drm/asahi_drm.h').exists())
++header = (root / 'include/uapi/drm/asahi_drm.h').read_text()
++
++
++def values(enum):
++    body = re.search(r'^enum ' + enum + r' \{\n(.*?)^\};', header, re.M | re.S).group(1)
++    marker = body.index('Downstream (G16) extensions')
++    found = {}
++    for m in re.finditer(r'(DRM_ASAHI_\w+) = \(1UL?\)? ?<< (\d+)\)?,', body):
++        found[m.group(1)] = (int(m.group(2)), m.start() > marker)
++    return found
++
++
++features = values('drm_asahi_feature')
++flags = values('drm_asahi_render_flags')
++for name, table in (('feature', features), ('render flag', flags)):
++    bits = [bit for bit, _ in table.values()]
++    assert len(bits) == len(set(bits)), f'duplicate {name} bit: {table}'
++    for value, (bit, downstream) in table.items():
++        if downstream:
++            assert 24 <= bit <= 30, f'{value} = bit {bit} is outside the downstream range'
++        else:
++            assert bit < 24, f'upstream {value} = bit {bit} reaches the downstream range'
++
++assert {k: v[0] for k, v in features.items() if v[1]} == {
++    'DRM_ASAHI_FEATURE_FEW_PRIMITIVES': 30, 'DRM_ASAHI_FEATURE_FRAGMENT_BARRIER': 29}
++assert {k: v[0] for k, v in flags.items() if v[1]} == {
++    'DRM_ASAHI_RENDER_FEW_PRIMITIVES': 30, 'DRM_ASAHI_RENDER_VDM_BARRIER_FRAGMENT': 29}
++
++# The render path's accepted-flag mask, by name, resolved through the header.
++driver = (root / 'drivers/gpu/drm/asahi/g16_drm.rs').read_text()
++aliases = dict(re.findall(r'drm_asahi_render_flags_(DRM_ASAHI_RENDER_\w+) as (\w+)', driver))
++mask = re.search(r'c\.flags & !\(([^)]*)\)', driver).group(1)
++accepted = {flags[{v: k for k, v in aliases.items()}[n.strip()]][0] for n in mask.split('|')}
++assert accepted == {1, 18, 29, 30}, accepted
++assert 3 not in accepted
++
++mesa = os.environ.get('MESA_UAPI_HEADER')
++if mesa:
++    assert Path(mesa).read_bytes() == (root / 'include/uapi/drm/asahi_drm.h').read_bytes(), \
++        f'{mesa} differs from the kernel header'
++print('PASS: downstream asahi UAPI bits' + (' (Mesa header identical)' if mesa else ''))

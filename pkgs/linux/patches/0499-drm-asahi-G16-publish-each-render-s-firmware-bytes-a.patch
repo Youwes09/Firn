@@ -1,0 +1,384 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 12 Oct 2026 05:37:24 -0400
+Subject: [PATCH] drm/asahi: G16: publish each render's firmware bytes as one
+ batch
+
+publish_render wrote about twenty separate pieces (notifier words, both
+stages' preludes, Works, microsequences, dependency items and ring
+entries) with write_live, each resolving its firmware region in the
+region tree and issuing two barriers. On Dota (#177) region lookups and
+write_live were 3.6 us per Work.
+
+Add FirmwareSpace::write_batch: destinations are validated first, regions
+are looked up again only when a write leaves the previous one, and cache
+maintenance (fw_cache_maint=1) and the barriers complete once per batch.
+write_live and zero_live are batches of one with unchanged behaviour.
+Nothing in the batch is visible to firmware before flush() publishes the
+lane head and channel entry behind its own barrier.
+
+publish_render now builds every piece first and writes them together. Its
+frame grows from 0x4e0 to 0xaa0 bytes; the pump's deepest chain stays
+near 8.6 KiB of the 16 KiB stack.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 157 ++++++++++++++-------------
+ drivers/gpu/drm/asahi/g16_vm.rs      | 154 ++++++++++++++++++--------
+ 2 files changed, 191 insertions(+), 120 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index bd0388ba0bbf..4e3d061c7ad7 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -2745,97 +2745,104 @@ fn publish_render(
+                 % 0x500,
+             (firsts[1] + 2 + stage_dependencies[1].iter().flatten().count() as u32) % 0x500,
+         ];
+-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+-        if a.event_control == render_notifier(lanes) {
+-            // Shared notifier: count this render's tiling and fragment Works
+-            // into the queue's cumulative total. Firmware counts completions
+-            // at +0xc and writes the lanes' driver stamps as they retire.
+-            fw.write_live(a.event_control + 0x24, &(a.context_id as u32).to_le_bytes())?;
+-            fw.write_live(
+-                a.event_count_array,
+-                &queue.notified_works.wrapping_add(2).to_le_bytes(),
+-            )?;
+-        } else {
+-            fw.write_live(a.event_control, &a.event_count_array.to_le_bytes())?;
+-            fw.write_live(
+-                a.event_control + 8,
+-                &(a.fragment_stamp as u32).to_le_bytes(),
+-            )?;
+-            fw.write_live(a.event_control + 12, &0u32.to_le_bytes())?;
+-            fw.write_live(a.event_control + 0x10, &0x50u32.to_le_bytes())?;
+-            fw.write_live(a.event_control + 0x24, &(a.context_id as u32).to_le_bytes())?;
+-            fw.write_live(a.event_count_array, &2u32.to_le_bytes())?;
+-            fw.write_live(
+-                a.tiling_driver_stamp,
+-                &g16_stamp::previous(a.tiling_stamp as u32).to_le_bytes(),
+-            )?;
+-            fw.write_live(
+-                a.fragment_driver_stamp,
+-                &g16_stamp::previous(a.fragment_stamp as u32).to_le_bytes(),
+-            )?;
+-        }
+-        // The queue lanes persist independently of the physical work channel.
++        // Every byte this render publishes, written as one batch: one region
++        // lookup per destination region and one barrier pair, rather than a
++        // lookup and two barriers for each of about twenty writes.
++        let shared = a.event_control == render_notifier(lanes);
++        let context = (a.context_id as u32).to_le_bytes();
++        let notified = queue.notified_works.wrapping_add(2).to_le_bytes();
++        let count_array = a.event_count_array.to_le_bytes();
++        let fragment_stamp = (a.fragment_stamp as u32).to_le_bytes();
++        let zero = 0u32.to_le_bytes();
++        let flags = 0x50u32.to_le_bytes();
++        let two = 2u32.to_le_bytes();
++        let tiling_previous = g16_stamp::previous(a.tiling_stamp as u32).to_le_bytes();
++        let fragment_previous = g16_stamp::previous(a.fragment_stamp as u32).to_le_bytes();
++        let preludes = [a.tiling_prelude(blocks), a.fragment_prelude()];
++        let tiling_micro = a.tiling_microsequence();
++        let fragment_micro = a.fragment_microsequence();
++        // At most two dependency items and four ring entries per stage.
++        let mut items = [[[0u8; 0x40]; 2]; 2];
++        let mut entries = [[[0u8; 8]; 4]; 2];
++        let mut item_counts = [0usize; 2];
++        let mut entry_counts = [0usize; 2];
++        let render_kind = crate::module_parameters::dependency_kind.value();
+         for stage in 0..2 {
+-            let Lane { ring, .. } = lanes[stage];
+-            let prelude = if stage == 0 {
+-                a.tiling_prelude
+-            } else {
+-                a.fragment_prelude
+-            };
+-            let work = if stage == 0 {
+-                a.tiling_work
++            let (prelude, work) = if stage == 0 {
++                (a.tiling_prelude, a.tiling_work)
+             } else {
+-                a.fragment_work
++                (a.fragment_prelude, a.fragment_work)
+             };
+-            let micro = if stage == 0 {
+-                a.tiling_microsequence
++            let (stamp, uuid) = if stage == 0 {
++                (a.tiling_stamp, a.tiling_uuid)
+             } else {
+-                a.fragment_microsequence
++                (a.fragment_stamp, a.fragment_uuid)
+             };
+-            fw.write_live(
+-                prelude,
+-                &if stage == 0 {
+-                    a.tiling_prelude(blocks)
+-                } else {
+-                    a.fragment_prelude()
+-                },
+-            )?;
+-            fw.write_live(work, if stage == 0 { ta } else { frag })?;
+-            if stage == 0 {
+-                fw.write_live(micro, &a.tiling_microsequence())?;
+-            } else {
+-                fw.write_live(micro, &a.fragment_microsequence())?;
+-            }
+-            let mut pos = firsts[stage];
+             // The prelude page leaves +0x40..+0xc0 free before its
+             // microsequence. All barrier bytes share the Work's lifetime.
+-            let render_kind = crate::module_parameters::dependency_kind.value();
+             let deps = stage_dependencies[stage]
+                 .iter()
+                 .enumerate()
+                 .filter_map(|(slot, dep)| dep.map(|d| (if slot == 0 { render_kind } else { 1 }, d)));
+             for (index, (kind, dep)) in deps.enumerate() {
+-                let address = prelude + 0x40 + index as u64 * 0x40;
+-                let (stamp, uuid) = if stage == 0 {
+-                    (a.tiling_stamp, a.tiling_uuid)
+-                } else {
+-                    (a.fragment_stamp, a.fragment_uuid)
+-                };
+-                fw.write_live(
+-                    address,
+-                    &g16_fw::queue::dependency(
+-                        dep.address, dep.value, dep.event, stamp as u32, uuid as u32, kind,
+-                    ),
+-                )?;
+-                fw.write_live(ring + u64::from(pos) * 8, &address.to_le_bytes())?;
+-                pos = (pos + 1) % 0x500;
++                items[stage][index] = g16_fw::queue::dependency(
++                    dep.address, dep.value, dep.event, stamp as u32, uuid as u32, kind,
++                );
++                entries[stage][entry_counts[stage]] = (prelude + 0x40 + index as u64 * 0x40).to_le_bytes();
++                item_counts[stage] += 1;
++                entry_counts[stage] += 1;
+             }
+             if stage == 1 || initbm {
+-                fw.write_live(ring + u64::from(pos) * 8, &prelude.to_le_bytes())?;
+-                pos = (pos + 1) % 0x500;
++                entries[stage][entry_counts[stage]] = prelude.to_le_bytes();
++                entry_counts[stage] += 1;
++            }
++            entries[stage][entry_counts[stage]] = work.to_le_bytes();
++            entry_counts[stage] += 1;
++        }
++        // At most 8 notifier writes and 9 per stage.
++        let mut writes: KVec<(u64, &[u8])> = KVec::with_capacity(32, GFP_KERNEL)?;
++        macro_rules! push {
++            ($va:expr, $bytes:expr) => {
++                writes.push_within_capacity(($va, $bytes)).map_err(|_| ENOMEM)
++            };
++        }
++        if shared {
++            // Shared notifier: count this render's tiling and fragment Works
++            // into the queue's cumulative total. Firmware counts completions
++            // at +0xc and writes the lanes' driver stamps as they retire.
++            push!(a.event_control + 0x24, &context)?;
++            push!(a.event_count_array, &notified)?;
++        } else {
++            push!(a.event_control, &count_array)?;
++            push!(a.event_control + 8, &fragment_stamp)?;
++            push!(a.event_control + 12, &zero)?;
++            push!(a.event_control + 0x10, &flags)?;
++            push!(a.event_control + 0x24, &context)?;
++            push!(a.event_count_array, &two)?;
++            push!(a.tiling_driver_stamp, &tiling_previous)?;
++            push!(a.fragment_driver_stamp, &fragment_previous)?;
++        }
++        // The queue lanes persist independently of the physical work channel.
++        for stage in 0..2 {
++            let Lane { ring, .. } = lanes[stage];
++            let (prelude, work, micro) = if stage == 0 {
++                (a.tiling_prelude, a.tiling_work, a.tiling_microsequence)
++            } else {
++                (a.fragment_prelude, a.fragment_work, a.fragment_microsequence)
++            };
++            push!(prelude, &preludes[stage])?;
++            push!(work, if stage == 0 { ta } else { frag })?;
++            push!(micro, if stage == 0 { &tiling_micro[..] } else { &fragment_micro[..] })?;
++            for index in 0..item_counts[stage] {
++                push!(prelude + 0x40 + index as u64 * 0x40, &items[stage][index])?;
++            }
++            // Ring entries are contiguous except where the ring wraps.
++            for (n, entry) in entries[stage][..entry_counts[stage]].iter().enumerate() {
++                let pos = (firsts[stage] + n as u32) % 0x500;
++                push!(ring + u64::from(pos) * 8, entry)?;
+             }
+-            fw.write_live(ring + u64::from(pos) * 8, &work.to_le_bytes())?;
+         }
++        self._firmware_space.as_mut().ok_or(EIO)?.write_batch(&writes)?;
+         let mut epochs = [0; 2];
+         for stage in [1usize, 0] {
+             let mut lane = lanes[stage];
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 726a6ae5c239..6caaa7080ff1 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -697,57 +697,121 @@ fn update_live(
+         va: u64,
+         size: usize,
+         mut update: impl FnMut(*mut u8, usize, usize),
++    ) -> Result {
++        self.update_batch(&[(va, size)], |_, ptr, offset, size| update(ptr, offset, size))
++    }
++
++    /// Several host-owned writes with one barrier pair, the region resolved
++    /// again only when a destination leaves the previous one. Nothing in a
++    /// batch is visible to firmware before the queue publication that follows
++    /// it (flush), which has its own barrier.
++    pub(crate) fn write_batch(&mut self, writes: &[(u64, &[u8])]) -> Result {
++        let mut ranges = KVec::with_capacity(writes.len(), GFP_KERNEL)?;
++        for &(va, bytes) in writes {
++            ranges.push((va, bytes.len()), GFP_KERNEL)?;
++        }
++        self.update_batch(&ranges, |which, ptr, offset, size| {
++            let bytes = writes[which].1;
++            // SAFETY: update_batch supplies an exclusively host-owned
++            // destination and a range within this write's source slice.
++            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), ptr, size) };
++        })
++    }
++
++    /// The region holding `va..va + size`, reusing `last` when it does.
++    fn region_from<'a>(
++        &'a self,
++        last: Option<&'a FirmwareRegion>,
++        va: u64,
++        size: usize,
++    ) -> Result<&'a FirmwareRegion> {
++        match last {
++            Some(r)
++                if va >= r.va
++                    && va
++                        .checked_add(size as u64)
++                        .is_some_and(|end| end <= r.va + (r.pages.len() * UAT_PGSZ) as u64) =>
++            {
++                Ok(r)
++            }
++            _ => self.region(va, size),
++        }
++    }
++
++    /// Update host-owned bytes, preserving adjacent firmware-owned cache lines.
++    /// Cache maintenance completes once per batch, not once per page or write.
++    fn update_batch(
++        &mut self,
++        ranges: &[(u64, usize)],
++        mut update: impl FnMut(usize, *mut u8, usize, usize),
+     ) -> Result {
+         let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_LIVE);
+         let maint = crate::g16_timeline::fw_cache_maint();
+-        let region = self.region(va, size)?;
+-        if size == 0 {
+-            return Ok(());
+-        }
+-        let start = (va - region.va) as usize;
+-        let end = start + size;
+-        let first = start / UAT_PGSZ;
+-        let last = (end - 1) / UAT_PGSZ;
+-        for index in first..=last {
+-            // Unpublished initialization is still authoritative in CPU cache.
+-            if region.dirty_pages[index].get() || !maint {
+-                continue;
+-            }
+-            let base = index * UAT_PGSZ;
+-            let within = start.saturating_sub(base);
+-            let limit = (end - base).min(UAT_PGSZ);
+-            region.pages[index].with_page_mapped(|p| {
+-                for off in (within & !63..limit).step_by(64) {
+-                    // SAFETY: These cache lines lie within the mapped page.
+-                    unsafe { core::arch::asm!("dc civac, {addr}", addr = in(reg) p.add(off)) };
++        let mut last = None;
++        // Validate every destination before touching any of them.
++        for &(va, size) in ranges {
++            last = Some(self.region_from(last, va, size)?);
++        }
++        if maint {
++            for &(va, size) in ranges {
++                if size == 0 {
++                    continue;
++                }
++                let region = self.region_from(last, va, size)?;
++                last = Some(region);
++                let start = (va - region.va) as usize;
++                let end = start + size;
++                for index in start / UAT_PGSZ..=(end - 1) / UAT_PGSZ {
++                    // Unpublished initialization is still authoritative in CPU cache.
++                    if region.dirty_pages[index].get() {
++                        continue;
++                    }
++                    let base = index * UAT_PGSZ;
++                    let within = start.saturating_sub(base);
++                    let limit = (end - base).min(UAT_PGSZ);
++                    region.pages[index].with_page_mapped(|p| {
++                        for off in (within & !63..limit).step_by(64) {
++                            // SAFETY: These cache lines lie within the mapped page.
++                            unsafe { core::arch::asm!("dc civac, {addr}", addr = in(reg) p.add(off)) };
++                        }
++                    });
+                 }
+-            });
++            }
+         }
+         crate::mem::sync();
+-        for index in first..=last {
+-            let base = index * UAT_PGSZ;
+-            let within = start.saturating_sub(base);
+-            let limit = (end - base).min(UAT_PGSZ);
+-            let dirty = region.dirty_pages[index].replace(false);
+-            region.pages[index].with_page_mapped(|p| {
+-                // SAFETY: The checked range lies in this mapped page. The
+-                // caller owns these bytes; neighboring firmware bytes were
+-                // invalidated before the batch's completion barrier above.
+-                unsafe { update(p.add(within), base + within - start, limit - within) };
+-                // Publish all initialization on a dirty page, including zeros
+-                // outside this write. Published pages need only touched lines.
+-                let lines = if !maint {
+-                    0..0
+-                } else if dirty {
+-                    0..UAT_PGSZ
+-                } else {
+-                    (within & !63)..limit
+-                };
+-                for off in lines.step_by(64) {
+-                    // SAFETY: The cache line lies in this mapped page.
+-                    unsafe { core::arch::asm!("dc cvac, {addr}", addr = in(reg) p.add(off)) };
+-                }
+-            });
++        for (which, &(va, size)) in ranges.iter().enumerate() {
++            if size == 0 {
++                continue;
++            }
++            let region = self.region_from(last, va, size)?;
++            last = Some(region);
++            let start = (va - region.va) as usize;
++            let end = start + size;
++            for index in start / UAT_PGSZ..=(end - 1) / UAT_PGSZ {
++                let base = index * UAT_PGSZ;
++                let within = start.saturating_sub(base);
++                let limit = (end - base).min(UAT_PGSZ);
++                let dirty = region.dirty_pages[index].replace(false);
++                region.pages[index].with_page_mapped(|p| {
++                    // SAFETY: The checked range lies in this mapped page. The
++                    // caller owns these bytes; neighboring firmware bytes were
++                    // invalidated before the batch's completion barrier above.
++                    unsafe { update(which, p.add(within), base + within - start, limit - within) };
++                    // Publish all initialization on a dirty page, including zeros
++                    // outside this write. Published pages need only touched lines.
++                    let lines = if !maint {
++                        0..0
++                    } else if dirty {
++                        0..UAT_PGSZ
++                    } else {
++                        (within & !63)..limit
++                    };
++                    for off in lines.step_by(64) {
++                        // SAFETY: The cache line lies in this mapped page.
++                        unsafe { core::arch::asm!("dc cvac, {addr}", addr = in(reg) p.add(off)) };
++                    }
++                });
++            }
+         }
+         crate::mem::sync();
+         Ok(())

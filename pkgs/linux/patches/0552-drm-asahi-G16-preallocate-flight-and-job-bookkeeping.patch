@@ -1,0 +1,480 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 23 Oct 2026 20:45:42 -0400
+Subject: [PATCH] drm/asahi: G16: preallocate flight and job bookkeeping to
+ fixed bounds
+
+run_job, the job worker and retirement are in the fence-signalling path,
+yet they grew vectors with GFP_KERNEL: run_job allocated each job's
+history and pushed it into the inbox, admission and take_finished grew
+the engine's lists every pass, reserve_flight grew the flight,
+publication and ledger vectors, and each retire scan reserved its list.
+
+Every one of these has a fixed bound:
+- at most JOB_CREDITS (128) jobs are between run_job and their fence,
+  since the device scheduler's credit limit is that constant and each job
+  takes one credit, so the inbox, the engine's job list and a reusable
+  finished list are preallocated to it; admission drains the inbox in
+  place, keeping its capacity;
+- MAX_FLIGHTS (1024) Works may be in flight, above the logged churn peak
+  of under 400: flights, retirements, publications, the ledger and the
+  issued list are preallocated to it at init, and reserve_flight returns
+  EBUSY at the cap (backpressure admission already retries) instead of
+  growing them;
+- a job's history (64 commands at most, plus the previous stamp) is
+  allocated by SUBMIT and carried in the scheduler job.
+
+About 1 MiB in total. Work arena refills, scratch leases, alias page
+tables and TVB growth still allocate; see the phase-2 design note.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16.rs                  | 10 +--
+ drivers/gpu/drm/asahi/g16_drm.rs              | 90 +++++++++++++------
+ drivers/gpu/drm/asahi/g16_runtime.rs          | 59 ++++++++----
+ .../drivers/gpu/asahi/test-bounded-flights.py | 83 +++++++++++++++++
+ 4 files changed, 193 insertions(+), 49 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-bounded-flights.py
+
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 25896eec33fd..d62907b8f50d 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -196,7 +196,7 @@ fn crashed(data: <Self::Data as ForeignOwnable>::Borrowed<'_>, _log: Option<&[u8
+ /// No render node is published until the submission backend is available.
+ #[path = "g16_runtime.rs"]
+ mod render_runtime;
+-pub(crate) use render_runtime::{FirmwareQueues, Stamp, Support};
++pub(crate) use render_runtime::{FirmwareQueues, Stamp, Support, MAX_FLIGHTS};
+ 
+ #[path = "g16_notify.rs"]
+ mod notify;
+@@ -829,10 +829,10 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             destroying_queues: KVec::new(),
+             free_queues: KVec::new(),
+             render_failed: false,
+-            flights: KVec::new(),
+-            retired: KVec::new(),
+-            publications: KVec::new(),
+-            ledger: KBox::new(render_runtime::Ledger::new(), GFP_KERNEL)?,
++            flights: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
++            retired: KVec::with_capacity(render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
++            publications: KVec::with_capacity(2 * render_runtime::MAX_FLIGHTS, GFP_KERNEL)?,
++            ledger: KBox::new(render_runtime::Ledger::with_capacity(render_runtime::MAX_FLIGHTS)?, GFP_KERNEL)?,
+             progress: None,
+             batch_works: 0,
+             context_roots: [None; 64],
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index f43011963e6d..527bfa87a162 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -315,14 +315,22 @@ pub(crate) fn register<'a>(
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+-        scheduler: sched::Scheduler::new(pdev.as_ref(), 4, 128, 0, 30000, c_str!("asahi_m4"))?,
++        scheduler: sched::Scheduler::new(pdev.as_ref(), 4, JOB_CREDITS, 0, 30000, c_str!("asahi_m4"))?,
+         admission <- kernel::new_mutex!(KVec::new()),
+         failed: AtomicBool::new(false),
+         notifications: runtime.notifications.clone(),
+         _fw_mem: fw_mem,
+         runtime <- kernel::new_mutex!(runtime),
+-        engine <- kernel::new_mutex!(Engine { cursor: 0, jobs: KVec::new(), issued: KVec::new() }),
+-        inbox <- kernel::new_mutex!(Inbox { running: false, jobs: KVec::new() }),
++        engine <- kernel::new_mutex!(Engine {
++            cursor: 0,
++            jobs: KVec::with_capacity(JOB_CREDITS as usize, GFP_KERNEL)?,
++            finished: KVec::with_capacity(JOB_CREDITS as usize, GFP_KERNEL)?,
++            issued: KVec::with_capacity(crate::g16::MAX_FLIGHTS, GFP_KERNEL)?,
++        }),
++        inbox <- kernel::new_mutex!(Inbox {
++            running: false,
++            jobs: KVec::with_capacity(JOB_CREDITS as usize, GFP_KERNEL)?,
++        }),
+         timeline,
+         _profile: profile,
+         _maint: maint,
+@@ -1831,9 +1839,17 @@ fn error_mut(&mut self) -> &mut Option<Error> {
+     }
+ }
+ 
++/// Scheduler credits; each job takes one, so at most this many jobs are ever
++/// between run_job and their fence signalling. The inbox and the engine's job
++/// lists are preallocated to it: run_job and the worker never allocate.
++const JOB_CREDITS: u32 = 128;
++
+ struct Engine {
+     cursor: usize,
+     jobs: KVec<Running>,
++    /// take_finished's reusable output (empty between passes).
++    finished: KVec<Running>,
++    /// One entry per published Work, bounded like the flights (MAX_FLIGHTS).
+     issued: KVec<Issued>,
+ }
+ struct Inbox {
+@@ -1843,12 +1859,11 @@ struct Inbox {
+ }
+ 
+ impl Engine {
+-    /// Collect without removing anything if allocation fails, as before.
++    /// The finished jobs, in the engine's reusable list. Return it with
++    /// `return_finished` once drained.
+     fn take_finished(&mut self) -> KVec<Running> {
+-        let mut finished = KVec::new();
+-        if finished.reserve(self.jobs.len(), GFP_KERNEL).is_err() {
+-            return finished;
+-        }
++        // Holds every job: both lists have JOB_CREDITS capacity.
++        let mut finished = core::mem::take(&mut self.finished);
+         let mut index = 0;
+         while index < self.jobs.len() {
+             let job = &self.jobs[index];
+@@ -1857,7 +1872,7 @@ fn take_finished(&mut self) -> KVec<Running> {
+             {
+                 let job = self.jobs.remove(index).expect("index in range");
+                 finished.push_within_capacity(job).map_err(|_| ())
+-                    .expect("reserved for every job");
++                    .expect("JOB_CREDITS capacity holds every job");
+             } else {
+                 index += 1;
+             }
+@@ -1869,15 +1884,23 @@ fn take_finished(&mut self) -> KVec<Running> {
+         finished
+     }
+ 
+-    /// Take the jobs drm_sched has run since the last pass, in order.
+-    /// On failure the jobs stay in the inbox for the error path to fail.
++    fn return_finished(&mut self, finished: KVec<Running>) {
++        if finished.capacity() >= self.finished.capacity() {
++            self.finished = finished;
++        }
++    }
++
++    /// Take the jobs drm_sched has run since the last pass, in order. The
++    /// inbox keeps its capacity. On failure the jobs stay in the inbox for the
++    /// error path to fail.
+     fn admit(&mut self, inbox: &Mutex<Inbox>) -> Result {
+         let mut inbox = inbox.lock();
+-        self.jobs.reserve(inbox.jobs.len(), GFP_KERNEL)?;
+-        let incoming = core::mem::take(&mut inbox.jobs);
+-        drop(inbox);
+-        for job in incoming {
+-            self.jobs.push_within_capacity(job).map_err(|_| ENOMEM)?;
++        // Inbox and engine together hold at most JOB_CREDITS jobs.
++        if self.jobs.capacity() - self.jobs.len() < inbox.jobs.len() {
++            return Err(EIO);
++        }
++        for job in inbox.jobs.drain_all() {
++            self.jobs.push_within_capacity(job).map_err(|_| EIO)?;
+         }
+         Ok(())
+     }
+@@ -2030,6 +2053,7 @@ fn run(this: Arc<Self>) {
+                     this.signal_finished(job);
+                 }
+                 engine = this.device.engine.lock();
++                engine.return_finished(finished);
+                 runtime = this.device.runtime.lock();
+             }
+             let result = result.and_then(|progress| (|| -> Result<bool> {
+@@ -2069,7 +2093,8 @@ fn run(this: Arc<Self>) {
+                             let previous = firmware.last;
+                             drop(firmware);
+                             for (history, stamp) in job.history.iter_mut().zip(previous) {
+-                                history.push(stamp, GFP_KERNEL)?;
++                                // SUBMIT reserved 65: at most 64 commands plus this one.
++                                history.push_within_capacity(stamp).map_err(|_| EIO)?;
+                             }
+                         }
+                         let dependencies =
+@@ -2079,7 +2104,6 @@ fn run(this: Arc<Self>) {
+                             matches!(execution.parameters[job.next], Parameters::Compute(_));
+                         // Intra-queue UAPI dependencies are encoded into firmware
+                         // rings; preparation does not read GPU-produced data.
+-                        engine.issued.reserve(1, GFP_KERNEL)?;
+                         let job = &mut engine.jobs[index];
+                         crate::mem::sync();
+                         let injected = crate::g16_timeline::take_injection(
+@@ -2129,7 +2153,9 @@ fn run(this: Arc<Self>) {
+                             }
+                             Err(error) => return Err(error),
+                         };
+-                        job.history[usize::from(compute)].push(Some(receipt.stamp), GFP_KERNEL)?;
++                        job.history[usize::from(compute)]
++                            .push_within_capacity(Some(receipt.stamp))
++                            .map_err(|_| EIO)?;
+                         let issued = Issued {
+                             id: receipt.id,
+                             owner: execution.id,
+@@ -2143,7 +2169,9 @@ fn run(this: Arc<Self>) {
+                         }
+                         job.next += 1;
+                         job.pending += 1;
+-                        engine.issued.push(issued, GFP_KERNEL)?;
++                        // One entry per flight, and reserve_flight keeps
++                        // flights below MAX_FLIGHTS: always room.
++                        engine.issued.push_within_capacity(issued).map_err(|_| EIO)?;
+                         // Resume after the last admitted job when a scarce slot
+                         // becomes free, rather than repeatedly favoring index zero.
+                         engine.cursor = index + 1;
+@@ -2247,10 +2275,15 @@ fn drop(self: Pin<&mut Self>) {
+ 
+ struct SubmissionJob {
+     execution: Arc<Execution>,
++    /// The job's publication history, allocated by SUBMIT so run_job does not
++    /// allocate (it is in the fence-signalling path).
++    history: Option<[KVec<Option<crate::g16::Stamp>>; 2]>,
+ }
+ 
+ impl sched::JobImpl for SubmissionJob {
+     fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
++        // SUBMIT allocated it; run_job runs once per job.
++        let history = job.history.take();
+         let execution = &job.execution;
+         if crate::module_parameters::timeline.value() != 0 {
+             execution.trace.run.store(ticks(), Ordering::Relaxed);
+@@ -2260,12 +2293,8 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+             return Err(EIO);
+         }
+         let fence = execution.completion.clone();
+-        // Allocate before taking the inbox lock: it is held only to append.
+         let running = (|| -> Result<Running> {
+-            let mut history = [KVec::new(), KVec::new()];
+-            for events in &mut history {
+-                events.reserve(65, GFP_KERNEL)?;
+-            }
++            let history = history.ok_or(EIO)?;
+             Ok(Running {
+                 execution: execution.clone(),
+                 next: 0,
+@@ -2284,7 +2313,8 @@ fn run(job: &mut sched::Job<Self>) -> Result<Option<dma_fence::Fence>> {
+             })
+         })();
+         let mut inbox = execution.device.inbox.lock();
+-        if let Err(error) = running.and_then(|r| inbox.jobs.push(r, GFP_KERNEL).map_err(Into::into)) {
++        // JOB_CREDITS capacity: drm_sched never runs more jobs than that at once.
++        if let Err(error) = running.and_then(|r| inbox.jobs.push_within_capacity(r).map_err(|_| EIO)) {
+             drop(inbox);
+             execution.completion.set_error(error);
+             let _ = execution.completion.signal();
+@@ -2674,7 +2704,13 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+             .iter_mut()
+             .find(|q| q.id == data.queue_id)
+             .ok_or(ENOENT)?;
+-        let mut job = queue.entity.new_job(1, SubmissionJob { execution })?;
++        let mut history = [KVec::new(), KVec::new()];
++        // One entry per command (at most 64, checked above) plus the queue's
++        // previous stamp: run_job and the worker never grow them.
++        for events in &mut history {
++            events.reserve(65, GFP_KERNEL)?;
++        }
++        let mut job = queue.entity.new_job(1, SubmissionJob { execution, history: Some(history) })?;
+         for fence in dependencies {
+             job.add_dependency(fence)?;
+         }
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 923352d8b368..b0290a7846f1 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -327,6 +327,11 @@ pub(crate) fn new() -> Result<Self> {
+     }
+ }
+ 
++/// Most Works in flight at once. Flight bookkeeping is preallocated to this at
++/// init so publication and retirement never allocate; at the cap, admission
++/// waits for retirement (EBUSY). Logged peaks under churn are below 400.
++pub(crate) const MAX_FLIGHTS: usize = 1024;
++
+ pub(crate) struct Ledger {
+     lanes: KVec<LaneBook>,
+     /// (lane pointers, ring head) per flight and lane.
+@@ -338,8 +343,14 @@ pub(crate) struct Ledger {
+ }
+ 
+ impl Ledger {
+-    pub(crate) fn new() -> Self {
+-        Self { lanes: KVec::new(), heads: KVec::new(), targets: KVec::new(), cursors: [None; 12] }
++    /// Room for `flights` flights: each adds at most two lanes, heads and targets.
++    pub(crate) fn with_capacity(flights: usize) -> Result<Self> {
++        Ok(Self {
++            lanes: KVec::with_capacity(2 * flights, GFP_KERNEL)?,
++            heads: KVec::with_capacity(2 * flights, GFP_KERNEL)?,
++            targets: KVec::with_capacity(2 * flights, GFP_KERNEL)?,
++            cursors: [None; 12],
++        })
+     }
+ 
+     fn lane(&self, pointers: u64) -> Option<&LaneBook> {
+@@ -347,11 +358,14 @@ fn lane(&self, pointers: u64) -> Option<&LaneBook> {
+     }
+ 
+     /// Room for one more flight, so `add` cannot fail after publication.
+-    fn reserve(&mut self) -> Result {
+-        self.lanes.reserve(2, GFP_KERNEL)?;
+-        self.heads.reserve(2, GFP_KERNEL)?;
+-        self.targets.reserve(2, GFP_KERNEL)?;
+-        Ok(())
++    fn has_room(&self) -> bool {
++        [
++            (self.lanes.capacity(), self.lanes.len()),
++            (self.heads.capacity(), self.heads.len()),
++            (self.targets.capacity(), self.targets.len()),
++        ]
++        .iter()
++        .all(|&(capacity, len)| capacity - len >= 2)
+     }
+ 
+     fn add(&mut self, f: &Flight) -> Result {
+@@ -1067,9 +1081,14 @@ fn reserve_flight(
+                 }
+             }
+         }
+-        self.flights.reserve(1, GFP_KERNEL)?;
+-        self.ledger.reserve()?;
+-        self.publications.reserve(stages.len(), GFP_KERNEL)?;
++        // Preallocated at init (MAX_FLIGHTS): at the cap, wait for retirement.
++        if self.flights.len() >= MAX_FLIGHTS
++            || !self.ledger.has_room()
++            || self.publications.capacity() - self.publications.len() < stages.len()
++        {
++            self.report_pressure(128, "flights");
++            return Err(EBUSY);
++        }
+         Ok(())
+     }
+ 
+@@ -1127,16 +1146,16 @@ fn stage_queue(
+             .filter(|p| p.channel == channel)
+             .count() as u32;
+         let epoch = (tail + reserved) & 255;
+-        self.publications.push(
+-            Publication {
++        // reserve_flight checked the room.
++        self.publications
++            .push_within_capacity(Publication {
+                 channel,
+                 epoch,
+                 lane,
+                 event,
+                 sequence,
+-            },
+-            GFP_KERNEL,
+-        )?;
++            })
++            .map_err(|_| EIO)?;
+         Ok(epoch)
+     }
+ 
+@@ -1579,7 +1598,10 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             let tail = guard.try_read32(0xd60060)?;
+             guard.try_read32(0xd640c0)? == tail && guard.try_read32(0xd640c8)? == tail
+         };
+-        self.retired.reserve(self.flights.len(), GFP_KERNEL)?;
++        // Preallocated to MAX_FLIGHTS, which bounds the flights scanned here.
++        if self.retired.capacity() < self.flights.len() {
++            return Err(EIO);
++        }
+         // Like upstream's per-queue event check, read each lane's stamp and
+         // ring cursors once per scan and judge every flight on that lane
+         // against the same snapshot: flights share a lane's stamp address
+@@ -1754,7 +1776,10 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+             }
+             self.diagnostics.retire_next = self.diagnostics.retire_next.wrapping_add(1);
+             flight.client.lock().release_scratch(flight.scratch)?;
+-            self.free_work[usize::from(render_work)].push((id, root), GFP_KERNEL)?;
++            // allocate_work reserved a slot for every outstanding lease.
++            self.free_work[usize::from(render_work)]
++                .push_within_capacity((id, root))
++                .map_err(|_| EIO)?;
+             self.retired.push_within_capacity((id, limited)).map_err(|_| ENOMEM)?;
+         }
+         crate::g16_timeline::attribute(&crate::g16_timeline::P_RD_SCAN, scan_before);
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-bounded-flights.py b/tools/testing/selftests/drivers/gpu/asahi/test-bounded-flights.py
+new file mode 100755
+index 000000000000..15fe9046502f
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-bounded-flights.py
+@@ -0,0 +1,83 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host source checks: G16 flight and job bookkeeping is preallocated to fixed
++bounds, so run_job, the job worker and retirement never allocate.
++
++The bounds: MAX_FLIGHTS Works in flight (admission returns EBUSY at the cap)
++and JOB_CREDITS scheduler credits (one per job, so at most that many jobs are
++between run_job and their fence). No device or kernel build is needed.
++"""
++from pathlib import Path
++import re
++
++here = Path(__file__).resolve()
++root = next(p for p in here.parents if (p / 'drivers/gpu/drm/asahi/g16_runtime.rs').exists())
++driver = root / 'drivers/gpu/drm/asahi'
++runtime = (driver / 'g16_runtime.rs').read_text()
++drm = (driver / 'g16_drm.rs').read_text()
++g16 = (driver / 'g16.rs').read_text()
++
++
++def function(source, signature, nth=0):
++    starts = [m for m in re.finditer(r'\n(\s*)(?:pub\(crate\) )?fn ' + re.escape(signature), source)]
++    assert len(starts) > nth, signature
++    m = starts[nth]
++    indent = m.group(1).lstrip('\n')
++    end = re.search(r'\n' + indent + r'}\n', source[m.end():])
++    return source[m.start():m.end() + end.end()]
++
++
++def allocates(body):
++    return 'GFP_KERNEL' in body or re.search(r'\bKVec::with_capacity\b|\.reserve\(', body)
++
++
++checks = 0
++# The paths in the fence-signalling section that this series bounds.
++worker = next(function(drm, 'run(this: Arc<Self>)', n) for n in range(2)
++              if 'engine.take_finished()' in function(drm, 'run(this: Arc<Self>)', n))
++for name, body in [('run_job', function(drm, 'run(job: &mut sched::Job<Self>)')),
++                   ('job worker', worker),
++                   ('reserve_flight', function(runtime, 'reserve_flight(')),
++                   ('take_finished', function(drm, 'take_finished(')),
++                   ('admit', function(drm, 'admit(')),
++                   ('Ledger::add', function(runtime, 'add(&mut self, f: &Flight)')),
++                   ('stage_queue', function(runtime, 'stage_queue('))]:
++    assert not allocates(body), f'{name} allocates'
++    checks += 1
++
++# Retirement: no reserve, and every push goes into reserved capacity.
++retire = function(runtime, 'retire(&mut self)')
++scan = function(runtime, 'service_flights(') if 'fn service_flights(' in runtime else retire
++for body in (retire, scan):
++    assert '.reserve(' not in body and not re.search(r'\.push\([^)]*GFP_KERNEL', body)
++checks += 1
++
++# Preallocated at init to the bounds.
++for field, size in [('flights', 'render_runtime::MAX_FLIGHTS'), ('retired', 'render_runtime::MAX_FLIGHTS'),
++                    ('publications', '2 * render_runtime::MAX_FLIGHTS')]:
++    assert f'{field}: KVec::with_capacity({size}, GFP_KERNEL)?' in g16, field
++assert 'Ledger::with_capacity(render_runtime::MAX_FLIGHTS)?' in g16
++assert re.search(r'lanes: KVec::with_capacity\(2 \* flights', runtime)
++for field in ('jobs', 'finished'):
++    assert f'{field}: KVec::with_capacity(JOB_CREDITS as usize, GFP_KERNEL)?' in drm, field
++assert 'issued: KVec::with_capacity(crate::g16::MAX_FLIGHTS, GFP_KERNEL)?' in drm
++checks += 1
++
++# The scheduler's credit limit is the same constant, and every job takes one.
++assert re.search(r'sched::Scheduler::new\(pdev\.as_ref\(\), \d+, JOB_CREDITS,', drm)
++assert re.findall(r'\.new_job\((\d+),', drm) == ['1']
++checks += 1
++
++# At the cap, admission waits (EBUSY), it does not grow anything.
++reserve = function(runtime, 'reserve_flight(')
++assert re.search(r'self\.flights\.len\(\) >= MAX_FLIGHTS[\s\S]*?return Err\(EBUSY\)', reserve)
++checks += 1
++
++# A job's history holds one entry per command plus the previous stamp, and
++# SUBMIT caps a submission at 64 commands.
++submit = function(drm, 'submit(')
++assert 'events.reserve(65, GFP_KERNEL)?' in submit and 'renders + computes == 64' in submit
++assert 'job.history.take()' in function(drm, 'run(job: &mut sched::Job<Self>)')
++checks += 1
++
++print(f'test-bounded-flights: {checks} checks passed')

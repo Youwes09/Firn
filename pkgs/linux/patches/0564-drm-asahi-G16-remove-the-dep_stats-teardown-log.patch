@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 25 Oct 2026 00:16:05 -0400
+Subject: [PATCH] drm/asahi: G16: remove the dep_stats teardown log
+
+asahi_m4.dep_stats=1 printed a queue's compute-hold counts when it was
+destroyed. debugfs asahi_m4/dep_stats has counted the same deferrals
+device-wide (deferred_cpu_hold) since the publication counters landed, and
+no boot or kit sets the parameter. Remove it with its per-queue tally.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ---
+ drivers/gpu/drm/asahi/g16_runtime.rs | 53 ----------------------------
+ 2 files changed, 57 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 10ecf43c9d00..0ee536f833ff 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -128,10 +128,6 @@ fn probe<'bound>(
+             default: 0,
+             description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump, 256=queue event index changes",
+         },
+-        dep_stats: u32 {
+-            default: 0,
+-            description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
+-        },
+         wedge_ms: u32 {
+             default: 2000,
+             description: "A4 wedge detection window: a render with TA done and all waits met whose 3D never starts, with all channels drained and no fragment progress on any lane for this long",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 543dff90b7cc..39c6b2f8724b 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -46,55 +46,6 @@ pub(crate) struct FirmwareQueues {
+     /// u32::MAX until read. Cursors only advance, so a stale view
+     /// underestimates room.
+     cursors: [core::cell::Cell<(u32, u32)>; 3],
+-    /// Kernel-side dependency resolution statistics (logged at teardown with
+-    /// dep_stats=1).
+-    deps: DependencyStats,
+-}
+-
+-/// Cumulative per-queue counts of kernel-resolved dependencies.
+-#[derive(Default)]
+-struct DependencyStats {
+-    /// Compute admissions deferred on another queue's stamp.
+-    compute_held: u64,
+-    /// Works admitted after at least one deferral, and the total time from
+-    /// their first deferral to admission.
+-    held_works: u64,
+-    held_us: u64,
+-    /// First deferral of the Work currently waiting, if any.
+-    hold_start: Option<Instant<Monotonic>>,
+-}
+-
+-impl DependencyStats {
+-    fn defer(&mut self) {
+-        if self.hold_start.is_none() {
+-            self.hold_start = Some(Instant::now());
+-        }
+-    }
+-
+-    fn admit(&mut self) {
+-        if let Some(start) = self.hold_start.take() {
+-            self.held_works += 1;
+-            self.held_us += start.elapsed().as_micros_ceil() as u64;
+-        }
+-    }
+-}
+-
+-impl Drop for FirmwareQueues {
+-    fn drop(&mut self) {
+-        let d = &self.deps;
+-        if crate::module_parameters::dep_stats.value() != 0
+-            && d.compute_held != 0
+-        {
+-            pr_info!(
+-                "G16: queue deps renders={} computes={} compute_held={} held_works={} held_us={}\n",
+-                self.render_count,
+-                self.compute_count,
+-                d.compute_held,
+-                d.held_works,
+-                d.held_us
+-            );
+-        }
+-    }
+ }
+ 
+ impl FirmwareQueues {
+@@ -199,7 +150,6 @@ pub(crate) fn new(priority: u32) -> Self {
+             last: [None; 2],
+             waited: [[None; 2]; 3],
+             cursors: [const { core::cell::Cell::new((u32::MAX, u32::MAX)) }; 3],
+-            deps: DependencyStats::default(),
+             rejected: false,
+         }
+     }
+@@ -2881,14 +2831,11 @@ fn resolve_compute_dependencies(
+                 let done = g16_stamp::reached(now, dep.value);
+                 self.hold_check("compute", dep, now, done)?;
+                 if !done {
+-                    queue.deps.compute_held += 1;
+-                    queue.deps.defer();
+                     crate::g16_timeline::DEFERRED_CPU_HOLD.fetch_add(1, Ordering::Relaxed);
+                     return Err(EBUSY);
+                 }
+             }
+         }
+-        queue.deps.admit();
+         Ok(kept)
+     }
+ 

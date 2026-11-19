@@ -1,0 +1,129 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 6 Oct 2026 18:11:40 -0400
+Subject: [PATCH] drm/asahi: G16: render_preempt parameter, default
+ preemptible; log VM owners and context slots
+
+Native TA/3D profiles let the firmware suspend and restart renders. With a
+compressed render timesliced against other render contexts (Dota 2 next to
+two KWin compositors) the GPU wedges: 5/5 unperturbed runs hung at ~35 s,
+and non-preemptible render queues ran a clean 10 minutes. The cost on
+Lethal Company was 1.7% FPS (+0.5 ms CPU frame interval, GPU time flat).
+asahi_m4.render_preempt=1 restores preemptible renders.
+
+[Niklas: ported to v7.3: module parameter .value() returns the value, not a reference]
+
+Folded in:
+- drm/asahi: make G16 render queues non-preemptible by default
+- WIP drm/asahi: G16 render_preempt defaults to 1 (#26 behaviour); log VM owners and context slots
+
+[WIP drm/asahi: G16 render_preempt defaults to 1 (#26 behaviour); log VM owners and context slots]
+Debug for the Dota hang: name the process behind each VM (render and compute
+roots) and log which root each firmware context slot is bound to, so hang
+reports can be traced to a client. render_preempt=0 stays available as the
+A13 experiment.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 67cc6cc3fc829716ac014d4cc36a3eb67f61b789)
+(cherry picked from commit b5cacbdb075e9d565efbaec194901398761ad328)
+(cherry picked from commit 6a44ab7a3c2be02625b4ba1cc73264b5525a6ac4)
+(cherry picked from commit d5d31cba6011149e858595c7ef46854fec78dbfd)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 +++
+ drivers/gpu/drm/asahi/g16_drm.rs     | 38 ++++++++++++++++++++++------
+ drivers/gpu/drm/asahi/g16_runtime.rs |  6 ++++-
+ 3 files changed, 39 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 6708879cb999..ce46c6be756f 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -248,6 +248,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Tiling Work notifier-stamp flush flag (macOS writes 0; this driver previously wrote 1)",
+         },
++        render_preempt: u32 {
++            default: 1,
++            description: "1 lets firmware suspend and restart TA/3D work (preemptible render queues); 0 gives them compute's non-preemptible profile",
++        },
+         dependency_kind: u32 {
+             default: 1,
+             description: "Experiment: firmware kind of render-to-render dependencies (1 normal, 0 as the internal TA-to-fragment wait)",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 18e66674ea51..48c55b0a0cf7 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -395,19 +395,41 @@ fn vm_create(
+             },
+             (inner.id, id),
+         )?;
++        let space = Arc::pin_init(
++            kernel::new_mutex!(crate::g16_vm::AddressSpace::new()?),
++            GFP_KERNEL,
++        )?;
++        let compute_space = Arc::pin_init(
++            kernel::new_mutex!(crate::g16_vm::AddressSpace::new()?),
++            GFP_KERNEL,
++        )?;
++        // Debug: name the process behind each VM so firmware context slots in
++        // hang reports (logged by root) can be traced to a client.
++        {
++            let task = kernel::current!();
++            let leader = task.group_leader();
++            // SAFETY: comm is a NUL-padded fixed array; a concurrent rename
++            // can at worst tear this debug string.
++            let comm = unsafe { (*leader.as_ptr()).comm };
++            let comm: [u8; 16] = core::array::from_fn(|i| comm[i] as u8);
++            let len = comm.iter().position(|&c| c == 0).unwrap_or(16);
++            pr_info!(
++                "G16: file {} vm {} by tgid {} ({}): render root {:#x} compute root {:#x}\n",
++                inner.id,
++                id,
++                leader.pid(),
++                core::str::from_utf8(&comm[..len]).unwrap_or("?"),
++                space.lock().roots().low,
++                compute_space.lock().roots().low
++            );
++        }
+         state.vms.push(
+             Vm {
+                 id,
+                 visible: true,
+                 kernel: data.kernel_start..data.kernel_end,
+-                space: Arc::pin_init(
+-                    kernel::new_mutex!(crate::g16_vm::AddressSpace::new()?),
+-                    GFP_KERNEL,
+-                )?,
+-                compute_space: Arc::pin_init(
+-                    kernel::new_mutex!(crate::g16_vm::AddressSpace::new()?),
+-                    GFP_KERNEL,
+-                )?,
++                space,
++                compute_space,
+                 mappings: KVVec::new(),
+                 snapshot: None,
+                 pending: KVec::new(),
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 958793f29c48..fb8472004ee5 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -509,7 +509,10 @@ fn init_queues(
+             // renders. Their Work/scratch leases survive until the final
+             // notifier/driver stamp, including intervening partial runs.
+             // Compute remains non-preemptible, matching the M1/M2 driver.
+-            if stage == 2 {
++            // Preemptible renders can wedge the firmware when a compressed
++            // render is timesliced against other contexts (Dota 2 with two
++            // compositors, 2026-10-06), so they are off by default.
++            if stage == 2 || crate::module_parameters::render_preempt.value() == 0 {
+                 descriptor[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
+                 descriptor[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());
+             }
+@@ -1595,6 +1598,7 @@ fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<
+             .ok_or(EBUSY)?;
+         if existing.is_none() {
+             self.set_context(slot, Some(roots))?;
++            pr_info!("G16: context {} bound to root {:#x}\n", slot, roots.low);
+         }
+         self.context_users[slot] += 1;
+         Ok(slot as u32)

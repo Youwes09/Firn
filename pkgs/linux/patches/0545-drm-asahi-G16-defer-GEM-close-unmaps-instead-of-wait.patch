@@ -1,0 +1,658 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 23 Oct 2026 12:33:08 -0400
+Subject: [PATCH] drm/asahi: G16: defer GEM-close unmaps instead of waiting for
+ the VM
+
+A live GEM close waited for every fence pending on the VM before
+removing the object's PTEs. Mesa only closes idle BOs, but it does so
+during steady-state rendering (BO cache eviction of entries unused for
+about 2 s, up to 32 per pass; frees the cache declines). Each such close
+therefore blocked the freeing thread, often the GL or DXVK submit
+thread, until the VM's whole queue drained. Under load that was the GL
+CTS close timeout; in games it is a likely periodic hitch.
+
+Submissions already keep every mapped object alive through their
+mapping snapshot, so the wait only protected the PTEs. A close with
+work pending now:
+- marks the object's mappings closing, so cover() rejects them for new
+  submissions;
+- records a deferred entry with a snapshot of the VM's unsignaled
+  fences;
+- returns at once, without failing the VM.
+
+A per-file reaper unmaps the entry once its snapshot has completed. All
+of those fences are this file's own job fences, so signal_finished
+queues the reaper when it signals a job of an armed file. File ioctls
+reap opportunistically, and teardown drains as before. A bind that
+overlaps only closing mappings (Mesa reusing the address) waits for
+those entries' snapshots instead of the whole VM; live overlaps keep the
+whole-VM rule.
+
+Out of memory or 4096 entries per VM fall back to the progress-based
+wait. The exiting-close path is unchanged. Snapshots that never signal
+leave the object mapped and pinned, as a failed close did before, but
+no longer fail the VM.
+
+The range logic (cover, overlap kinds, readiness, cap) is in
+g16_deferred.rs, with host tests in
+selftests/drivers/gpu/asahi/test-deferred-unmap.py.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs             |   1 +
+ drivers/gpu/drm/asahi/g16_deferred.rs         |  86 ++++++
+ drivers/gpu/drm/asahi/g16_drm.rs              | 252 +++++++++++++++---
+ .../drivers/gpu/asahi/deferred-unmap.rs       |  75 ++++++
+ .../drivers/gpu/asahi/test-deferred-unmap.py  |  24 ++
+ 5 files changed, 408 insertions(+), 30 deletions(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_deferred.rs
+ create mode 100644 tools/testing/selftests/drivers/gpu/asahi/deferred-unmap.rs
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-deferred-unmap.py
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 961e6dc08125..c87899735eba 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -9,6 +9,7 @@
+ mod g16;
+ mod g16_alloc;
+ mod g16_compute;
++mod g16_deferred;
+ mod g16_drain;
+ mod g16_drm;
+ mod g16_fw;
+diff --git a/drivers/gpu/drm/asahi/g16_deferred.rs b/drivers/gpu/drm/asahi/g16_deferred.rs
+new file mode 100644
+index 000000000000..401e0f7cf44e
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_deferred.rs
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Copyright 2026 The Asahi Linux Contributors
++
++//! Deferred unmap bookkeeping for GEM close.
++//!
++//! A live GEM close no longer waits for the VM's queued work. The object's
++//! mappings stay in the page tables, marked closing, until every fence that
++//! was pending at the close has signaled; then the reaper unmaps them.
++//! Submissions already keep each mapped object (and so its pages) alive, so
++//! deferral only keeps PTEs valid for work that may still use them. Closing
++//! mappings no longer satisfy `covered`, and a bind over them waits only for
++//! their own snapshot. Pure range logic, host-tested.
++
++use core::ops::Range;
++
++/// Most deferred closes one VM tracks. Past this a close drains as before.
++pub(crate) const MAX_ENTRIES: usize = 4096;
++
++/// A mapping as this logic sees it.
++pub(crate) trait Span {
++    fn range(&self) -> Range<u64>;
++    fn permissions(&self) -> u32;
++    fn closing(&self) -> bool;
++}
++
++/// Whether `items` (sorted by address, non-overlapping) cover
++/// `start..start + size` with at least `permissions`, using only mappings
++/// that are not closing.
++pub(crate) fn covered<T: Span>(items: &[T], start: u64, size: u64, permissions: u32) -> bool {
++    let Some(end) = start.checked_add(size) else { return false };
++    if size == 0 {
++        return false;
++    }
++    // The only candidate for `cursor` is the first mapping ending after it.
++    let mut cursor = start;
++    while cursor < end {
++        let index = items.partition_point(|m| m.range().end <= cursor);
++        match items.get(index) {
++            Some(m)
++                if m.range().contains(&cursor)
++                    && !m.closing()
++                    && m.permissions() & permissions == permissions =>
++            {
++                cursor = end.min(m.range().end);
++            }
++            _ => return false,
++        }
++    }
++    true
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum Overlap {
++    /// Nothing mapped in the range.
++    None,
++    /// Only closing mappings: wait for their snapshots, then reap them.
++    Deferred,
++    /// At least one live mapping: the caller replaces it as before.
++    Live,
++}
++
++/// Classify the mappings `start..end` overlaps.
++pub(crate) fn overlap<T: Span>(items: &[T], start: u64, end: u64) -> Overlap {
++    let mut kind = Overlap::None;
++    for m in items {
++        let r = m.range();
++        if start < r.end && end > r.start {
++            if !m.closing() {
++                return Overlap::Live;
++            }
++            kind = Overlap::Deferred;
++        }
++    }
++    kind
++}
++
++/// Whether a deferred close may be recorded on a VM already tracking
++/// `entries`; otherwise the close drains as before.
++pub(crate) fn admit(entries: usize) -> bool {
++    entries < MAX_ENTRIES
++}
++
++/// Whether a snapshot is complete: every fence in it has signaled.
++pub(crate) fn ready(signaled: impl IntoIterator<Item = bool>) -> bool {
++    signaled.into_iter().all(|s| s)
++}
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index a2f351058fc8..1644e393d362 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -78,29 +78,39 @@ struct Mapping {
+     offset: u64,
+     single: bool,
+     obj: ARef<Object>,
++    /// Its object was closed while work was queued: the PTEs stay until the
++    /// reaper unmaps them (see g16_deferred), but nothing new may use it.
++    closing: bool,
++}
++
++impl crate::g16_deferred::Span for Mapping {
++    fn range(&self) -> Range<u64> {
++        self.range.clone()
++    }
++    fn permissions(&self) -> u32 {
++        self.permissions
++    }
++    fn closing(&self) -> bool {
++        self.closing
++    }
+ }
+ 
+ impl Mapping {
+     fn cover(mappings: &[Self], start: u64, size: u64, permissions: u32) -> Result {
+-        let end = start.checked_add(size).ok_or(EINVAL)?;
+-        if size == 0 {
+-            return Err(EINVAL);
+-        }
+-        // `mappings` is sorted by address and never overlaps, so the only
+-        // candidate for `cursor` is the first mapping ending after it.
+-        let mut cursor = start;
+-        while cursor < end {
+-            let index = mappings.partition_point(|m| m.range.end <= cursor);
+-            let mapping = mappings
+-                .get(index)
+-                .filter(|m| m.range.contains(&cursor) && m.permissions & permissions == permissions)
+-                .ok_or(EINVAL)?;
+-            cursor = end.min(mapping.range.end);
++        if crate::g16_deferred::covered(mappings, start, size, permissions) {
++            Ok(())
++        } else {
++            Err(EINVAL)
+         }
+-        Ok(())
+     }
+ }
+ 
++/// A GEM close deferred until every fence pending at the close has signaled.
++struct Deferred {
++    obj: ARef<Object>,
++    fences: KVec<dma_fence::Fence>,
++}
++
+ struct Vm {
+     id: u32,
+     visible: bool,
+@@ -124,6 +134,8 @@ struct Vm {
+     render_ready: bool,
+     compute_ready: bool,
+     render_broken: bool,
++    /// Closes waiting for their snapshot to complete (see g16_deferred).
++    deferred: KVec<Deferred>,
+ }
+ 
+ /// Retain submit-time GEM and timestamp bindings until actual completion.
+@@ -141,6 +153,8 @@ struct FileState {
+     timestamps: KVec<TimestampBuffer>,
+     retained_timestamps: KVec<TimestampBuffer>,
+     vms: KVec<Vm>,
++    /// Set by file teardown: the reaper must no longer touch the VMs.
++    closed: bool,
+ }
+ 
+ struct Queue {
+@@ -356,6 +370,9 @@ fn close(obj: &Object, file: &DrmFile) {
+         }
+         let exiting = current_exiting();
+         let mut state = inner.state.lock();
++        if inner.reaper.armed.load(Ordering::Relaxed) {
++            reap(&mut state, &inner.device, &inner.reaper.armed);
++        }
+         let mut cursor = 0;
+         loop {
+             // IDs never repeat. Re-find after each wait: another ioctl may
+@@ -384,7 +401,49 @@ fn close(obj: &Object, file: &DrmFile) {
+                 vm.render_broken = true;
+                 continue;
+             }
+-            // A live close: wait while the VM's work keeps retiring, failing
++            // A live close with work queued: don't wait. Keep the object's
++            // PTEs (its pages are already kept by the queued submissions)
++            // until everything pending now has completed, then the reaper
++            // unmaps them. Nothing new may use them meanwhile (closing).
++            vm.pending.retain(|f| {
++                // SAFETY: The vector owns each fence reference during the query.
++                !unsafe { bindings::dma_fence_is_signaled(f.raw()) }
++            });
++            if !vm.pending.is_empty() && crate::g16_deferred::admit(vm.deferred.len()) {
++                let mut fences = KVec::new();
++                let object = vm.mappings.iter()
++                    .find(|m| core::ptr::eq(&*m.obj, obj))
++                    .map(|m| m.obj.clone());
++                if let Some(object) = object {
++                    if fences.extend_from_slice(&vm.pending, GFP_KERNEL).is_ok()
++                        && vm.deferred.reserve(1, GFP_KERNEL).is_ok()
++                    {
++                        for m in vm.mappings.iter_mut().filter(|m| core::ptr::eq(&*m.obj, obj)) {
++                            m.closing = true;
++                        }
++                        // Reserved above: cannot fail.
++                        let _ = vm.deferred.push_within_capacity(Deferred { obj: object, fences });
++                        // Pairs with signal_finished: it signals (a fully
++                        // ordered bit set), then loads `armed`. If the snapshot
++                        // completed before this store, it may have missed us;
++                        // check once ourselves. The fence orders the store
++                        // before the plain loads in dma_fence_is_signaled
++                        // (store buffering), so one side always sees the other.
++                        inner.reaper.armed.store(true, Ordering::SeqCst);
++                        core::sync::atomic::fence(Ordering::SeqCst);
++                        let done = vm.deferred.last().is_some_and(|e| crate::g16_deferred::ready(e.fences.iter().map(|f| {
++                            // SAFETY: The entry owns each fence reference during the query.
++                            unsafe { bindings::dma_fence_is_signaled(f.raw()) }
++                        })));
++                        if done {
++                            let _ = workqueue::system_dfl().enqueue(inner.reaper.clone());
++                        }
++                        continue;
++                    }
++                }
++                // Out of memory or the entry cap: fall back to waiting.
++            }
++            // Fallback: wait while the VM's work keeps retiring, failing
+             // once none of its fences signals for CLOSE_DRAIN_MS (see
+             // drain_within). Only a fatal signal ends the wait early (the
+             // process is then exiting anyway); any other signal is ignored,
+@@ -463,41 +522,123 @@ pub(crate) struct File {
+     device: DeviceRef,
+     id: u64,
+     state: Arc<Mutex<FileState>>,
++    reaper: Arc<Reaper>,
+     #[pin]
+     drained: CondVar,
+ }
+ impl drm::file::DriverFile for File {
+     type Driver = Driver;
+     fn open(device: &Device) -> Result<Pin<KBox<Self>>> {
++        let state = Arc::pin_init(
++            kernel::new_mutex!(FileState {
++                next_vm: 1,
++                next_queue: 1,
++                next_timestamp: 1,
++                queues: KVec::new(),
++                timestamps: KVec::new(),
++                retained_timestamps: KVec::new(),
++                vms: KVec::new(),
++                closed: false,
++            }),
++            GFP_KERNEL,
++        )?;
++        let reaper_state = state.clone();
++        let reaper = Arc::pin_init(
++            try_pin_init!(Reaper {
++                device: device.into(),
++                state: reaper_state,
++                armed: AtomicBool::new(false),
++                work <- new_work!("m4-reaper"),
++            }),
++            GFP_KERNEL,
++        )?;
+         KBox::pin_init(
+             try_pin_init!(Self {
+                 device: device.into(),
+                 id: NEXT_FILE.fetch_add(1, Ordering::Relaxed),
+                 drained <- kernel::new_condvar!("m4-file-drain"),
+-                state: Arc::pin_init(
+-                    kernel::new_mutex!(FileState {
+-                        next_vm: 1,
+-                        next_queue: 1,
+-                        next_timestamp: 1,
+-                        queues: KVec::new(),
+-                        timestamps: KVec::new(),
+-                        retained_timestamps: KVec::new(),
+-                        vms: KVec::new()
+-                    }),
+-                    GFP_KERNEL
+-                )?,
++                state,
++                reaper,
+             }),
+             GFP_KERNEL,
+         )
+     }
+ }
+ 
++/// Unmaps a file's deferred GEM closes once their snapshots complete. Every
++/// fence in a snapshot is one of this file's job fences, so the pump queues
++/// this work when it signals a job of an armed file (signal_finished); file
++/// ioctls also reap opportunistically. Holds the file state, not the File.
++#[pin_data]
++struct Reaper {
++    device: DeviceRef,
++    state: Arc<Mutex<FileState>>,
++    /// Some VM of this file has deferred closes. Changed under file state.
++    armed: AtomicBool,
++    #[pin]
++    work: Work<Reaper>,
++}
++
++impl_has_work! { impl HasWork<Self> for Reaper { self.work } }
++
++impl WorkItem for Reaper {
++    type Pointer = Arc<Self>;
++
++    fn run(this: Arc<Self>) {
++        let mut state = this.state.lock();
++        reap(&mut state, &this.device, &this.armed);
++    }
++}
++
++/// Unmap every deferred close whose snapshot has completed; disarm the
++/// reaper once none remain. Called with file state held.
++fn reap(state: &mut FileState, device: &Device, armed: &AtomicBool) {
++    if state.closed || device.failed.load(Ordering::Acquire) {
++        return;
++    }
++    let mut runtime = None;
++    let mut left = false;
++    for vm in state.vms.iter_mut() {
++        let mut index = 0;
++        while index < vm.deferred.len() {
++            let done = crate::g16_deferred::ready(vm.deferred[index].fences.iter().map(|f| {
++                // SAFETY: The entry owns each fence reference during the query.
++                unsafe { bindings::dma_fence_is_signaled(f.raw()) }
++            }));
++            if !done {
++                left = true;
++                index += 1;
++                continue;
++            }
++            let entry = vm.deferred.swap_remove(index);
++            let runtime = runtime.get_or_insert_with(|| device.runtime.lock());
++            if let Err(error) = vm.unmap_object(&entry.obj, runtime) {
++                // Page tables may be partly edited: stop the device, as a
++                // failed close-time unbind always has.
++                device.failed.store(true, Ordering::Release);
++                pr_err!("G16: failed to unbind a deferred closed GEM object: {:?}\n", error);
++                return;
++            }
++        }
++    }
++    if !left {
++        armed.store(false, Ordering::Relaxed);
++    }
++}
++
+ #[pinned_drop]
+ impl PinnedDrop for File {
+     fn drop(self: Pin<&mut Self>) {
++        // From here on a queued reaper leaves the VMs alone: teardown below
++        // drains every pending fence, so deferred closes need no reaping.
+         // Entity destruction cancels dependency-blocked jobs. Never hold the
+         // state lock while DRM waits for scheduler callbacks.
+-        let queues = core::mem::take(&mut self.state.lock().queues);
++        let queues = {
++            let mut state = self.state.lock();
++            state.closed = true;
++            self.reaper.armed.store(false, Ordering::Relaxed);
++            core::mem::take(&mut state.queues)
++        };
+         drop(queues);
+         // Wait only for this file's own work. Other clients' fences don't
+         // protect anything torn down here.
+@@ -647,6 +788,7 @@ fn vm_create(
+                 render_ready: false,
+                 compute_ready: false,
+                 render_broken: false,
++                deferred: KVec::new(),
+             },
+             GFP_KERNEL,
+         )?;
+@@ -956,6 +1098,9 @@ fn vm_bind(device: &RegDevice, reg: &RegData<'_>, data: &mut uapi::drm_asahi_vm_
+         if !state.vms.iter().any(|vm| vm.id == data.vm_id && vm.visible) {
+             return Err(ENOENT);
+         }
++        if inner.reaper.armed.load(Ordering::Relaxed) {
++            reap(&mut state, device, &inner.reaper.armed);
++        }
+         for _ in 0..data.num_binds {
+             let bind: uapi::drm_asahi_gem_bind_op = reader.read_up_to(data.stride as usize)?;
+             loop {
+@@ -1042,6 +1187,31 @@ fn vm_bind(device: &RegDevice, reg: &RegData<'_>, data: &mut uapi::drm_asahi_vm_
+                         )?;
+                     }
+                 }
++                if crate::g16_deferred::overlap(&vm.mappings, address, end)
++                    == crate::g16_deferred::Overlap::Deferred
++                {
++                    // Only closed objects overlap (an address reused after
++                    // GEM_CLOSE): wait for their own snapshots, not for the
++                    // whole VM, then reap and revalidate. Closing mappings no
++                    // entry tracks (none expected) take the rule below.
++                    let mut fences = KVec::new();
++                    for entry in vm.deferred.iter() {
++                        if vm.mappings.iter().any(|m| {
++                            m.closing && core::ptr::eq(&*m.obj, &*entry.obj)
++                                && address < m.range.end && end > m.range.start
++                        }) {
++                            fences.extend_from_slice(&entry.fences, GFP_KERNEL)?;
++                        }
++                    }
++                    if !fences.is_empty() {
++                        drop(state);
++                        let (result, _) = drain_within(&mut fences, 35000, crate::g16_drain::CAP_MS, false);
++                        state = inner.state.lock();
++                        result?;
++                        reap(&mut state, device, &inner.reaper.armed);
++                        continue;
++                    }
++                }
+                 if !overlaps.is_empty() {
+                     if !vm.pending.is_empty() {
+                         let (relocked, result, _) = drain_vm(state, data.vm_id, 35000, false, &inner.drained);
+@@ -1197,6 +1367,7 @@ fn map(
+                 offset: bo_offset,
+                 single,
+                 obj,
++                closing: false,
+             },
+             GFP_KERNEL,
+         )?;
+@@ -1247,6 +1418,18 @@ fn publish_mappings(&self, runtime: &crate::g16::Bootstrap) {
+         }
+     }
+ 
++    /// Unmap every mapping of `obj`: a closed object whose deferred
++    /// snapshot completed, or whose VM has drained.
++    fn unmap_object(&mut self, obj: &Object, runtime: &crate::g16::Bootstrap) -> Result {
++        while let Some(range) = self.mappings.iter()
++            .find(|m| core::ptr::eq(&*m.obj, obj))
++            .map(|m| m.range.clone())
++        {
++            self.unmap(range, runtime)?;
++        }
++        Ok(())
++    }
++
+     fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Result {
+         self.snapshot = None;
+         // Callers drain this VM's jobs and hold file state against new uses.
+@@ -1267,6 +1450,7 @@ fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Resul
+             permissions: m.permissions,
+             single: m.single,
+             obj: m.obj.clone(),
++            closing: m.closing,
+         });
+         if right.is_some() {
+             self.mappings.reserve(1, GFP_KERNEL)?;
+@@ -1479,6 +1663,8 @@ struct Execution {
+     barriers: KVec<[u16; 2]>,
+     device: DeviceRef,
+     _owner: Arc<Mutex<FileState>>,
++    /// This job's file reaper, queued after its fence signals when armed.
++    reaper: Arc<Reaper>,
+     render_space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     space: Arc<Mutex<crate::g16_vm::AddressSpace>>,
+     _bindings: Bindings,
+@@ -1655,6 +1841,12 @@ fn signal_finished(&self, job: Running) {
+             job.execution.completion.set_error(error);
+         }
+         let _ = job.execution.completion.signal();
++        // A deferred GEM close of this file may wait for this fence. Pairs
++        // with the SeqCst store in Object::close.
++        let reaper = &job.execution.reaper;
++        if reaper.armed.load(Ordering::SeqCst) {
++            let _ = workqueue::system_dfl().enqueue(reaper.clone());
++        }
+     }
+ }
+ 
+@@ -2352,7 +2544,7 @@ fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_sub
+         let execution = Arc::pin_init(
+             try_pin_init!(Execution {
+                 id: NEXT_EXECUTION.fetch_add(1, Ordering::Relaxed), firmware, barriers,
+-                device: device.into(), _owner: inner.state.clone(),
++                device: device.into(), _owner: inner.state.clone(), reaper: inner.reaper.clone(),
+                 render_space: vm.space.clone(), space: vm.compute_space.clone(), _bindings: bindings,
+                 support: vm.render_support.clone(),
+                 parameters, timestamps, completion: worker_completion,
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/deferred-unmap.rs b/tools/testing/selftests/drivers/gpu/asahi/deferred-unmap.rs
+new file mode 100644
+index 000000000000..01be83c053e7
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/deferred-unmap.rs
+@@ -0,0 +1,75 @@
++// SPDX-License-Identifier: GPL-2.0-only
++// Included by test-deferred-unmap.py with the production g16_deferred.rs.
++use core::ops::Range;
++use g16_deferred::{admit, covered, overlap, ready, Overlap, Span, MAX_ENTRIES};
++
++#[derive(Clone)]
++struct M(Range<u64>, u32, bool);
++
++impl Span for M {
++    fn range(&self) -> Range<u64> {
++        self.0.clone()
++    }
++    fn permissions(&self) -> u32 {
++        self.1
++    }
++    fn closing(&self) -> bool {
++        self.2
++    }
++}
++
++const RW: u32 = 3;
++const R: u32 = 1;
++
++fn maps() -> Vec<M> {
++    vec![M(0x4000..0x8000, RW, false), M(0x8000..0x10000, R, false), M(0x20000..0x24000, RW, true)]
++}
++
++#[test]
++fn live_mappings_cover_as_before() {
++    let m = maps();
++    assert!(covered(&m, 0x4000, 0x4000, RW));
++    assert!(covered(&m, 0x4000, 0xc000, R)); // spans two adjacent mappings
++    assert!(!covered(&m, 0x4000, 0xc000, RW)); // second is read-only
++    assert!(!covered(&m, 0x10000, 0x4000, R)); // hole
++    assert!(!covered(&m, 0x4000, 0, R)); // empty
++    assert!(!covered(&m, u64::MAX - 0x10, 0x4000, R)); // overflow
++}
++
++#[test]
++fn closing_mappings_never_cover() {
++    let m = maps();
++    assert!(!covered(&m, 0x20000, 0x4000, R));
++    assert!(!covered(&m, 0x21000, 0x10, R));
++    let mut live = m.clone();
++    live[2].2 = false;
++    assert!(covered(&live, 0x20000, 0x4000, RW));
++}
++
++#[test]
++fn overlap_distinguishes_closed_from_live_mappings() {
++    let m = maps();
++    assert_eq!(overlap(&m, 0x10000, 0x20000), Overlap::None);
++    assert_eq!(overlap(&m, 0x20000, 0x24000), Overlap::Deferred);
++    assert_eq!(overlap(&m, 0x1c000, 0x30000), Overlap::Deferred);
++    assert_eq!(overlap(&m, 0x7000, 0x9000), Overlap::Live);
++    // Any live overlap wins: the caller replaces it with the whole-VM rule.
++    assert_eq!(overlap(&m, 0x4000, 0x30000), Overlap::Live);
++    // Touching ends are not overlaps.
++    assert_eq!(overlap(&m, 0x24000, 0x28000), Overlap::None);
++    assert_eq!(overlap(&m, 0x1c000, 0x20000), Overlap::None);
++}
++
++#[test]
++fn readiness_needs_every_fence() {
++    assert!(ready([]));
++    assert!(ready([true, true]));
++    assert!(!ready([true, false, true]));
++}
++
++#[test]
++fn the_entry_cap_falls_back_to_waiting() {
++    assert!(admit(0));
++    assert!(admit(MAX_ENTRIES - 1));
++    assert!(!admit(MAX_ENTRIES));
++}
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-deferred-unmap.py b/tools/testing/selftests/drivers/gpu/asahi/test-deferred-unmap.py
+new file mode 100755
+index 000000000000..9331a04f421a
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-deferred-unmap.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host tests of the G16 deferred-unmap bookkeeping (g16_deferred.rs).
++
++Compiles the production module with deferred-unmap.rs. rustc must be on PATH;
++no device or kernel build is needed.
++"""
++from pathlib import Path
++import os
++import subprocess
++import tempfile
++
++here = Path(__file__).resolve()
++root = next(p for p in here.parents if (p / 'drivers/gpu/drm/asahi/g16_deferred.rs').exists())
++source = f'''#![allow(dead_code)]
++#[path = "{root / 'drivers/gpu/drm/asahi/g16_deferred.rs'}"] mod g16_deferred;
++''' + here.with_name('deferred-unmap.rs').read_text()
++
++with tempfile.TemporaryDirectory(prefix='asahi-deferred-') as temp:
++    temp = Path(temp)
++    (temp / 'test.rs').write_text(source)
++    subprocess.run([os.environ.get('RUSTC', 'rustc'), '--edition=2021', '--test', '-Dwarnings',
++                    str(temp / 'test.rs'), '-o', str(temp / 'test')], check=True)
++    subprocess.run([str(temp / 'test')], check=True)

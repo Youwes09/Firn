@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 6 Nov 2026 17:10:33 -0500
+Subject: [PATCH] drm/asahi: G16: log each compute root's pool placement with
+ debug_ctx
+
+With debug_ctx=1, log at each VM's first compute which pool its compute
+root uses (private or the render pool), its support object and, for a
+private pool, the physical pages behind the fixed directory and first
+buffer VAs, so separate clients' pools can be told apart.
+---
+ drivers/gpu/drm/asahi/g16_drm_submit.rs      |  1 +
+ drivers/gpu/drm/asahi/g16_runtime_compute.rs |  1 +
+ drivers/gpu/drm/asahi/g16_vm.rs              | 26 ++++++++++++++++++++
+ 3 files changed, 28 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm_submit.rs b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+index c996ef56dd33..2331a05f5e14 100644
+--- a/drivers/gpu/drm/asahi/g16_drm_submit.rs
++++ b/drivers/gpu/drm/asahi/g16_drm_submit.rs
+@@ -303,6 +303,7 @@ pub(super) fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::dr
+                             // Compute scratch stays clear of the pool VAs.
+                             space.init_compute_private(start..vm.kernel.end);
+                             space.sync();
++                            space.report_compute_pool("render-shared");
+                         })
+                 } else {
+                     let buffers =
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_compute.rs b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+index 28e7380cc5e0..86ed256153b3 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_compute.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_compute.rs
+@@ -23,6 +23,7 @@ pub(crate) fn map_compute_work(
+         space.set_compute_support(support)?;
+         space.init_compute_private(private);
+         space.sync();
++        space.report_compute_pool("private");
+         Ok(())
+     }
+ 
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index c63377357bed..01a1ce73be29 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -375,6 +375,32 @@ pub(crate) fn share_render_pool(
+         Ok(())
+     }
+ 
++    /// Debug (debug_ctx): name this compute root's pool placement, so
++    /// separate clients' pools can be told apart by physical address.
++    pub(crate) fn report_compute_pool(&mut self, kind: &str) {
++        use crate::g16_compute as compute;
++        if crate::module_parameters::debug_ctx.value() == 0 {
++            return;
++        }
++        let (directory, buffer) = match self._pool_owner {
++            Some(_) => (0, 0),
++            None => (compute::DIRECTORY, compute::BUFFER_BASE),
++        };
++        let pa = |space: &mut Self, va: u64| {
++            if va == 0 { 0 } else { space.low.translate(va).ok().flatten().unwrap_or(0) }
++        };
++        let (d, b) = (pa(self, directory), pa(self, buffer));
++        pr_info!(
++            "G16: compute root {:#x}: {} pool, support {:#x}, directory pa {:#x}, buffer0 pa {:#x}, owned {} KiB\n",
++            self.low.ttb(),
++            kind,
++            self.compute_support.as_ref().map_or(0, |s| s.address()),
++            d,
++            b,
++            self.owned_bytes / 1024
++        );
++    }
++
+     pub(crate) fn compute_support(&self) -> Option<&crate::g16::Support> {
+         self.compute_support.as_deref()
+     }

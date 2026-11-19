@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Janne Grunau <j@jannau.net>
+Date: Thu, 13 Feb 2025 22:46:51 +0100
+Subject: [PATCH] soc: apple: rtkit: Pass 0 as size for a NULL crashlog buffer
+
+The crashlog size is not useful for the crashed() callback callee if the
+passed buffer is NULL. To reduce the risk of NULL pointer derefences in
+callees use size 0 in this case.
+
+Signed-off-by: Janne Grunau <j@jannau.net>
+(cherry picked from commit 41ecd0ba9ef5b9ac562526bcb702ff3043732e2c)
+---
+ drivers/soc/apple/rtkit.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/soc/apple/rtkit.c b/drivers/soc/apple/rtkit.c
+index 7588490afe00..afdd7d5bb334 100644
+--- a/drivers/soc/apple/rtkit.c
++++ b/drivers/soc/apple/rtkit.c
+@@ -403,7 +403,7 @@ static void apple_rtkit_crashlog_rx(struct apple_rtkit *rtk, u64 msg)
+ 
+ 	rtk->crashed = true;
+ 	if (rtk->ops->crashed)
+-		rtk->ops->crashed(rtk->cookie, bfr, rtk->crashlog_buffer.size);
++		rtk->ops->crashed(rtk->cookie, bfr, bfr ? rtk->crashlog_buffer.size : 0);
+ }
+ 
+ static void apple_rtkit_ioreport_rx(struct apple_rtkit *rtk, u64 msg)

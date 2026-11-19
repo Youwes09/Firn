@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 09:02:27 -0400
+Subject: [PATCH] WIP drm/asahi: G16 completion_control parameter
+
+Debug parameter for the completion control value written to registers
+0x14308 (TA) and 0x14048 (3D). The driver's original value 4 stays the
+default. macOS traces only ever use 0-3: 3 for a solo client, mostly 1
+under two-client contention. Lets the Dota contention hang be tested
+against Metal's values; work_layout bit 4 still forces 3.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 90e439356d6da940892e93ec8f6988f5d9f3feea)
+[Niklas: ported to v7.3: module parameter .value() returns the value, not a reference]
+(cherry picked from commit 6ef0b3ca9eb13b2eb188386e157a171e77af3237)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs | 4 ++++
+ drivers/gpu/drm/asahi/g16_drm.rs  | 9 +++++++--
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index b69401f757dd..6708879cb999 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -228,6 +228,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Work fields as macOS (debug): 1=no TVB growth request or fragment flags 0xba8/0xbdc, 2=render index rings, 4=completion control 3, 8=fragment gate 0xb5 after each 40-render cycle start",
+         },
++        completion_control: u32 {
++            default: 4,
++            description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention). work_layout bit 4 forces 3",
++        },
+         micro_layout: u32 {
+             default: 0,
+             description: "Microsequence scene and Work counter fields: 0=original, 1=as macOS (scene slot, per-Work counters)",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index fc62f4d865ca..18e66674ea51 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -1919,8 +1919,13 @@ fn render_parameters(&self, c: &uapi::drm_asahi_cmd_render) -> Result<render::Pa
+         p.fragment_lifecycle = 0x08009f520900a6ba;
+         p.tiling_work_stamp = 0x120;
+         p.fragment_work_stamp = 0x121;
+-        // macOS writes 3; this driver's original value is 4 (debug: work_layout & 4).
+-        p.completion_control = if crate::module_parameters::work_layout.value() & 4 != 0 { 3 } else { 4 };
++        // macOS writes 0-3 (3 solo, mostly 1 under contention); this driver's
++        // original value is 4. Debug: work_layout & 4 forces 3.
++        p.completion_control = if crate::module_parameters::work_layout.value() & 4 != 0 {
++            3
++        } else {
++            u64::from(crate::module_parameters::completion_control.value())
++        };
+         p.layermeta = p.heapmeta;
+         if p.layers > 1 {
+             p.heapmeta += 0x100;

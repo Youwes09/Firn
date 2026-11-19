@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 11:41:00 -0400
+Subject: [PATCH] WIP drm/asahi: G16 compute_preempt debug parameter
+
+Metal's compute queue descriptors keep the native priority encoding
+(+0x30/+0x48 = 2/2 for a priority-2 queue) in every traced Work, solo and
+contended. This driver forces compute to 0/1. compute_preempt=1 keeps the
+native encoding for compute lanes. Default unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 297fd5c943fe6b95db4bf821aaa1122f0a0a8f6a)
+[Niklas: ported to v7.3: module parameter .value() returns the value, not a reference]
+(cherry picked from commit 8455620fd5d7e3e24a667b9e395e5a5feb7d8906)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    | 4 ++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 9 ++++++++-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 1b252466f830..febd5fbbd6d2 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -228,6 +228,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Work fields as macOS (debug): 1=no TVB growth request or fragment flags 0xba8/0xbdc, 2=render index rings, 4=completion control 3, 8=fragment gate 0xb5 after each 40-render cycle start",
+         },
++        compute_preempt: u32 {
++            default: 0,
++            description: "Debug: 1 gives compute queues the native preemptible profile (Metal uses it for compute; this driver forces compute non-preemptible)",
++        },
+         context_sticky: u32 {
+             default: 0,
+             description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index c6bd3cbf14f6..e3e6754d5b45 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -512,7 +512,14 @@ fn init_queues(
+             // Preemptible renders can wedge the firmware when a compressed
+             // render is timesliced against other contexts (Dota 2 with two
+             // compositors, 2026-10-06), so they are off by default.
+-            if stage == 2 || crate::module_parameters::render_preempt.value() == 0 {
++            // Metal's compute queues use the native preemptible profile; the
++            // debug compute_preempt=1 does the same here.
++            let preemptible = if stage == 2 {
++                crate::module_parameters::compute_preempt.value() != 0
++            } else {
++                crate::module_parameters::render_preempt.value() != 0
++            };
++            if !preemptible {
+                 descriptor[0x30..0x34].copy_from_slice(&0u32.to_le_bytes());
+                 descriptor[0x48..0x4c].copy_from_slice(&1u32.to_le_bytes());
+             }

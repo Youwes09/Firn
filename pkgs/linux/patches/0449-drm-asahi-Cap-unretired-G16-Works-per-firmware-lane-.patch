@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 03:53:00 -0400
+Subject: [PATCH] drm/asahi: Cap unretired G16 Works per firmware lane at 64
+
+The firmware reads up to 128 Works ahead on a lane. In the Dota 2 stalls
+its read cursor sat exactly 128 Works past the oldest unretired Work.
+Metal keeps at most 64 command buffers in flight per queue. Bound each
+lane to 64 unretired Works, applied as the existing workqueue
+backpressure, so the driver never approaches that window.
+max_lane_works=0 removes the cap.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 18 ++++++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 7cddceb6c5d4..85ac52adfa59 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -124,6 +124,10 @@ fn probe<'bound>(
+             default: 1,
+             description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts)",
+         },
++        max_lane_works: u32 {
++            default: 64,
++            description: "Maximum unretired Works per firmware lane (render TA/3D and compute) before submissions back off; 0: unlimited. The firmware stops completing Works past a 128-Work window per lane, so keep this at 127 or less; Metal keeps at most 64 command buffers in flight per queue",
++        },
+         perf_base: u32 {
+             default: 0,
+             description: "Debug: GPU performance controller base pstate (0: ADT value; 10 is the top state)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 75f4e54a099e..6103191403cd 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -587,6 +587,24 @@ fn reserve_flight(
+                 // a ring. Like the channel epochs above, never let the head
+                 // run half a ring past an unretired flight on this lane, or
+                 // that flight's ring check stays false and it never retires.
++                // The firmware reads up to 128 Works ahead on each lane. With
++                // more unretired Works than that on a lane it stops completing
++                // them (Dota 2 bursts: 127 in flight never stalled, 129 did).
++                // This applies to every lane (render TA and 3D as well as
++                // compute), so bound each well below the window, as Metal does
++                // with at most 64 command buffers in flight per queue.
++                let cap = crate::module_parameters::max_lane_works.value() as usize;
++                if cap != 0
++                    && self
++                        .flights
++                        .iter()
++                        .filter(|f| f.queues.iter().any(|&(pointers, _)| pointers == lane.pointers))
++                        .count()
++                        >= cap
++                {
++                    self.report_pressure(16, "workqueue");
++                    return Err(EBUSY);
++                }
+                 let next = (lane.head + entries[stage]) % 0x500;
+                 if self.flights.iter().any(|f| {
+                     f.queues

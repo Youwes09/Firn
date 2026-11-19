@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 26 Oct 2026 15:45:24 -0400
+Subject: [PATCH] drm/asahi: G16: map the GPU thermal sensor (MTR) window
+
+macOS hands the G16 firmware a window at slot 36: the 0x4000 bytes at
+SGX +0xe00000, relative, flags 0 (the pre-init hwdata it builds). The
+firmware uses it to find the MTR (thermal sensor) hardware when an MTR
+alarm arrives. Without it, the first alarm is fatal:
+
+  agfMTRAlarmHandler: !!! Fatal Error: Received MTR Alarm interrupt
+  from GPU but no match found in MTR hardware
+
+which is what happens as soon as PMP starts and arms its
+mtr_top_agx alarm. Add the window, and let each window carry its flags.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 236b32eed1705a7fd7a03ffb1634f10a5fe67ab9)
+---
+ drivers/gpu/drm/asahi/g16_platform.rs | 30 +++++++++++++++------------
+ 1 file changed, 17 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 91bcfdcd85b9..ec9de72462f4 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -219,18 +219,22 @@ fn build_registers(&mut self) -> Result {
+             GFP_KERNEL,
+         )?;
+         // Native HAL declarations and the three platform-specific windows.
+-        for (slot, offset, size, relative) in [
+-            (17, 0, 0x20000, true),
+-            (26, 0xd04000, 0x8000, true),
+-            (27, 0xd0d000, 0x1000, true),
+-            (28, 0xd58000, 0x8000, true),
+-            (29, 0xd10000, 0x4000, true),
+-            (31, 0xd40000, 0x4000, true),
+-            (32, 0xd60000, 0x8000, true),
+-            (40, 0xe1c000, 0x4000, true),
+-            (22, 0x1000000, 0x8000, false),
+-            (39, 0xe08000, 0x8000, false),
+-            (41, 0xe1f800, 0x4000, false),
++        for (slot, offset, size, relative, flags) in [
++            (17, 0, 0x20000, true, 2),
++            (26, 0xd04000, 0x8000, true, 2),
++            (27, 0xd0d000, 0x1000, true, 2),
++            (28, 0xd58000, 0x8000, true, 2),
++            (29, 0xd10000, 0x4000, true, 2),
++            (31, 0xd40000, 0x4000, true, 2),
++            (32, 0xd60000, 0x8000, true, 2),
++            // The GPU-side thermal sensor (MTR) block: the firmware looks it
++            // up when an MTR alarm arrives, which happens once PMP arms the
++            // mtr_top_agx alarm.
++            (36, 0xe00000, 0x4000, true, 0),
++            (40, 0xe1c000, 0x4000, true, 2),
++            (22, 0x1000000, 0x8000, false, 2),
++            (39, 0xe08000, 0x8000, false, 2),
++            (41, 0xe1f800, 0x4000, false, 2),
+         ] {
+             if offset + u64::from(size) > span {
+                 return Err(EINVAL);
+@@ -243,7 +247,7 @@ fn build_registers(&mut self) -> Result {
+                     size,
+                     stride: size,
+                     relative: if relative { offset } else { 0 },
+-                    flags: 2,
++                    flags,
+                 },
+                 GFP_KERNEL,
+             )?;

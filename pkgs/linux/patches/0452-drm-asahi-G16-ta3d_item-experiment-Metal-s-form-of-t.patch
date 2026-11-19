@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 06:01:06 -0400
+Subject: [PATCH] drm/asahi: G16: ta3d_item experiment: Metal's form of the
+ TA-to-3D wait (modes 1-3)
+
+The Dota 2 render stall on 7.3 #30 had no dependency items left. The
+fragment lane is parked at the stuck Work's prelude, whose only wait is
+the internal TA-to-3D item, already satisfied. Metal's item for the same
+wait (938 traced renders) differs from ours:
+- +0x24 holds the awaited TA value. Ours holds the render's own fragment
+  stamp, which is the layout Metal uses only for cross-queue waits.
+- The uuid carries the context id in its high byte.
+ta3d_item=1 writes Metal's +0x24; 2 also uses a per-command uuid of
+that form. The default (0) is unchanged.
+
+Folded in:
+- drm/asahi: G16 ta3d_item experiment: Metal's form of the TA-to-3D wait
+- drm/asahi: G16 ta3d_item=3: number fragment stamps like tiling stamps, as Metal
+
+[drm/asahi: G16 ta3d_item=3: number fragment stamps like tiling stamps, as Metal]
+Metal's 3D Work carries the same stamp value as its pass's TA Work (both
+0x12be00 for the first traced render, at adjacent addresses), so its TA-to-3D
+item has +0x24 (the Work's own stamp) equal to the awaited TA value. Ours
+start the fragment lane at 0x100 and the tiling lane at 0xc00. ta3d_item=3
+starts new render queues' fragment lanes at 0xc00, so own and awaited values
+match without changing what +0x24 means, and also uses the Metal-style uuid.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 2ec78b6c4fbaf51bed4f393051572d2f55424354)
+(cherry picked from commit 485ba7c48af6c0bec8c22dc76b1b7644b298359e)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ++++
+ drivers/gpu/drm/asahi/g16_render.rs  | 17 +++++++++++++++--
+ drivers/gpu/drm/asahi/g16_runtime.rs | 16 ++++++++++++++--
+ 3 files changed, 33 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index fe8d6815e731..9564def81a7d 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -124,6 +124,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Debug: 1 logs each queue's kernel-resolved dependency counts when it is destroyed (TA holds, cross-queue holds, lane-ordered fragment waits, compute holds)",
+         },
++        ta3d_item: u32 {
++            default: 0,
++            description: "Experiment: form of each render's own TA-to-3D wait item. 0: +0x24 = the render's fragment stamp; 1: +0x24 = the awaited TA stamp (as Metal); 2: also a Metal-style per-command uuid (context id in the high byte); 3: Metal numbering, fragment stamps equal to tiling stamps (so +0x24 = own = awaited), plus the Metal-style uuid",
++        },
+         render_deps: u32 {
+             default: 0,
+             description: "Experiment: 1 orders renders in the kernel (waits for other queues and for the previous fragment stamp a tiling stage needs, then submits with no firmware dependency items); 0 encodes firmware dependency items",
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index 43922c6f931e..de661067f735 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -1170,11 +1170,24 @@ impl Addresses {
+         u32_at(&mut out, 0, 4);
+         u64_at(&mut out, 4, self.tiling_firmware_stamp);
+         u64_at(&mut out, 0xc, self.tiling_firmware_stamp);
++        // Experiment (ta3d_item): Metal's own-pass TA-to-3D wait repeats the
++        // awaited TA value at +0x24 (only its cross-queue kind-0 waits carry a
++        // different value there) and uses a per-command uuid with the context
++        // id in the high byte.
++        let form = crate::module_parameters::ta3d_item.value();
++        // Form 3 numbers fragment stamps like tiling stamps, so the
++        // render's own stamp already equals the awaited one.
++        let self_value = if form == 1 || form == 2 { self.tiling_stamp } else { self.fragment_stamp };
++        let uuid = if form >= 2 {
++            (self.context_id << 24) | ((self.fragment_counter >> 1) & 0xff_ffff)
++        } else {
++            self.fragment_uuid
++        };
+         for (off, value) in [
+             (0x14, self.tiling_stamp),
+             (0x20, self.tiling_event),
+-            (0x24, self.fragment_stamp),
+-            (0x28, self.fragment_uuid),
++            (0x24, self_value),
++            (0x28, uuid),
+         ] {
+             u32_at(&mut out, off, value as u32);
+         }
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index fadca1338343..0ee9046f1396 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -259,6 +259,18 @@ fn ring_room(tail: u32, read: u32, done: u32, entries: u32, capacity: u32) -> bo
+             .all(|&cursor| (tail + capacity - cursor) % capacity + entries < capacity / 2)
+ }
+ 
++/// First fragment-lane stamp of a render queue. Experiment ta3d_item=3
++/// numbers a render's fragment stamps like its tiling stamps, as Metal does,
++/// so its TA-to-3D wait carries the same value as its own (+0x24) and as the
++/// awaited one.
++fn fragment_stamp_base() -> u32 {
++    if crate::module_parameters::ta3d_item.value() >= 3 {
++        0xc00
++    } else {
++        0x100
++    }
++}
++
+ impl Bootstrap {
+     /// Report each exhausted resource once, without logging every retry or
+     /// enabling firmware KTrace (which changes command execution timing).
+@@ -495,7 +507,7 @@ fn init_queues(
+             // target. This also permits qualification near stamp rollover.
+             let (ordinal, first) = match stage {
+                 0 => (owner.render_count, 0xc00),
+-                1 => (owner.render_count, 0x100),
++                1 => (owner.render_count, fragment_stamp_base()),
+                 _ => (owner.compute_count, 0x100),
+             };
+             let current = g16_stamp::previous(g16_stamp::value(ordinal, first));
+@@ -1789,7 +1801,7 @@ fn submit_render_pool(
+         a.tiling_counter = a.fragment_counter.wrapping_add(1);
+         // Firmware's dependency graph requires consecutive stamp updates
+         // within each lane, even when other queues publish between them.
+-        a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, 0x100));
++        a.fragment_stamp = u64::from(g16_stamp::value(queue_ordinal, fragment_stamp_base()));
+         a.tiling_stamp = u64::from(g16_stamp::value(queue_ordinal, 0xc00));
+         let va = self.allocate_work(true)?;
+         a.tiling_shared_tail = va + 0x10000;

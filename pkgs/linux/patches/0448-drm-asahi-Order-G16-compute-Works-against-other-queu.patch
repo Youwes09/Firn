@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 8 Oct 2026 03:52:58 -0400
+Subject: [PATCH] drm/asahi: Order G16 compute Works against other queues in
+ the kernel
+
+Dota 2's loading screen submits bursts of hundreds of single-dispatch
+compute Works. When those Works carry firmware dependency items (on
+render stamps or other queues), the firmware stops completing Works on
+the lane after reading 128 Works ahead, and every queue of the client
+stalls. claude-dota's native replay stalled in 9 of 9 runs with the
+items and 0 of 2 without; keeping only the render->compute items is
+enough to stall. Metal's compute Works carry no dependency items; XNU
+only rings the compute doorbell after the awaited render's completion.
+
+Resolve compute dependencies in the kernel instead. A dependency on the
+queue's own compute lane is ordered by the ring. Any other awaited stamp
+must already be reached when the Work is admitted. Otherwise
+submit_compute returns EBUSY: the submission worker publishes what it has
+staged, sleeps until the next completion and retries, and the rest of
+the queue waits behind the Work. The Work then reaches the firmware with
+no dependency items. The cost is one CPU round trip for each compute Work
+whose input is still running.
+
+compute_deps=0 restores the firmware dependency items.
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 30 ++++++++++++++++++++++++++++
+ 2 files changed, 34 insertions(+)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index e5e39ca5d742..7cddceb6c5d4 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -120,6 +120,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Trace mask: 1=firmware KTrace/publications, 2=admission saturation, 4=publication batches, 8=queued dependencies, 16=retirement delays, 32=dump one render's Work structs, 64=firmware RX ring activity, 128=firmware mappings and configuration dump",
+         },
++        compute_deps: u32 {
++            default: 1,
++            description: "Compute Work ordering against other queues: 1 waits in the kernel and submits Works without firmware dependency items (as Metal); 0 encodes firmware dependency items (the earlier behaviour, which can stall the firmware under heavy compute bursts)",
++        },
+         perf_base: u32 {
+             default: 0,
+             description: "Debug: GPU performance controller base pstate (0: ADT value; 10 is the top state)",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 6ce7a5abb3a5..75f4e54a099e 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -2065,6 +2065,34 @@ pub(crate) fn map_compute_work(
+         Ok(())
+     }
+ 
++    /// Order a compute Work against other queues in the kernel rather than
++    /// with firmware dependency items, which can stall the firmware when a
++    /// burst of compute Works carries them (Dota 2's loading screen); Metal's
++    /// compute Works carry none either. The queue's own compute lane is
++    /// ordered by its ring. Any other awaited stamp must already be reached:
++    /// otherwise return EBUSY, and the submission worker publishes what it
++    /// has staged and retries after the next completion, holding back the
++    /// rest of this queue. compute_deps=0 keeps the firmware items.
++    fn resolve_compute_dependencies(
++        &self,
++        queue: &FirmwareQueues,
++        dependencies: &[Option<Stamp>; 2],
++    ) -> Result<[Option<Stamp>; 2]> {
++        if crate::module_parameters::compute_deps.value() == 0 {
++            return Ok(*dependencies);
++        }
++        let own_lane = queue.lanes.as_ref().map(|lanes| lanes[2].firmware_stamp());
++        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
++        for dep in dependencies.iter().flatten() {
++            if own_lane != Some(dep.address)
++                && !g16_stamp::reached(fw.read_u32(dep.address)?, dep.value)
++            {
++                return Err(EBUSY);
++            }
++        }
++        Ok([None; 2])
++    }
++
+     pub(crate) fn submit_compute(
+         &mut self,
+         queues: Arc<Mutex<FirmwareQueues>>,
+@@ -2075,6 +2103,8 @@ pub(crate) fn submit_compute(
+     ) -> Result<Receipt> {
+         let mut queue = queues.lock();
+         let mut client = owner.lock();
++        let resolved = self.resolve_compute_dependencies(&queue, dependencies)?;
++        let dependencies = &resolved;
+         self.reserve_flight(
+             &queue,
+             false,

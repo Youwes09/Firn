@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Wed, 7 Oct 2026 11:36:44 -0400
+Subject: [PATCH] WIP drm/asahi: G16 context_sticky debug parameter; log the
+ previous root on rebind
+
+G16 render and compute Works take a fixed preferred firmware context slot
+(9 and 1) and rebind it to the submitting VM whenever it is idle, so the
+slot moves between clients on most switches. context_sticky=1 keeps each VM
+on its slot and takes never-bound slots first, like upstream asahi's sticky
+slot allocator. Defaults keep the #26 policy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit d9aacc5dac6dfd90fc0401f4d8ae9824b8698789)
+[Niklas: ported to v7.3: module parameter .value() returns the value, not a reference]
+(cherry picked from commit 40a00aaee961b7fa036733e163cb857765797306)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs    |  4 ++++
+ drivers/gpu/drm/asahi/g16_runtime.rs | 16 ++++++++++++++--
+ 2 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index ce46c6be756f..1b252466f830 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -228,6 +228,10 @@ fn probe<'bound>(
+             default: 0,
+             description: "Work fields as macOS (debug): 1=no TVB growth request or fragment flags 0xba8/0xbdc, 2=render index rings, 4=completion control 3, 8=fragment gate 0xb5 after each 40-render cycle start",
+         },
++        context_sticky: u32 {
++            default: 0,
++            description: "Debug: 1 keeps firmware context slots bound to their VM (new VMs take never-bound slots; bound idle slots are reused only when none are free) instead of rebinding the preferred slot",
++        },
+         completion_control: u32 {
+             default: 4,
+             description: "Debug: completion control value for registers 0x14308/0x14048 (driver original 4; macOS uses 0-3: 3 solo, mostly 1 under contention). work_layout bit 4 forces 3",
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index fb8472004ee5..c6bd3cbf14f6 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1587,9 +1587,15 @@ pub(crate) fn invalidate_client(&self, client: &g16_vm::AddressSpace) {
+ 
+     fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<u32> {
+         let existing = (1..64).find(|&i| self.context_roots[i].is_some_and(|r| r.low == roots.low));
++        let sticky = crate::module_parameters::context_sticky.value() != 0;
+         let slot = existing
+             .or_else(|| {
+-                if self.context_users[preferred] == 0 {
++                if sticky {
++                    // Debug: never rebind a slot while an unbound one exists.
++                    (1..64)
++                        .find(|&i| self.context_roots[i].is_none())
++                        .or_else(|| (1..64).find(|&i| self.context_users[i] == 0))
++                } else if self.context_users[preferred] == 0 {
+                     Some(preferred)
+                 } else {
+                     (1..64).find(|&i| self.context_users[i] == 0)
+@@ -1597,8 +1603,14 @@ fn acquire_context(&mut self, roots: g16_vm::Roots, preferred: usize) -> Result<
+             })
+             .ok_or(EBUSY)?;
+         if existing.is_none() {
++            let previous = self.context_roots[slot].map(|r| r.low);
+             self.set_context(slot, Some(roots))?;
+-            pr_info!("G16: context {} bound to root {:#x}\n", slot, roots.low);
++            pr_info!(
++                "G16: context {} bound to root {:#x} (previous {:#x})\n",
++                slot,
++                roots.low,
++                previous.unwrap_or(0)
++            );
+         }
+         self.context_users[slot] += 1;
+         Ok(slot as u32)

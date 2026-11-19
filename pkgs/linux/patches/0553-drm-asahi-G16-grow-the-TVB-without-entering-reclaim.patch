@@ -1,0 +1,159 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 23 Oct 2026 20:51:53 -0400
+Subject: [PATCH] drm/asahi: G16: grow the TVB without entering reclaim
+
+TVB growth answers a firmware allocation request from event service,
+which is in the fence-signalling path, and allocated its block list,
+data pages and page-tree nodes with GFP_KERNEL, so it could recurse into
+reclaim that waits on this device's fences.
+
+Allocate with GFP_NOWAIT | __GFP_NOWARN, including the last single
+block: GFP_ATOMIC would take 128 KiB blocks from the emergency reserves
+that interrupt-context allocators need when memory is tight. The existing
+fallback is unchanged: a failure halves the request down to one block,
+then refuses, and firmware finishes the render under its memory limit.
+A refusal now fails the render's queue, since retirement errors latch it;
+tvb_memory_limit was never nonzero in about 1,500 retained samples, and
+pre-reserving growth (phase 2) is the real fix for a refusal.
+
+Page tables for the new range are still allocated by map_pages; their
+preallocation is part of phase 2.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_tvb.rs              | 11 ++++-
+ drivers/gpu/drm/asahi/g16_vm.rs               | 12 +++--
+ .../drivers/gpu/asahi/test-tvb-growth-gfp.py  | 47 +++++++++++++++++++
+ 3 files changed, 63 insertions(+), 7 deletions(-)
+ create mode 100755 tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py
+
+diff --git a/drivers/gpu/drm/asahi/g16_tvb.rs b/drivers/gpu/drm/asahi/g16_tvb.rs
+index a06f1075f767..d2fe8a662f79 100644
+--- a/drivers/gpu/drm/asahi/g16_tvb.rs
++++ b/drivers/gpu/drm/asahi/g16_tvb.rs
+@@ -8,6 +8,7 @@
+     pgtable::prot,
+ };
+ use kernel::prelude::*;
++use kernel::alloc::flags::{GFP_NOWAIT, __GFP_NOWARN};
+ 
+ // Match the capacity already advertised in the buffer-manager metadata. The
+ // default budget is one third of this, as in Apple8's non-memoryless path.
+@@ -156,11 +157,17 @@ pub(crate) fn grow(
+         // After mapping starts, any error requires retaining the context/reset.
+         let mut entries = KVec::new();
+         let base = loop {
++            // This answers a firmware request from the fence-signalling path,
++            // so it must not enter reclaim. Nor use the atomic reserves: a block is
++            // 128 KiB, and the emergency reserves belong to interrupt-context
++            // allocators when memory is tight. A failure refuses the render,
++            // which then finishes under its memory limit.
++            let gfp = GFP_NOWAIT | __GFP_NOWARN;
+             if entries
+-                .extend_with((new - old) as usize * 8, 0u8, GFP_KERNEL)
++                .extend_with((new - old) as usize * 8, 0u8, gfp)
+                 .is_ok()
+             {
+-                if let Some(base) = client.alloc_tvb_blocks((new - old) as usize)? {
++                if let Some(base) = client.alloc_tvb_blocks((new - old) as usize, gfp)? {
+                     break base;
+                 }
+                 entries.clear();
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 41b1e1f38a3c..430628fc0f6b 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -292,7 +292,9 @@ pub(crate) fn release_scratch(&mut self, scratch: Scratch) -> Result {
+ 
+     /// Allocate tiler blocks from the shared private aperture. Before mapping,
+     /// failure leaves both existing backing and the arena reservation untouched.
+-    pub(crate) fn alloc_tvb_blocks(&mut self, count: usize) -> Result<Option<u64>> {
++    /// `gfp` comes from the caller: TVB growth must not enter reclaim. Page
++    /// tables for the new range are still allocated by `map_pages`.
++    pub(crate) fn alloc_tvb_blocks(&mut self, count: usize, gfp: kernel::alloc::Flags) -> Result<Option<u64>> {
+         if count == 0 || count > crate::g16_tvb::MAX_BLOCKS as usize {
+             return Err(EINVAL);
+         }
+@@ -302,7 +304,7 @@ pub(crate) fn alloc_tvb_blocks(&mut self, count: usize) -> Result<Option<u64>> {
+         };
+         let base = range.start;
+         let mut pages = KVec::new();
+-        if pages.reserve(count * 8, GFP_KERNEL).is_err() {
++        if pages.reserve(count * 8, gfp).is_err() {
+             return Ok(None);
+         }
+         for block in 0..count {
+@@ -313,16 +315,16 @@ pub(crate) fn alloc_tvb_blocks(&mut self, count: usize) -> Result<Option<u64>> {
+                 }
+             }
+             for va in (start..start + 0x20000).step_by(UAT_PGSZ) {
+-                let page = match Page::alloc_page(GFP_KERNEL | __GFP_ZERO) {
++                let page = match Page::alloc_page(gfp | __GFP_ZERO) {
+                     Ok(page) => page,
+                     Err(_) => return Ok(None),
+                 };
+                 clean_page(&page);
+-                let node = match RBTreeNode::new(va, page, GFP_KERNEL) {
++                let node = match RBTreeNode::new(va, page, gfp) {
+                     Ok(node) => node,
+                     Err(_) => return Ok(None),
+                 };
+-                pages.push(node, GFP_KERNEL)?;
++                pages.push_within_capacity(node).map_err(|_| EIO)?;
+             }
+         }
+         // Transfer every preallocated node before the first fallible PTE edit.
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py b/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py
+new file mode 100755
+index 000000000000..dd9bb5b87dfa
+--- /dev/null
++++ b/tools/testing/selftests/drivers/gpu/asahi/test-tvb-growth-gfp.py
+@@ -0,0 +1,47 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-2.0-only
++"""Host source checks: G16 TVB growth, which answers a firmware request from
++the fence-signalling path, never enters reclaim and never takes the atomic
++reserves. Its data allocations use GFP_NOWAIT | __GFP_NOWARN, and a failure
++halves the request down to one block and
++then refuses, so the render finishes under its memory limit. Page tables
++for the new range are still allocated by map_pages (phase 2).
++"""
++from pathlib import Path
++import re
++
++here = Path(__file__).resolve()
++root = next(p for p in here.parents if (p / 'drivers/gpu/drm/asahi/g16_tvb.rs').exists())
++driver = root / 'drivers/gpu/drm/asahi'
++tvb = (driver / 'g16_tvb.rs').read_text()
++vm = (driver / 'g16_vm.rs').read_text()
++
++
++def function(source, name):
++    m = re.search(r'\n(\s*)(?:pub\(crate\) )?fn ' + name + r'\b', source)
++    assert m, name
++    indent = m.group(1).lstrip('\n')
++    end = re.search(r'\n' + indent + r'}\n', source[m.end():])
++    return source[m.start():m.end() + end.end()]
++
++
++grow = function(tvb, 'grow')
++blocks = function(vm, 'alloc_tvb_blocks')
++checks = 0
++for name, body in (('grow', grow), ('alloc_tvb_blocks', blocks)):
++    assert 'GFP_KERNEL' not in body, f'{name} may reclaim'
++    checks += 1
++assert 'let gfp = GFP_NOWAIT | __GFP_NOWARN;' in grow and 'GFP_ATOMIC' not in grow
++assert 'client.alloc_tvb_blocks((new - old) as usize, gfp)?' in grow
++assert re.search(r'extend_with\(\(new - old\) as usize \* 8, 0u8, gfp\)', grow)
++checks += 1
++# The fallback: halve, then refuse at one block.
++assert re.search(r'if add == 1 \{\s*return Ok\(false\);\s*\}\s*new = old \+ add / 2;', grow)
++checks += 1
++# Every allocation in alloc_tvb_blocks takes the caller's flags; none fails the context.
++assert 'Page::alloc_page(gfp | __GFP_ZERO)' in blocks and 'RBTreeNode::new(va, page, gfp)' in blocks
++assert 'pages.reserve(count * 8, gfp)' in blocks and 'push_within_capacity(node)' in blocks
++for failure in re.findall(r'Err\(_\) => return ([^,]+),', blocks):
++    assert failure == 'Ok(None)', failure
++checks += 1
++print(f'test-tvb-growth-gfp: {checks} checks passed')

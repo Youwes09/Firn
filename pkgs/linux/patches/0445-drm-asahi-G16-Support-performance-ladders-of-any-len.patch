@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 6 Oct 2026 15:12:06 -0400
+Subject: [PATCH] drm/asahi: G16: Support performance ladders of any length
+
+Accept loader ladders of 2..16 states (index 0 is off; all ladders the
+same length) instead of exactly 11, following the field notes in
+artifacts/g16-ladder-fields-20261006.md: the max_pstate words at 0xfc4
+and 0x1cd8 are N-1, the per-state 1.02 float arrays have N entries, the
+maximum frequency is the top entry, and the base p-state must be below N.
+For the mini's 11-state ladders the init data is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 2e2938222b5a0e85a7a5b8402e5dd0c2ef2b656e)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  2 +-
+ drivers/gpu/drm/asahi/g16.rs          |  2 +-
+ drivers/gpu/drm/asahi/g16_platform.rs | 70 +++++++++++++++++++++------
+ drivers/gpu/drm/asahi/g16_power.rs    |  8 +--
+ 4 files changed, 61 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 93c3a6b701ea..e5e39ca5d742 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -95,7 +95,7 @@ fn probe<'bound>(
+         let bundle = platform.bundle(0)?;
+         dev_info!(dev,
+             "M4 source configuration: {} register windows, mask={:#x}, max-frequency={} MHz, max-power={} mW, period={}/{} ms/clocks, objects={}/{}/{} bytes\n",
+-            platform.registers.len(), platform.core_mask, platform.freq_a[10],
++            platform.registers.len(), platform.core_mask, platform.max_frequency(),
+             platform.maximum_power, platform.period_ms, platform.period_clocks,
+             hwdata.len(), region_c.len(), bundle.len());
+         Ok(M4GpuData {
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 249ad43ac02b..d8332296ee31 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -679,7 +679,7 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             opening_notification_pending: true,
+             gpu_revision,
+             core_mask: platform.core_mask,
+-            maximum_frequency_khz: platform.freq_a[10] * 1000,
++            maximum_frequency_khz: platform.max_frequency() * 1000,
+             tvb_pools: KVec::new(),
+             render_publication: crate::module_parameters::fw_counter_start.value(),
+             next_work_va: 0xffff_fc22_0000_0000,
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index abd23cd19ee6..ba1b82d32a2d 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -37,9 +37,17 @@ pub(crate) fn adt_word(node: &of::Node, name: &CStr, default: Option<u32>) -> Re
+     }
+ }
+ 
+-fn ladder(node: &of::Node, name: &CStr) -> Result<[u32; 11]> {
++/// Most performance states the firmware tables have room for (0x40-byte rows).
++const MAX_STATES: usize = 16;
++
++/// A per-state ladder from the loader. Index 0 is the off state; every ladder
++/// of a platform has the same length (validated in `Platform::new`).
++fn ladder(node: &of::Node, name: &CStr) -> Result<KVec<u32>> {
+     let values: KVec<u32> = node.get_property(name)?;
+-    values.as_slice().try_into().map_err(|_| EINVAL)
++    if values.len() < 2 || values.len() > MAX_STATES {
++        return Err(EINVAL);
++    }
++    Ok(values)
+ }
+ 
+ pub(crate) struct Register {
+@@ -54,14 +62,14 @@ pub(crate) struct Register {
+ 
+ pub(crate) struct Platform {
+     pub(crate) node: of::Node,
+-    pub(crate) freq_a: [u32; 11],
+-    pub(crate) freq_b: [u32; 11],
+-    core_voltage: [u32; 11],
+-    memory_voltage: [u32; 11],
+-    index_a: [u32; 11],
+-    index_b: [u32; 11],
+-    relative_a: [u32; 11],
+-    relative_b: [u32; 11],
++    pub(crate) freq_a: KVec<u32>,
++    pub(crate) freq_b: KVec<u32>,
++    core_voltage: KVec<u32>,
++    memory_voltage: KVec<u32>,
++    index_a: KVec<u32>,
++    index_b: KVec<u32>,
++    relative_a: KVec<u32>,
++    relative_b: KVec<u32>,
+     pub(crate) maximum_power: u32,
+     pub(crate) core_mask: u32,
+     revision: u32,
+@@ -85,7 +93,7 @@ pub(crate) fn new(dev: &device::Device) -> Result<Self> {
+                 if power[0] != 0 || power.windows(2).any(|w| w[0] > w[1]) {
+                     return Err(EINVAL);
+                 }
+-                power[10]
++                power[power.len() - 1]
+             }
+         };
+         let freq_a = ladder(&node, c_str!("apple,m4-freq-a"))?;
+@@ -137,6 +145,21 @@ pub(crate) fn new(dev: &device::Device) -> Result<Self> {
+             registers: KVec::new(),
+             mcc: KVec::new(),
+         };
++        let states = this.freq_a.len();
++        if [
++            &this.freq_b,
++            &this.core_voltage,
++            &this.memory_voltage,
++            &this.index_a,
++            &this.index_b,
++            &this.relative_a,
++            &this.relative_b,
++        ]
++        .iter()
++        .any(|ladder| ladder.len() != states)
++        {
++            return Err(EINVAL);
++        }
+         this.build_registers()?;
+         Ok(this)
+     }
+@@ -275,7 +298,7 @@ pub(crate) fn hwdata(&self) -> Result<KVec<u8>> {
+             put32(&mut out, off + 0x20, r.flags);
+         }
+         for (base, repeats, frequencies) in [(0xfc8, 16, &self.freq_a), (0x1cdc, 1, &self.freq_b)] {
+-            for state in 0..11 {
++            for state in 0..frequencies.len() {
+                 put32(&mut out, base + state * 4, frequencies[state]);
+                 for word in 0..repeats {
+                     put32(
+@@ -302,7 +325,7 @@ pub(crate) fn hwdata(&self) -> Result<KVec<u8>> {
+                 put32(&mut out, off + i * 4, *value);
+             }
+         }
+-        for i in 0..11 {
++        for i in 0..self.states() {
+             put32(&mut out, 0x1848 + i * 4, 1.02f32.to_bits());
+         }
+         for (off, value) in [
+@@ -317,8 +340,8 @@ pub(crate) fn hwdata(&self) -> Result<KVec<u8>> {
+             (0xee0, 1),
+             (0xee4, 1),
+             (0xee8, 1),
+-            (0xfc4, 10),
+-            (0x1cd8, 10),
++            (0xfc4, self.max_pstate()),
++            (0x1cd8, self.max_pstate()),
+             (0x2604, 1),
+         ] {
+             put32(&mut out, off, value);
+@@ -395,3 +418,20 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+         Ok(out)
+     }
+ }
++
++impl Platform {
++    /// Number of performance states, including the off state at index 0.
++    pub(crate) fn states(&self) -> usize {
++        self.freq_a.len()
++    }
++
++    /// Index of the top performance state.
++    pub(crate) fn max_pstate(&self) -> u32 {
++        (self.states() - 1) as u32
++    }
++
++    /// Frequency of the top performance state in MHz.
++    pub(crate) fn max_frequency(&self) -> u32 {
++        self.freq_a[self.states() - 1]
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_power.rs b/drivers/gpu/drm/asahi/g16_power.rs
+index b11859bb0bc7..ff38426e7452 100644
+--- a/drivers/gpu/drm/asahi/g16_power.rs
++++ b/drivers/gpu/drm/asahi/g16_power.rs
+@@ -108,7 +108,7 @@ macro_rules! floats {
+                 $(putf(out, $offset, $value)?;)*
+             };
+         }
+-        let max_scaled = 100 * (self.freq_a.len() as u32 - 1);
++        let max_scaled = 100 * self.max_pstate();
+         let maximum = F32::from(self.maximum_power);
+         let duty = uint!("gpu-pwr-min-duty-cycle", 40);
+         let minimum = uint!("gpu-pwr-integral-min-clamp", 0);
+@@ -123,7 +123,7 @@ macro_rules! floats {
+             out[0x6f6f + i * 2..0x6f71 + i * 2].copy_from_slice(&i16::MAX.to_le_bytes());
+         }
+         ints!(0x5384 => self.period_clocks, 0x5388 => self.period_clocks, 0x5d38 => 625);
+-        for i in 0..11 {
++        for i in 0..self.states() {
+             put32(out, 0x5440 + i * 4, f32!(1.02).to_bits());
+         }
+         let (alpha, inverse) = coefficients(uint!("gpu-pwr-filter-time-constant", 313))?;
+@@ -140,7 +140,7 @@ macro_rules! floats {
+         ints!(0x7fc0 => duty, 0x7fc4 => max_scaled);
+         floats!(0x7570 => f32!(65536.0), 0x7574 => F32::from(duty), 0x7578 => F32::from(max_scaled),
+             0x7598 => f32!(100.0));
+-        ints!(0x757c => self.freq_a[10], 0x7590 => duty, 0x759c => max_scaled, 0x7bf0 => max_scaled);
++        ints!(0x757c => self.max_frequency(), 0x7590 => duty, 0x759c => max_scaled, 0x7bf0 => max_scaled);
+         let (alpha, inverse) = coefficients(5)?;
+         floats!(0x75a4 => alpha, 0x75a8 => inverse);
+ 
+@@ -162,7 +162,7 @@ macro_rules! floats {
+         let boost = uint!("gpu-perf-boost-min-util", 95);
+         let integral_minimum = uint!("gpu-perf-integral-min-clamp", 0);
+         if base == 0
+-            || base >= 11
++            || base >= self.max_pstate() + 1
+             || utilization > 100
+             || dead_zone > utilization
+             || boost > 100

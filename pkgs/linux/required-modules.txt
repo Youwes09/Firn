@@ -31,6 +31,9 @@ cfg80211
 hci_bcm4377
 rfkill
 
+# GPU
+asahi_m4
+
 # USB-C and USB devices
 dwc3
 dwc3_apple

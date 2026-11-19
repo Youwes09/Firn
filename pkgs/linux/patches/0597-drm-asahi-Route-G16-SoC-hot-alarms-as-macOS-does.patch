@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 00:17:14 -0600
+Subject: [PATCH] drm/asahi: Route G16 SoC-hot alarms as macOS does
+
+Bundle 0x8288, 0x8290 and 0x8294 were left zero. macOS 26.6.2 sets them
+on the J713 to the fast-die sensors, 125 and 1, the fields Asahi's
+initialization data names fast_die0_sensor_mask64_2, unk_e24 and unk_e28
+and fills the same way on G13 to G15. Interface notes by Syd Garlathy
+<s@ll.dev>, written from macOS's drivers, describe them as the SoC-hot
+alarm route's sensors and alarm selector.
+
+Share the fast-die sensor mask with the fast-die controller at 0x75e8.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/g16_power.rs | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_power.rs b/drivers/gpu/drm/asahi/g16_power.rs
+index d7ff12a5b604..ad7e55d8c3de 100644
+--- a/drivers/gpu/drm/asahi/g16_power.rs
++++ b/drivers/gpu/drm/asahi/g16_power.rs
+@@ -56,6 +56,10 @@ fn filter(count: u32, period: u32, request: Option<u32>) -> Result<Filter> {
+     })
+ }
+ 
++/// The MTR sensors behind the fast-die limit and the SoC-hot alarm route.
++const FAST_DIE_SENSORS: u64 =
++    (1 << 3) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 11) | (1 << 13) | (1 << 14);
++
+ impl Platform {
+     /// Entire source-built bundle, including the firmware's power controllers.
+     pub(crate) fn bundle(&self, entropy: u32) -> Result<KVec<u8>> {
+@@ -68,6 +72,10 @@ pub(crate) fn bundle(&self, entropy: u32) -> Result<KVec<u8>> {
+         put64(&mut out, 0x8ed0, 0xffff_fc20_000f_3440 + 0x80);
+         // The MTR sensors the firmware samples and checks for alarms.
+         put64(&mut out, 0x8ed8, self.sensor_mask.into());
++        // SoC-hot alarms: the sensors, threshold and alarm selector.
++        put64(&mut out, 0x8288, FAST_DIE_SENSORS);
++        put32(&mut out, 0x8290, 125);
++        put32(&mut out, 0x8294, 1);
+         put64(&mut out, 0xb698, 0xffff_fc20_c050_0000);
+         self.power_data(&mut out)?;
+         put32(&mut out, 0xb754, entropy);
+@@ -279,11 +287,7 @@ macro_rules! floats {
+         if delta > u32::MAX / 100 {
+             return Err(EINVAL);
+         }
+-        put64(
+-            out,
+-            0x75e8,
+-            (1 << 3) | (1 << 4) | (1 << 6) | (1 << 8) | (1 << 11) | (1 << 13) | (1 << 14),
+-        );
++        put64(out, 0x75e8, FAST_DIE_SENSORS);
+         ints!(0x75f0 => release,
+             0x75f8 => 4, 0x7630 => duty, 0x7634 => max_scaled, 0x7638 => max_scaled,
+             0x763c => (F32::from(delta)*f32!(100.0)).to_u32_checked().ok_or(EINVAL)?,

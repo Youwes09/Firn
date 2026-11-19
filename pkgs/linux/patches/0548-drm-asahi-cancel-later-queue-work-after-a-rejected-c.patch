@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Thu, 22 Oct 2026 03:40:36 -0400
+Subject: [PATCH] drm/asahi: cancel later queue work after a rejected command
+
+A command that fails preparation (for example a native stream from a VM
+whose support header is ordinary) completed only its own job's fence with
+the error. Honeykrisp submits one command per ioctl by default, so a
+multi-command submission becomes several jobs and only the last carries
+the VkFence and queue timeline point. The later jobs ran without the
+rejected command and signalled success, so Vulkan saw a successful fence
+with stale output.
+
+Latch the rejection on the public queue and fail every later job on it
+with ECANCELED before it publishes anything. Its fence carries the error,
+which Honeykrisp's status check reports as device loss. GPU faults and
+timeouts reported at retirement are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs     | 15 +++++++++++++--
+ drivers/gpu/drm/asahi/g16_runtime.rs |  6 ++++++
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 6c849102bdad..f7e5526536bb 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -2011,7 +2011,17 @@ fn run(this: Arc<Self>) {
+                             continue;
+                         }
+                         if job.history[0].is_empty() {
+-                            let previous = job.execution.firmware.lock().last;
++                            let firmware = job.execution.firmware.lock();
++                            if firmware.rejected {
++                                // Queued behind a rejected command on this
++                                // queue: fail without publishing anything.
++                                drop(firmware);
++                                job.error = Some(ECANCELED);
++                                progress = true;
++                                continue;
++                            }
++                            let previous = firmware.last;
++                            drop(firmware);
+                             for (history, stamp) in job.history.iter_mut().zip(previous) {
+                                 history.push(stamp, GFP_KERNEL)?;
+                             }
+@@ -2057,10 +2067,11 @@ fn run(this: Arc<Self>) {
+                             }
+                             Err(error) if !runtime.render_failed() => {
+                                 pr_err!(
+-                                    "G16: command {} preparation failed: {:?}\n",
++                                    "G16: command {} preparation failed: {:?}; later work on its queue is cancelled\n",
+                                     job.next,
+                                     error
+                                 );
++                                execution.firmware.lock().rejected = true;
+                                 job.error = Some(error);
+                                 progress = true;
+                                 continue;
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index de355789f4ff..c5590b36d850 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -33,6 +33,11 @@ pub(crate) struct FirmwareQueues {
+     /// Render Works counted into the queue's shared notifier (two per render).
+     notified_works: u32,
+     pub(crate) last: [Option<Stamp>; 2],
++    /// A command on this queue was rejected before publication. Userspace
++    /// may split one submission into several jobs whose later parts rely on
++    /// queue order, so every later job on the queue fails with ECANCELED
++    /// instead of running without that command.
++    pub(crate) rejected: bool,
+     /// Per lane (TA, 3D, compute), the latest stamps its published Works
+     /// waited on as firmware items, keyed by address.
+     waited: [[Option<Stamp>; 2]; 3],
+@@ -189,6 +194,7 @@ pub(crate) fn new(priority: u32) -> Self {
+             waited: [[None; 2]; 3],
+             cursors: [const { core::cell::Cell::new((u32::MAX, u32::MAX)) }; 3],
+             deps: DependencyStats::default(),
++            rejected: false,
+         }
+     }
+ 

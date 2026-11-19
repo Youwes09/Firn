@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Tue, 27 Oct 2026 00:43:02 -0400
+Subject: [PATCH] drm/asahi: G16: announce each render with its own completion
+ notifier
+
+Since 2026-10-03 every render published to a queue shared one firmware
+notifier and wrote the queue's cumulative Work count into its count
+array, as macOS lays it out. The firmware announces a notifier's
+completions (the 0x42 message) only once the count it has completed
+reaches that count, so on a queue that keeps receiving work the message
+for a finished render waited until the queue drained, or until the
+driver's 50 ms safety poll found it. Under load this showed up as
+stutter, and as late or missing completions for long-running clients;
+it was frequent on a GPU slowed by PMP.
+
+Give each render its own notifier, count and driver stamps again, as
+the driver did before 2026-10-03 (the same writes and Work layout), so
+the firmware announces it as soon as it completes. An Air A/B under PMP
+(claude-g16recov, 2026-10-27): with per-render notifiers the 45-56 ms
+band of completion latency went from 36 events to 0, irq-to-seen p99.9
+from 31 ms to 2.6 ms and safety-poll retirements to 0; switching back
+restored them.
+
+asahi_m4.shared_notifier=1 (runtime: debugfs asahi_m4/shared_notifier)
+restores the shared notifier, for comparison.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit caf885156548bb337dd9acfd2685c4924c06fa77)
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs           |  4 ++
+ drivers/gpu/drm/asahi/g16_drm.rs            |  1 +
+ drivers/gpu/drm/asahi/g16_runtime_render.rs | 61 +++++++++++++++++----
+ drivers/gpu/drm/asahi/g16_timeline.rs       | 12 ++++
+ 4 files changed, 67 insertions(+), 11 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index e3c845a080a1..0ff1e22c67b4 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -176,6 +176,10 @@ fn probe<'bound>(
+             default: 1,
+             description: "1 advertises soft faults to userspace (needs fault_control=3; Mesa with hk 243c5ac0c43 and 31b9d1d5bfb); 0 hides them",
+         },
++        shared_notifier: u32 {
++            default: 0,
++            description: "0 (default): each render has its own completion notifier; 1: renders share the queue's notifier with a cumulative Work count, which delays completion messages until the queue drains (2026-10-03 to 10-27 behaviour, kept for comparison). Runtime: debugfs asahi_m4/shared_notifier",
++        },
+         timeline: u32 {
+             default: 0,
+             description: "Debug: 1 records each submission when its fence signals into a binary ring at debugfs asahi_m4/timeline (format in g16_timeline.rs): the client pid and file, input fences pending at the ioctl, CNTVCT ticks (1 GHz) at the ioctl, scheduler run, first and last publication and completion, plus admission deferrals and their reasons. 2 also records the doorbell, and for the notification that retired the submission its IRQ, RTKit delivery, pump wake and retire-scan times",
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 27e4a34da808..397fef166819 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -282,6 +282,7 @@ pub(crate) fn register<'a>(
+     use crate::g16_timeline::FlagKnob;
+     let knobs = [
+         (c_str!("profile"), FlagKnob::PROFILE, crate::module_parameters::profile.value()),
++        (c_str!("shared_notifier"), FlagKnob::SHARED_NOTIFIER, crate::module_parameters::shared_notifier.value()),
+         (c_str!("fail_prep"), FlagKnob::FAIL_PREP, 0),
+         (c_str!("fail_retire"), FlagKnob::FAIL_RETIRE, 0),
+         (c_str!("fail_skip"), FlagKnob::FAIL_SKIP, 0),
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_render.rs b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+index 05a31b880e15..00f674dde505 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_render.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_render.rs
+@@ -255,12 +255,22 @@ pub(super) fn submit_render_pool(
+         // The notifier pass stores driver stamps, then sends the IRQ after
+         // a DSB. These destinations must be firmware-uncached: a DSB does
+         // not clean a cached stamp, leaving Linux asleep on stale memory.
+-        // One notifier and one stamp per lane for the whole queue, as
+-        // macOS does: the notifier pass then does not walk each Work.
+-        a.event_control = render_notifier(lanes);
+-        a.event_count_array = render_notifier_count(lanes);
+-        a.tiling_driver_stamp = lanes[0].driver_stamp();
+-        a.fragment_driver_stamp = lanes[1].driver_stamp();
++        // Each render has its own notifier, count and driver stamps, so the
++        // firmware announces it as soon as it completes. A notifier shared
++        // by the queue, with a cumulative count (shared_notifier=1, for
++        // comparison), is only announced once every Work published to it
++        // has completed: a busy queue then waited for the safety poll.
++        if crate::g16_timeline::shared_notifier() {
++            a.event_control = render_notifier(lanes);
++            a.event_count_array = render_notifier_count(lanes);
++            a.tiling_driver_stamp = lanes[0].driver_stamp();
++            a.fragment_driver_stamp = lanes[1].driver_stamp();
++        } else {
++            a.event_control = va + 0x200;
++            a.event_count_array = va + 0x300;
++            a.tiling_driver_stamp = va + 0x18000;
++            a.fragment_driver_stamp = va + 0x18040;
++        }
+ 
+         a.tiling_firmware_stamp = lanes[0].firmware_stamp();
+         a.fragment_firmware_stamp = lanes[1].firmware_stamp();
+@@ -392,8 +402,12 @@ pub(super) fn submit_render_pool(
+         support.submissions.store(next_submitted, Ordering::Relaxed);
+         self.render_publication = self.render_publication.wrapping_add(1);
+         queue.render_count = queue_ordinal.wrapping_add(1);
+-        queue.notified_works = queue.notified_works.wrapping_add(2);
+-        let notifier_count = Some((a.event_control + 0xc, queue.notified_works));
++        let notifier_count = if a.event_control == render_notifier(queue.lanes.as_ref().ok_or(EIO)?) {
++            queue.notified_works = queue.notified_works.wrapping_add(2);
++            Some((a.event_control + 0xc, queue.notified_works))
++        } else {
++            None
++        };
+         let lanes = queue.lanes.as_mut().ok_or(EIO)?;
+         for stage in 0..2 {
+             lanes[stage].head = heads[stage];
+@@ -507,6 +521,27 @@ pub(super) fn publish_render(
+         // lookup and two barriers for each of about twenty writes.
+         let context = (a.context_id as u32).to_le_bytes();
+         let notified = queue.notified_works.wrapping_add(2).to_le_bytes();
++        // The notifier header: the Work's own notifier and driver stamps, or
++        // (shared_notifier=1) two words into the queue's shared notifier.
++        let shared = a.event_control == render_notifier(lanes);
++        let count_array = a.event_count_array.to_le_bytes();
++        let fragment_stamp = (a.fragment_stamp as u32).to_le_bytes();
++        let zero = 0u32.to_le_bytes();
++        let flags = 0x50u32.to_le_bytes();
++        let two = 2u32.to_le_bytes();
++        let tiling_previous = g16_stamp::previous(a.tiling_stamp as u32).to_le_bytes();
++        let fragment_previous = g16_stamp::previous(a.fragment_stamp as u32).to_le_bytes();
++        let own: [(u64, &[u8]); 8] = [
++            (a.event_control, &count_array[..]),
++            (a.event_control + 8, &fragment_stamp[..]),
++            (a.event_control + 12, &zero[..]),
++            (a.event_control + 0x10, &flags[..]),
++            (a.event_control + 0x24, &context[..]),
++            (a.event_count_array, &two[..]),
++            (a.tiling_driver_stamp, &tiling_previous[..]),
++            (a.fragment_driver_stamp, &fragment_previous[..]),
++        ];
++        let header = if shared { 2 } else { own.len() };
+         let preludes = [a.tiling_prelude(blocks), a.fragment_prelude()];
+         let tiling_micro = a.tiling_microsequence();
+         let fragment_micro = a.fragment_microsequence();
+@@ -560,15 +595,19 @@ pub(super) fn publish_render(
+         let (items, entries) = (&items, &entries);
+         let rings = [lanes[0].ring, lanes[1].ring];
+         let per_stage = move |stage: usize| 3 + item_counts[stage] + entry_counts[stage];
+-        let count = 2 + per_stage(0) + per_stage(1);
++        let own = &own;
++        let count = header + per_stage(0) + per_stage(1);
+         let write = move |n: usize| {
+-            if n < 2 {
+-                return if n == 0 {
++            if n < header {
++                return if !shared {
++                    own[n]
++                } else if n == 0 {
+                     (a.event_control + 0x24, &context[..])
+                 } else {
+                     (a.event_count_array, &notified[..])
+                 };
+             }
++            let n = n - header + 2;
+             let (stage, k) = if n - 2 < per_stage(0) { (0, n - 2) } else { (1, n - 2 - per_stage(0)) };
+             let (prelude, work, micro) = if stage == 0 {
+                 (a.tiling_prelude, a.tiling_work, a.tiling_microsequence)
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 9980eb667a23..cc5bfe380ab0 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -332,6 +332,17 @@ pub(crate) fn take_injection(cell: &core::sync::atomic::AtomicU32, tgid: i32) ->
+     fired
+ }
+ 
++/// Each render's own completion notifier (0, default) or the queue-shared one
++/// (1, for comparison: its cumulative count holds completion messages back
++/// until the queue drains). asahi_m4.shared_notifier; runtime: debugfs
++/// asahi_m4/shared_notifier, for renders published afterwards.
++pub(crate) static SHARED_NOTIFIER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
++/// Whether new renders use the queue-shared notifier (see `SHARED_NOTIFIER`).
++pub(crate) fn shared_notifier() -> bool {
++    SHARED_NOTIFIER.load(core::sync::atomic::Ordering::Relaxed) != 0
++}
++
+ /// A 0/1 debugfs switch over a static.
+ pub(crate) struct FlagKnob {
+     cell: &'static core::sync::atomic::AtomicU32,
+@@ -345,6 +356,7 @@ pub(crate) fn init(&self, value: u32) {
+     }
+ 
+     pub(crate) const PROFILE: Self = Self { cell: &PROFILE, name: "profile", max: 1 };
++    pub(crate) const SHARED_NOTIFIER: Self = Self { cell: &SHARED_NOTIFIER, name: "shared_notifier", max: 1 };
+     pub(crate) const FAIL_PREP: Self = Self { cell: &FAIL_PREP, name: "fail_prep", max: i32::MAX as u32 };
+     pub(crate) const FAIL_RETIRE: Self = Self { cell: &FAIL_RETIRE, name: "fail_retire", max: i32::MAX as u32 };
+     pub(crate) const FAIL_SKIP: Self = Self { cell: &FAIL_SKIP, name: "fail_skip", max: 4096 };

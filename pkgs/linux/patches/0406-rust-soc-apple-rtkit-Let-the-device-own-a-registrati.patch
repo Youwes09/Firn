@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 12 Nov 2026 14:43:53 -0600
+Subject: [PATCH] rust: soc: apple: rtkit: Let the device own a registration
+
+A client whose state outlives its bound device, such as a DRM device's
+data, can't hold a Registration<'a>, and RTKit must stop using the
+mailbox before the mailbox's device unbinds.
+
+Add Registration::new_devres(), which hands the registration to the
+device's resources the way IoMem::into_devres() does: the device drops
+it on unbind, and the owner reaches it through a DevresLt. Booting needs
+exclusive access, so a setup callback runs on the registration before it
+is published.
+
+Access through try_access() holds the RCU read lock, so add
+send_message_atomic() for messages sent from there. It spins while the
+mailbox is full instead of sleeping.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/soc/apple/rtkit.rs | 54 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/rust/kernel/soc/apple/rtkit.rs b/rust/kernel/soc/apple/rtkit.rs
+index 00bfc6f1bf4c..f978b01583c4 100644
+--- a/rust/kernel/soc/apple/rtkit.rs
++++ b/rust/kernel/soc/apple/rtkit.rs
+@@ -15,6 +15,7 @@
+         from_result,
+         to_result, //
+     },
++    devres::DevresLt,
+     prelude::*,
+     sync::atomic::{
+         Acquire,
+@@ -22,7 +23,11 @@
+         Relaxed,
+         Release, //
+     },
+-    types::Opaque, //
++    types::{
++        CovariantForLt,
++        ForLt,
++        Opaque, //
++    },
+ };
+ use core::{
+     ffi::{
+@@ -115,6 +120,15 @@ pub fn start_endpoint(&self, endpoint: u8) -> Result {
+ 
+     /// Sends a message to an endpoint.
+     pub fn send_message(&self, endpoint: u8, message: u64) -> Result {
++        self.send(endpoint, message, false)
++    }
++
++    /// Sends a message to an endpoint without sleeping, spinning while the mailbox is full.
++    pub fn send_message_atomic(&self, endpoint: u8, message: u64) -> Result {
++        self.send(endpoint, message, true)
++    }
++
++    fn send(&self, endpoint: u8, message: u64, atomic: bool) -> Result {
+         // SAFETY: `self.as_raw()` is valid by the type invariant.
+         to_result(unsafe {
+             bindings::apple_rtkit_send_message(
+@@ -122,7 +136,7 @@ pub fn send_message(&self, endpoint: u8, message: u64) -> Result {
+                 endpoint,
+                 message,
+                 ptr::null_mut(),
+-                false,
++                atomic,
+             )
+         })
+     }
+@@ -231,6 +245,42 @@ pub unsafe fn new(
+     }
+ }
+ 
++impl<'a, T: Operations + Send + 'static> Registration<'a, T> {
++    /// Creates an RTKit client that the device owns until it unbinds.
++    ///
++    /// The returned [`DevresRegistration`] can outlive the borrow of `dev`, for an owner such as
++    /// a DRM device's data. Access to the client is revoked, and the client dropped, once `dev`
++    /// unbinds, while its mailbox is still bound.
++    ///
++    /// `setup` runs on the new client before anything else can reach it, with exclusive access,
++    /// to boot the coprocessor.
++    pub fn new_devres(
++        dev: &'a Device<Bound>,
++        mbox_name: Option<&'static CStr>,
++        handler: impl PinInit<T, Error> + 'a,
++        setup: impl FnOnce(Pin<&mut Self>) -> Result + 'a,
++    ) -> Result<DevresRegistration<T>> {
++        // SAFETY: The device's resources drop the registration when `dev` unbinds, even if the
++        // `DevresRegistration` is forgotten.
++        let registration = unsafe { Self::new(dev, mbox_name, handler) }.pin_chain(setup);
++
++        // SAFETY: A `Registration` only holds a reference to `dev` and the RTKit instance, both
++        // of which remain valid for the device's full bound scope, not just for `'a`.
++        unsafe { DevresLt::new(dev, registration) }
++    }
++}
++
++impl<T: Operations + 'static> ForLt for Registration<'static, T> {
++    type Of<'a> = Registration<'a, T>;
++}
++
++// SAFETY: `Registration<'a, T>` is covariant over `'a`; it holds `&'a Device<Bound>`, which is
++// covariant, and `T` does not depend on `'a`.
++unsafe impl<T: Operations + 'static> CovariantForLt for Registration<'static, T> {}
++
++/// An RTKit client that its device owns until it unbinds. See [`Registration::new_devres`].
++pub type DevresRegistration<T> = DevresLt<Registration<'static, T>>;
++
+ impl<T: Operations> Registration<'_, T> {
+     /// Returns the RTKit instance.
+     pub fn rtkit(&self) -> &RtKit {

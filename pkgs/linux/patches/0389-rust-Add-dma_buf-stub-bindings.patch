@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lyude Paul <lyude@redhat.com>
+Date: Fri, 16 May 2025 12:25:57 -0400
+Subject: [PATCH] rust: Add dma_buf stub bindings
+
+In order to implement the gem export callback, we need a type to represent
+struct dma_buf. So - this commit introduces a set of stub bindings for
+dma_buf. These bindings provide a ref-counted DmaBuf object, but don't
+currently implement any functionality for using the DmaBuf.
+
+Signed-off-by: Lyude Paul <lyude@redhat.com>
+(cherry picked from commit edfa060e1ff9b2dd2359c67383c81cf8a6102cab)
+[Youwes09: put DmaBuf in mainline's dma_buf module]
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/dma_buf/mod.rs | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/rust/kernel/dma_buf/mod.rs b/rust/kernel/dma_buf/mod.rs
+index 4764a828642e..3b4fe5786cb4 100644
+--- a/rust/kernel/dma_buf/mod.rs
++++ b/rust/kernel/dma_buf/mod.rs
+@@ -2,6 +2,8 @@
+ 
+ //! DMA-buf subsystem abstractions.
+ 
++use crate::{bindings, types::Opaque};
++
+ pub mod dma_fence;
+ 
+ pub use self::dma_fence::{
+@@ -12,3 +14,34 @@
+     FenceContext,
+     FenceContextOps, //
+ };
++
++/// A DMA buffer object.
++///
++/// # Invariants
++///
++/// The data layout of this type is equivalent to that of `struct dma_buf`.
++#[repr(transparent)]
++pub struct DmaBuf(Opaque<bindings::dma_buf>);
++
++// SAFETY: `struct dma_buf` is thread-safe
++unsafe impl Send for DmaBuf {}
++// SAFETY: `struct dma_buf` is thread-safe
++unsafe impl Sync for DmaBuf {}
++
++impl DmaBuf {
++    /// Convert from a `*mut bindings::dma_buf` to a [`DmaBuf`].
++    ///
++    /// # Safety
++    ///
++    /// The caller guarantees that `self_ptr` points to a valid initialized `struct dma_buf` for the
++    /// duration of the lifetime of `'a`, and promises to not violate rust's data aliasing rules
++    /// using the reference provided by this function.
++    pub(crate) unsafe fn as_ref<'a>(self_ptr: *mut bindings::dma_buf) -> &'a Self {
++        // SAFETY: Our data layout is equivalent to `dma_buf` .
++        unsafe { &*self_ptr.cast() }
++    }
++
++    pub(crate) fn as_raw(&self) -> *mut bindings::dma_buf {
++        self.0.get()
++    }
++}

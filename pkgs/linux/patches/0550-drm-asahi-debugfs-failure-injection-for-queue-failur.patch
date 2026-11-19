@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Fri, 23 Oct 2026 19:32:29 -0400
+Subject: [PATCH] drm/asahi: debugfs failure injection for queue-failure tests
+
+Neither queue-failure path can be reached from userspace on a default
+boot: ordinary render and compute parameters are validated in the ioctl,
+and a TVB memory-limit retirement needs refused pool growth. Add one-shot
+debugfs injection keyed by TGID. fail_prep makes that process's next
+command fail preparation with EINVAL, fail_retire makes it retire with
+ENOMEM as a memory-limit render does, and fail_skip lets that many
+matching commands pass first, so a test can fail a command in the middle
+of a split submission. Everything is disarmed by default.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs      | 31 +++++++++++++++++++++++----
+ drivers/gpu/drm/asahi/g16_timeline.rs | 31 +++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index e44650fc0848..940f63b7bd64 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -273,6 +273,9 @@ pub(crate) fn register<'a>(
+         (c_str!("read_opt"), FlagKnob::READ_OPT, crate::module_parameters::read_opt.value()),
+         (c_str!("safety_poll_ms"), FlagKnob::SAFETY_POLL_MS, crate::module_parameters::safety_poll_ms.value()),
+         (c_str!("scratch_zero"), FlagKnob::SCRATCH_ZERO, crate::module_parameters::scratch_zero.value()),
++        (c_str!("fail_prep"), FlagKnob::FAIL_PREP, 0),
++        (c_str!("fail_retire"), FlagKnob::FAIL_RETIRE, 0),
++        (c_str!("fail_skip"), FlagKnob::FAIL_SKIP, 0),
+     ];
+     let mut flags = KVec::with_capacity(knobs.len(), GFP_KERNEL)?;
+     for (name, knob, value) in knobs {
+@@ -1738,13 +1741,17 @@ pub(crate) fn ticks() -> u64 {
+     value
+ }
+ 
+-fn trace_record(ring: &crate::g16_timeline::Ring, job: &Running) {
+-    let t = &job.execution.trace;
+-    let pid = match job.execution.parameters.first() {
++fn execution_tgid(execution: &Execution) -> i32 {
++    match execution.parameters.first() {
+         Some(Parameters::Render(p)) => p.tgid,
+         Some(Parameters::Compute(p)) => p.tgid,
+         None => 0,
+-    };
++    }
++}
++
++fn trace_record(ring: &crate::g16_timeline::Ring, job: &Running) {
++    let t = &job.execution.trace;
++    let pid = execution_tgid(&job.execution);
+     ring.push(&crate::g16_timeline::Record {
+         exec: job.execution.id,
+         pid: pid as u32,
+@@ -1933,6 +1940,17 @@ fn run(this: Arc<Self>) {
+                         .iter()
+                         .position(|r| r.execution.id == issued.owner)
+                         .ok_or(EIO)?;
++                    let result = match result {
++                        Ok(())
++                            if crate::g16_timeline::take_injection(
++                                &crate::g16_timeline::FAIL_RETIRE,
++                                execution_tgid(&engine.jobs[at].execution),
++                            ) =>
++                        {
++                            Err(ENOMEM)
++                        }
++                        result => result,
++                    };
+                     if let Err(error) = result {
+                         pr_warn!(
+                             "G16: execution {} completed with {:?}; later work on its queue is cancelled\n",
+@@ -2060,7 +2078,12 @@ fn run(this: Arc<Self>) {
+                         engine.issued.reserve(1, GFP_KERNEL)?;
+                         let job = &mut engine.jobs[index];
+                         crate::mem::sync();
++                        let injected = crate::g16_timeline::take_injection(
++                            &crate::g16_timeline::FAIL_PREP,
++                            execution_tgid(&execution),
++                        );
+                         let receipt = match &execution.parameters[job.next] {
++                            _ if injected => Err(EINVAL),
+                             Parameters::Render(p) => runtime.submit_render(
+                                 execution.firmware.clone(),
+                                 execution.render_space.clone(),
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index 5e60560bfef0..2b12e478bd74 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -343,6 +343,34 @@ pub(crate) fn init_caps(queue: u32, lane: u32) -> Result {
+ /// How much of a reused scratch lease to zero (asahi_m4.scratch_zero).
+ pub(crate) static SCRATCH_ZERO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(2);
+ 
++/// Test: one-shot failure injection for queue-failure tests (debugfs
++/// `fail_prep`, `fail_retire`, `fail_skip`). Writing a TGID arms the next
++/// command of that process to fail preparation with EINVAL, or to retire
++/// with ENOMEM as a TVB memory-limit render does, after letting `fail_skip`
++/// matching commands pass. 0 (default) disarms; nothing else is affected.
++pub(crate) static FAIL_PREP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++pub(crate) static FAIL_RETIRE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++pub(crate) static FAIL_SKIP: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
++
++/// Whether an armed injection in `cell` fires for a command of `tgid`;
++/// firing disarms it.
++pub(crate) fn take_injection(cell: &core::sync::atomic::AtomicU32, tgid: i32) -> bool {
++    use core::sync::atomic::Ordering::Relaxed;
++    let armed = cell.load(Relaxed);
++    if armed == 0 || armed as i32 != tgid {
++        return false;
++    }
++    if FAIL_SKIP.fetch_update(Relaxed, Relaxed, |n| n.checked_sub(1)).is_ok() {
++        return false;
++    }
++    let fired = cell.compare_exchange(armed, 0, Relaxed, Relaxed).is_ok();
++    if fired {
++        pr_info!("G16: injected {} failure for tgid {}\n",
++                 if core::ptr::eq(cell, &FAIL_PREP) { "preparation" } else { "retirement" }, tgid);
++    }
++    fired
++}
++
+ /// A 0/1 debugfs switch over a static.
+ pub(crate) struct FlagKnob {
+     cell: &'static core::sync::atomic::AtomicU32,
+@@ -359,6 +387,9 @@ pub(crate) fn init(&self, value: u32) {
+     pub(crate) const READ_OPT: Self = Self { cell: &READ_OPT, name: "read_opt", max: 1 };
+     pub(crate) const SAFETY_POLL_MS: Self = Self { cell: &SAFETY_POLL_MS, name: "safety_poll_ms", max: 10000 };
+     pub(crate) const SCRATCH_ZERO: Self = Self { cell: &SCRATCH_ZERO, name: "scratch_zero", max: 2 };
++    pub(crate) const FAIL_PREP: Self = Self { cell: &FAIL_PREP, name: "fail_prep", max: i32::MAX as u32 };
++    pub(crate) const FAIL_RETIRE: Self = Self { cell: &FAIL_RETIRE, name: "fail_retire", max: i32::MAX as u32 };
++    pub(crate) const FAIL_SKIP: Self = Self { cell: &FAIL_SKIP, name: "fail_skip", max: 4096 };
+ }
+ 
+ impl kernel::debugfs::Writer for FlagKnob {

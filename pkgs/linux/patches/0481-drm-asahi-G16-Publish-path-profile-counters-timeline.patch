@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 12:43:24 -0400
+Subject: [PATCH] drm/asahi: G16: Publish-path profile counters (timeline=2)
+
+Cumulative CNTVCT ticks and call counts for submit_render/compute,
+prepare_render/compute, firmware live writes and reads, firmware and VM
+syncs, write_low, the doorbell flush and the whole pump pass, read as
+text from debugfs asahi_m4/publish_profile. Dota publishes undeferred
+submissions at a flat 25 us per Work (d152-2); this attributes it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_drm.rs      | 13 +++-
+ drivers/gpu/drm/asahi/g16_runtime.rs  |  3 +
+ drivers/gpu/drm/asahi/g16_timeline.rs | 85 +++++++++++++++++++++++++++
+ drivers/gpu/drm/asahi/g16_vm.rs       |  7 +++
+ 4 files changed, 105 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 625f50e28974..bec9eda98065 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -150,6 +150,7 @@ pub(crate) struct Data {
+     /// timeline=1/2: the record ring and its debugfs file (dropped before the
+     /// directory).
+     timeline: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Ring>>>>,
++    _profile: Option<Pin<KBox<kernel::debugfs::File<crate::g16_timeline::Profile>>>>,
+     _debugfs: Option<kernel::debugfs::Dir>,
+ }
+ 
+@@ -195,15 +196,19 @@ pub(crate) fn register<'a>(
+         pdev.dma_set_mask_and_coherent(DmaMask::try_new(42)?)?;
+     }
+     let runtime = crate::g16::Bootstrap::new(pdev)?;
+-    let (timeline, debugfs) = if crate::module_parameters::timeline.value() != 0 {
++    let (timeline, profile, debugfs) = if crate::module_parameters::timeline.value() != 0 {
+         let dir = kernel::debugfs::Dir::new(c_str!("asahi_m4"));
+         let ring = crate::g16_timeline::Ring::new(
+             crate::module_parameters::timeline_records.value() as usize,
+         )?;
+         let file = KBox::pin_init(dir.read_binary_file(c_str!("timeline"), ring), GFP_KERNEL)?;
+-        (Some(file), Some(dir))
++        let profile = KBox::pin_init(
++            dir.read_only_file(c_str!("publish_profile"), crate::g16_timeline::Profile),
++            GFP_KERNEL,
++        )?;
++        (Some(file), Some(profile), Some(dir))
+     } else {
+-        (None, None)
++        (None, None, None)
+     };
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+@@ -215,6 +220,7 @@ pub(crate) fn register<'a>(
+         runtime <- kernel::new_mutex!(runtime),
+         engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }),
+         timeline,
++        _profile: profile,
+         _debugfs: debugfs, });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     let bound: &'a platform::Device<Bound> = pdev;
+@@ -1371,6 +1377,7 @@ fn run(this: Arc<Self>) {
+             let mut engine = this.device.engine.lock();
+             let mut runtime = this.device.runtime.lock();
+             let result = (|| -> Result<bool> {
++                let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_PUMP);
+                 match wake_result {
+                     // No notification within the watchdog window: poll the
+                     // stamps. Retirement's watchdog reports a real hang; a
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 79b797862049..ccf243083edc 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -873,6 +873,7 @@ fn stage_queue(
+     /// Publish fully prepared rings together, then kick each used engine once
+     /// per priority. No staged Work may remain when the worker sleeps.
+     pub(crate) fn flush(&mut self) -> Result {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_FLUSH);
+         if self.publications.is_empty() {
+             return Ok(());
+         }
+@@ -1891,6 +1892,7 @@ pub(crate) fn submit_render(
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_RENDER);
+         let mut queue = queues.lock();
+         let resolved = self.resolve_render_dependencies(&mut queue, params, dependencies)?;
+         let dependencies = &resolved;
+@@ -2559,6 +2561,7 @@ pub(crate) fn submit_compute(
+         timestamps: [u64; 4],
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result<Receipt> {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_SUBMIT_COMPUTE);
+         let mut queue = queues.lock();
+         let mut client = owner.lock();
+         let resolved = self.resolve_compute_dependencies(&mut queue, dependencies)?;
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index c66dc46ded16..857f5438275f 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -116,3 +116,88 @@ fn write_to_slice(
+         writer.write_slice_file(bytes, offset)
+     }
+ }
++
++/// timeline=2: cumulative CNTVCT ticks and call counts of publish-path
++/// sections, read as text from debugfs `asahi_m4/publish_profile`. Counters
++/// only grow; diff two reads to bracket a window.
++pub(crate) struct Section {
++    name: &'static str,
++    calls: core::sync::atomic::AtomicU64,
++    ticks: core::sync::atomic::AtomicU64,
++}
++
++impl Section {
++    const fn new(name: &'static str) -> Self {
++        Self {
++            name,
++            calls: core::sync::atomic::AtomicU64::new(0),
++            ticks: core::sync::atomic::AtomicU64::new(0),
++        }
++    }
++}
++
++pub(crate) static P_SUBMIT_RENDER: Section = Section::new("submit_render");
++pub(crate) static P_SUBMIT_COMPUTE: Section = Section::new("submit_compute");
++pub(crate) static P_PREPARE_RENDER: Section = Section::new("prepare_render");
++pub(crate) static P_PREPARE_COMPUTE: Section = Section::new("prepare_compute");
++pub(crate) static P_LIVE: Section = Section::new("fw write_live/zero_live");
++pub(crate) static P_READ: Section = Section::new("fw read_u32");
++pub(crate) static P_FW_SYNC: Section = Section::new("fw sync");
++pub(crate) static P_VM_SYNC: Section = Section::new("vm sync");
++pub(crate) static P_WRITE_LOW: Section = Section::new("vm write_low");
++pub(crate) static P_FLUSH: Section = Section::new("flush (doorbell)");
++pub(crate) static P_PUMP: Section = Section::new("pump pass");
++
++static SECTIONS: [&Section; 11] = [
++    &P_SUBMIT_RENDER,
++    &P_SUBMIT_COMPUTE,
++    &P_PREPARE_RENDER,
++    &P_PREPARE_COMPUTE,
++    &P_LIVE,
++    &P_READ,
++    &P_FW_SYNC,
++    &P_VM_SYNC,
++    &P_WRITE_LOW,
++    &P_FLUSH,
++    &P_PUMP,
++];
++
++/// Times a section until dropped, when timeline >= 2.
++pub(crate) struct Timer(Option<(u64, &'static Section)>);
++
++impl Timer {
++    #[inline(always)]
++    pub(crate) fn start(section: &'static Section) -> Self {
++        if crate::module_parameters::timeline.value() >= 2 {
++            Timer(Some((crate::g16_drm::ticks(), section)))
++        } else {
++            Timer(None)
++        }
++    }
++}
++
++impl Drop for Timer {
++    #[inline(always)]
++    fn drop(&mut self) {
++        use core::sync::atomic::Ordering::Relaxed;
++        if let Some((start, s)) = self.0 {
++            s.calls.fetch_add(1, Relaxed);
++            s.ticks.fetch_add(crate::g16_drm::ticks().wrapping_sub(start), Relaxed);
++        }
++    }
++}
++
++/// The debugfs view of the sections.
++pub(crate) struct Profile;
++
++impl kernel::debugfs::Writer for Profile {
++    fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        use core::sync::atomic::Ordering::Relaxed;
++        writeln!(f, "# section calls ticks(1GHz) avg_ns")?;
++        for s in SECTIONS.iter() {
++            let (c, t) = (s.calls.load(Relaxed), s.ticks.load(Relaxed));
++            writeln!(f, "{}\t{}\t{}\t{}", s.name, c, t, if c != 0 { t / c } else { 0 })?;
++        }
++        Ok(())
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index b1220d208d40..7f406362016e 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -155,6 +155,7 @@ pub(crate) fn prepare_render(
+         &mut self,
+         p: &mut crate::g16_render::Parameters,
+     ) -> Result<Scratch> {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_PREPARE_RENDER);
+         let (tilemap, tpc) = p.scratch_sizes().ok_or(EINVAL)?;
+         let size = tilemap
+             .checked_add(tpc)
+@@ -189,6 +190,7 @@ pub(crate) fn prepare_compute(
+         &mut self,
+         p: &mut crate::g16_compute::Parameters,
+     ) -> Result<Scratch> {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_PREPARE_COMPUTE);
+         let scratch = self.lease_scratch(false, 0x24000)?;
+         let base = scratch.range.start;
+         p.scratch = base;
+@@ -316,6 +318,7 @@ pub(crate) fn alloc_tvb_blocks(&mut self, count: usize) -> Result<Option<u64>> {
+     }
+ 
+     pub(crate) fn write_low(&mut self, mut va: u64, mut bytes: &[u8]) -> Result {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_WRITE_LOW);
+         while !bytes.is_empty() {
+             let base = va & !(UAT_PGSZ as u64 - 1);
+             let page = self.pages.get(&base).ok_or(EINVAL)?;
+@@ -339,6 +342,7 @@ pub(crate) fn write_low(&mut self, mut va: u64, mut bytes: &[u8]) -> Result {
+     /// mapping changes do not need to sweep all existing client allocations.
+     /// Firmware-private storage is managed separately by FirmwareSpace.
+     pub(crate) fn sync(&self) {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_VM_SYNC);
+         self.low.clean();
+         self.high.clean();
+         crate::mem::sync();
+@@ -686,6 +690,7 @@ fn update_live(
+         size: usize,
+         mut update: impl FnMut(*mut u8, usize, usize),
+     ) -> Result {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_LIVE);
+         let region = self.region(va, size)?;
+         if size == 0 {
+             return Ok(());
+@@ -759,6 +764,7 @@ pub(crate) fn release_region(&mut self, va: u64) -> Result {
+     }
+ 
+     pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_READ);
+         if va & 3 != 0 {
+             return Err(EINVAL);
+         }
+@@ -775,6 +781,7 @@ pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
+     }
+ 
+     pub(crate) fn sync(&self) {
++        let _t = crate::g16_timeline::Timer::start(&crate::g16_timeline::P_FW_SYNC);
+         for va in self.dirty_regions.borrow_mut().drain_all() {
+             let region = self.regions.get(&va).unwrap();
+             region.pending.set(false);

@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Mon, 19 Oct 2026 12:32:38 -0400
+Subject: [PATCH] drm/asahi: admit bounded native per-vertex attribute layouts
+
+---
+ drivers/gpu/drm/asahi/README.native-mesh.md   | 45 ++++++++++------
+ drivers/gpu/drm/asahi/asahi_m4.rs             |  2 +-
+ drivers/gpu/drm/asahi/g16_mesh.rs             | 20 +++++--
+ .../drivers/gpu/asahi/native-mesh.rs          | 53 +++++++++++++++++++
+ 4 files changed, 98 insertions(+), 22 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/README.native-mesh.md b/drivers/gpu/drm/asahi/README.native-mesh.md
+index a44a353739c5..d1dfcfd8d464 100644
+--- a/drivers/gpu/drm/asahi/README.native-mesh.md
++++ b/drivers/gpu/drm/asahi/README.native-mesh.md
+@@ -2,22 +2,35 @@
+ 
+ `asahi_m4.native_mesh=1` is an explicitly paired kernel/userspace experiment.
+ The default is **0 and must remain 0**. No capability bit or execution UAPI
+-is provided. The paired stream starts with the native object/mesh state and
+-currently supports only the T16 position-only, single-group resource class.
++is provided. The paired stream starts with complete native object/mesh state.
++The decoder runs only with the option enabled; ordinary streams are identified
++by their first packet, without searching their contents for native state.
+ 
+-With the option enabled, **any render-node client can cause a runtime-wide
+-quarantine** by submitting a mesh launch whose operand admission never receives
+-a matching firmware reply. The ten-second admission timeout blocks all VMs
+-until the device is reset. CPU producer waits also reduce ordinary submission
+-pipelining. These availability costs are acceptable only for the opt-in
+-experiment; this option must never become a default or an advertised feature.
++The admitted class has T16 mesh execution, one direct object invocation,
++four-vertex storage and one triangle primitive. It supports 4–128 per-vertex
++32-bit scalar components, including XYZW. The two scalar counts and output-row
++count must agree: N components, N+1 rows, with no reserved upper bits. This
++corresponds to 32 + 16*N local bytes (at most 2080), rounded up by the paired
++Mesa launch to a power-of-two allocation (at most 4096). Task payload,
++per-primitive outputs, culling, multiple draws, indirect draws and wider
++resource classes remain rejected. Single-sample, single-layer restrictions
++also remain in the runtime.
+ 
+-File close waits for its pending admission while retaining the VM and support
+-object. It polls event service with the runtime lock dropped between polls,
+-without consuming retirement receipts. A reply permits normal detach; timeout
+-or event-service failure retains the existing quarantine and mapping ownership.
++This is bounded resource-class admission, not validation of arbitrary shader
++programs. Launches and their local-allocation instructions remain userspace
++programs; the kernel does not assume a compiler-specific instruction sequence
++or fixed register assignment. The paired compiler must generate matching
++allocation, output and interpolation state. Attribute admission alone is not
++hardware qualification of attributes or the maximum component count.
+ 
+-Payload-register interpretation, capacity, concurrent use and the lifetime of
+-firmware registration across context-slot rebinds require device qualification.
+-The latter must be tested by returning to an admitted VM after its old slot is
+-assigned to another VM, then rendering normally in that new owner.
++All VMs initialize native support mode before first publication when opted in.
++The initialized 24-buffer operand pool serves both ordinary and native Work;
++there is no additional native buffer-admission request. Native payload storage
++is cleared, exclusive per render, and retained through completion. CPU producer
++waits still reduce ordinary submission pipelining. Keep this opt-in experiment
++disabled for normal use.
++
++Position-only H1, cold initialization, slot rebind, sequential draws through
++scene 7 and concurrent separate VMs passed the #82 device campaign. General
++payload sizing, attribute rendering, scene wraparound and simultaneous native
++renders on multiple queues in one VM require their own device qualification.
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 463f873149fd..cd54937e883f 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -196,7 +196,7 @@ fn probe<'bound>(
+         },
+         native_mesh: u32 {
+             default: 0,
+-            description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16 position-only one-group profile; no capability advertisement",
++            description: "Experimental paired native object/mesh streams: 0=disabled, 1=T16 per-vertex one-group profile; no capability advertisement",
+         },
+         dependency_kind: u32 {
+             default: 1,
+diff --git a/drivers/gpu/drm/asahi/g16_mesh.rs b/drivers/gpu/drm/asahi/g16_mesh.rs
+index a60a3c6aabca..c30dfb9749c1 100644
+--- a/drivers/gpu/drm/asahi/g16_mesh.rs
++++ b/drivers/gpu/drm/asahi/g16_mesh.rs
+@@ -33,9 +33,9 @@ pub(crate) enum DecodeError {
+     Unsupported,
+ }
+ 
+-/// Recognize only the currently qualified resource class: 16 mesh threads,
+-/// position-only output, at most four vertices and one primitive, one direct
+-/// object invocation. Broader output/resource classes need measured sizing.
++/// Admit the paired T16 class: four vertices' storage, one primitive and one
++/// direct object invocation, with position and up to 124 per-vertex scalars.
++/// Primitive outputs, task payload and wider resource classes remain excluded.
+ /// The packet budget bounds malformed streams, including a missing terminator.
+ pub(crate) fn decode(
+     start: u64,
+@@ -66,7 +66,17 @@ pub(crate) fn decode(
+     for word in &mut state {
+         *word = next()?;
+     }
+-    if state[0] != 0x504
++    // The low byte counts scalar vertex planes, including XYZW. The next byte
++    // includes the cull/header row as well. For the four-vertex storage class,
++    // each plane occupies 16 bytes, and word 13 repeats that row count. Require
++    // their relationship, rather than enumerating individual shader layouts.
++    // The paired Mesa limit is 128 components (2080 local bytes including the
++    // 32-byte count/index header). The uploaded launch rounds this allocation
++    // up to a power of two. This packet parser does not validate shader code or
++    // its local-allocation instructions.
++    let components = state[0] & 0xff;
++    if !(4..=128).contains(&components)
++        || state[0] != components | ((components + 1) << 8)
+         || state[1] != 0x10
+         || state[2] != 0
+         || state[3] != 0
+@@ -74,7 +84,7 @@ pub(crate) fn decode(
+         || state[9] != 0
+         || state[10] != 0x400810
+         || state[11] != 0
+-        || state[12] != 5
++        || state[12] != components + 1
+     {
+         return Err(DecodeError::Unsupported);
+     }
+diff --git a/tools/testing/selftests/drivers/gpu/asahi/native-mesh.rs b/tools/testing/selftests/drivers/gpu/asahi/native-mesh.rs
+index 6fffa6d6b836..5b99fc3395d7 100644
+--- a/tools/testing/selftests/drivers/gpu/asahi/native-mesh.rs
++++ b/tools/testing/selftests/drivers/gpu/asahi/native-mesh.rs
+@@ -51,6 +51,59 @@ fn ordinary_data_is_not_searched_for_mesh_magic() {
+     );
+ }
+ 
++#[test]
++fn vertex_attributes_accept_the_bounded_scalar_and_row_relationship() {
++    for components in 4..=128 {
++        let mut words = stream();
++        words[1] = components | ((components + 1) << 8);
++        words[13] = components + 1;
++        assert_eq!(
++            decode(&words, 0x1004003ffc),
++            Ok(Some(Profile { payload: 0 }))
++        );
++        // Cover all supported counts, including those between device fixtures.
++        for wrong_rows in [0, components, components + 2, u32::MAX] {
++            words[13] = wrong_rows;
++            assert_eq!(decode(&words, 0x1004003ffc), Err(DecodeError::Unsupported));
++        }
++        words[13] = components + 1;
++        for bit in 8..32 {
++            words[1] ^= 1 << bit;
++            assert_eq!(decode(&words, 0x1004003ffc), Err(DecodeError::Unsupported));
++            words[1] ^= 1 << bit;
++        }
++    }
++}
++
++#[test]
++fn attributes_do_not_admit_other_output_or_execution_classes() {
++    for components in (0..4).chain(129..=255) {
++        let mut words = stream();
++        words[1] = components | ((components + 1) << 8);
++        words[13] = components + 1;
++        assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
++    }
++    for components in [7, 12, 128] {
++        for (index, value) in [
++            (2, 0xd0), // primitive output mode
++            (3, 1),
++            (4, 1), // unqualified state/payload
++            (9, 0), // missing object stage
++            (10, 1),
++            (10, 1 << 30),  // more primitives, culling
++            (11, 0x400820), // wider mesh workgroup
++            (12, 1),        // primitive output components
++            (18, 2),        // more than one direct object invocation
++        ] {
++            let mut words = stream();
++            words[1] = components | ((components + 1) << 8);
++            words[13] = components + 1;
++            words[index] = value;
++            assert_eq!(decode(&words, 0x1004000000), Err(DecodeError::Unsupported));
++        }
++    }
++}
++
+ #[test]
+ fn reject_unqualified_resource_classes_and_packets() {
+     for (index, value) in [

@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sun, 11 Oct 2026 21:51:03 -0400
+Subject: [PATCH] drm/asahi: G16: count TVB requests, growth, refusals and
+ partial renders in dep_stats
+
+Render Event 6 (allocation request) answers, Event 7 (memory limit) and
+Start3D partial-render trace entries were visible only as dmesg lines.
+Count them in debugfs asahi_m4/dep_stats so harnesses that snapshot it
+per segment get per-window TVB and partial-render counts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/gpu/drm/asahi/g16_runtime.rs  | 10 ++++++++++
+ drivers/gpu/drm/asahi/g16_timeline.rs | 20 ++++++++++++++++++--
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 7f82166e2402..f52716e1ae8b 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -1959,6 +1959,8 @@ fn drain_trace_rx(&mut self) -> Result {
+                             && fw.read_u64(base + 0x30)? == 0
+                             && fw.read_u64(base + 0x14)? != 0
+                         {
++                            crate::g16_timeline::PARTIAL_RENDERS
++                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                             pr_info!(
+                                 "G16: firmware Start3D partial render queue {:#x}\n",
+                                 fw.read_u64(base + 0x24)?
+@@ -3040,6 +3042,12 @@ fn service_render_events(
+                     return Err(EIO);
+                 }
+                 let grown = pool.grow(fw, client, a.context_id as u8)?;
++                {
++                    use crate::g16_timeline as tl;
++                    use core::sync::atomic::Ordering::Relaxed;
++                    tl::TVB_REQUESTS.fetch_add(1, Relaxed);
++                    if grown { &tl::TVB_GROWN } else { &tl::TVB_REFUSED }.fetch_add(1, Relaxed);
++                }
+                 dev_info!(
+                     self.dev.as_ref(),
+                     "G16: TVB slot {} blocks {} growth {} subpipe {}\n",
+@@ -3078,6 +3086,8 @@ fn service_render_events(
+                 {
+                     return Err(EIO);
+                 }
++                crate::g16_timeline::TVB_MEMORY_LIMIT
++                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                 reply[..4].copy_from_slice(&9u32.to_le_bytes());
+                 reply[4..8].copy_from_slice(&1u32.to_le_bytes());
+                 reply[8..16].copy_from_slice(&a.fragment_queue.to_le_bytes());
+diff --git a/drivers/gpu/drm/asahi/g16_timeline.rs b/drivers/gpu/drm/asahi/g16_timeline.rs
+index b544a024befc..7d441de4ac45 100644
+--- a/drivers/gpu/drm/asahi/g16_timeline.rs
++++ b/drivers/gpu/drm/asahi/g16_timeline.rs
+@@ -413,7 +413,8 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         use core::sync::atomic::Ordering::Relaxed;
+         writeln!(
+             f,
+-            "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\ndep_elide {}\npoll_timeouts {}\npoll_retired {}",
++            "works {}\nitems {}\nsame_lane {}\nrepeat {}\nreached {}\ndropped {}\ndep_elide {}\npoll_timeouts {}\npoll_retired {}\n\
++             tvb_requests {}\ntvb_grown {}\ntvb_refused {}\ntvb_memory_limit {}\npartial_renders {}",
+             DEP_WORKS.load(Relaxed),
+             DEP_ITEMS.load(Relaxed),
+             DEP_SAME_LANE.load(Relaxed),
+@@ -422,7 +423,12 @@ fn write(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+             DEP_DROPPED.load(Relaxed),
+             DEP_ELIDE.load(Relaxed),
+             POLL_TIMEOUTS.load(Relaxed),
+-            POLL_RETIRED.load(Relaxed)
++            POLL_RETIRED.load(Relaxed),
++            TVB_REQUESTS.load(Relaxed),
++            TVB_GROWN.load(Relaxed),
++            TVB_REFUSED.load(Relaxed),
++            TVB_MEMORY_LIMIT.load(Relaxed),
++            PARTIAL_RENDERS.load(Relaxed)
+         )
+     }
+ }
+@@ -457,3 +463,13 @@ pub(crate) fn read_opt() -> bool {
+ pub(crate) static SAFETY_POLL_MS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(50);
+ pub(crate) static POLL_TIMEOUTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+ pub(crate) static POLL_RETIRED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++
++/// TVB counters in dep_stats: firmware allocation requests (render Event 6),
++/// those answered with growth or refused (at tvb_max_blocks or under memory
++/// pressure), memory-limit Events (7) that follow a refusal, and Start3D
++/// partial-render entries seen on the firmware trace ring.
++pub(crate) static TVB_REQUESTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static TVB_GROWN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static TVB_REFUSED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static TVB_MEMORY_LIMIT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
++pub(crate) static PARTIAL_RENDERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

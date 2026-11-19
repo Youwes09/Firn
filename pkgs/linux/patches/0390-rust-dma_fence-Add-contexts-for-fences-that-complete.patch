@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 12 Nov 2026 14:33:32 -0600
+Subject: [PATCH] rust: dma_fence: Add contexts for fences that complete out of
+ order
+
+Fences on one context have to signal in the order they were created,
+and dma_fence users rely on that: a later fence on a context stands in
+for every earlier one. A GPU whose jobs finish out of order can't keep
+that promise on a single timeline.
+
+Add FenceContext::new_unordered(), which hands each of its fences a
+context number of its own while keeping one owner for the names and
+the unsignaled-fence count.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/dma_buf/dma_fence.rs | 47 ++++++++++++++++++++++++++++++--
+ 1 file changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/rust/kernel/dma_buf/dma_fence.rs b/rust/kernel/dma_buf/dma_fence.rs
+index 18a43e1bb442..c4a3a4405c97 100644
+--- a/rust/kernel/dma_buf/dma_fence.rs
++++ b/rust/kernel/dma_buf/dma_fence.rs
+@@ -62,6 +62,8 @@ pub trait FenceContextOps {
+ pub struct FenceContext<T: FenceContextOps + Send + Sync> {
+     /// The fence context number.
+     nr: u64,
++    /// Whether each fence gets a context number of its own.
++    unordered: bool,
+     /// The sequence number for the next fence created.
+     seqno: Atomic<u64>,
+     // The name parameters can be accessed by the dma_fence backend_ops. UAF
+@@ -108,6 +110,35 @@ pub fn new<E>(
+         timeline_name: &CStr,
+         data: impl PinInit<T, E>,
+     ) -> impl PinInit<Self, Error>
++    where
++        Error: From<E>,
++    {
++        Self::new_inner(initial_seqno, driver_name, timeline_name, false, data)
++    }
++
++    /// Create a new `FenceContext` whose fences may signal in any order.
++    ///
++    /// Fences on one context must signal in the order they were created. A
++    /// driver whose jobs complete out of order uses this instead, and each of
++    /// its fences gets a context number of its own.
++    pub fn new_unordered<E>(
++        driver_name: &CStr,
++        timeline_name: &CStr,
++        data: impl PinInit<T, E>,
++    ) -> impl PinInit<Self, Error>
++    where
++        Error: From<E>,
++    {
++        Self::new_inner(1, driver_name, timeline_name, true, data)
++    }
++
++    fn new_inner<E>(
++        initial_seqno: u64,
++        driver_name: &CStr,
++        timeline_name: &CStr,
++        unordered: bool,
++        data: impl PinInit<T, E>,
++    ) -> impl PinInit<Self, Error>
+     where
+         Error: From<E>,
+     {
+@@ -118,6 +149,7 @@ pub fn new<E>(
+             // atomic. Parameter `1` is the number of contexts we want to
+             // allocate.
+             nr: unsafe { bindings::dma_fence_context_alloc(1) },
++            unordered,
+             seqno: Atomic::new(initial_seqno),
+             driver_name: driver_name?,
+             timeline_name: timeline_name?,
+@@ -130,6 +162,16 @@ fn next_seqno(&self) -> u64 {
+         self.seqno.fetch_add(1, Relaxed)
+     }
+ 
++    fn context_for_fence(&self) -> u64 {
++        if self.unordered {
++            // SAFETY: `dma_fence_context_alloc()` merely works on a global
++            // atomic.
++            unsafe { bindings::dma_fence_context_alloc(1) }
++        } else {
++            self.nr
++        }
++    }
++
+     /// Allocate the memory for a [`DriverFence`] and already store `data` inside.
+     ///
+     /// This is needed because many times, creation of a [`DriverFence`] must not
+@@ -732,12 +774,11 @@ pub fn new_fence(self) -> DriverFence<'a, T> {
+         // uses per-fence locks automatically.
+         let null_ptr: *mut bindings::spinlock = ptr::null_mut();
+         let seqno = self.data.fctx.next_seqno();
++        let context = self.data.fctx.context_for_fence();
+         let fence_ptr = self.as_raw();
+         // SAFETY: `fence_ptr` has been created directly above. It will live
+         // at least as long as `Self`. The same applies to `&Self::OPS`.
+-        unsafe {
+-            bindings::dma_fence_init(fence_ptr, self.ops, null_ptr, self.data.fctx.nr, seqno)
+-        };
++        unsafe { bindings::dma_fence_init(fence_ptr, self.ops, null_ptr, context, seqno) };
+ 
+         self.data.fctx.nr_of_unsignaled_fences.fetch_add(1, Relaxed);
+ 

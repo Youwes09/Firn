@@ -1,0 +1,1055 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Niklas Sheth <hi@niklassheth.com>
+Date: Sat, 3 Oct 2026 22:52:39 -0400
+Subject: [PATCH] drm/asahi: Port G16 to the v7.3 Rust APIs
+
+- platform: Data<'bound> holds the DRM Registration (or, for probe_only,
+  the SGX mapping); probe takes Core<'_> and returns PinInit<Data>.
+- drm: UnregisteredDevice + Registration::new; RegistrationData carries the
+  bound platform device; FEAT_* bools and ParentDevice; ioctl handlers take
+  the Registered device and the registration data. Drop the File post_open
+  /as_raw hook, which only served an abstraction we no longer carry.
+- GEM: mappings and timestamp buffers hold an ARef to the object and walk
+  its devres-cached sg_table() at map time instead of an owned SGTable.
+- I/O: DevresIoMem from iomap_sized().into_devres(); MMIO through
+  as_view().relaxed(). The RTKit crash buffer is a SysMem [u8] view of the
+  reserved firmware region.
+- RTKit: start_endpoint() already fails for an absent endpoint, so the
+  separate has_endpoint() check goes.
+- Module parameters return values; KVec drain(..) is drain_all().
+
+Signed-off-by: Niklas Sheth <hi@niklassheth.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RvQieG9SGoR3ZeSdSguHnB
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs     |  40 ++++-----
+ drivers/gpu/drm/asahi/g16.rs          | 115 +++++++++++++-------------
+ drivers/gpu/drm/asahi/g16_drm.rs      | 110 ++++++++++++++----------
+ drivers/gpu/drm/asahi/g16_platform.rs |   2 +-
+ drivers/gpu/drm/asahi/g16_power.rs    |   2 +-
+ drivers/gpu/drm/asahi/g16_render.rs   |   4 +-
+ drivers/gpu/drm/asahi/g16_runtime.rs  |  36 ++++----
+ drivers/gpu/drm/asahi/g16_tvb.rs      |   4 +-
+ drivers/gpu/drm/asahi/g16_vm.rs       |   4 +-
+ drivers/gpu/drm/asahi/m4_pgtable.rs   |   2 +-
+ 10 files changed, 174 insertions(+), 145 deletions(-)
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 2011914230ad..93c3a6b701ea 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -24,8 +24,8 @@
+ #[path = "m4_util.rs"]
+ mod util;
+ 
+-use kernel::io::Io;
+-use kernel::{c_str, device::Core, devres::Devres, io::mem::IoMem, of, platform, prelude::*};
++use kernel::io::{Io, IoBase};
++use kernel::{c_str, device::Core, drm, io::mem::DevresIoMem, of, platform, prelude::*};
+ 
+ const SGX_SIZE: usize = 0x4000000;
+ const ID_VERSION: usize = 0xd04000;
+@@ -33,42 +33,44 @@
+ const ID_COUNTS_2: usize = 0xd04014;
+ const ID_CLUSTERS: usize = 0xd0401c;
+ 
+-struct M4Gpu {
+-    _sgx: Option<Pin<KBox<Devres<IoMem<SGX_SIZE>>>>>,
+-    _drm: Option<g16_drm::DeviceRef>,
++struct M4Gpu;
++
++struct M4GpuData<'bound> {
++    _sgx: Option<DevresIoMem<SGX_SIZE>>,
++    _drm: Option<drm::Registration<'bound, g16_drm::Driver>>,
+ }
+ 
+ kernel::of_device_table!(
+     OF_TABLE,
+-    MODULE_OF_TABLE,
+     <M4Gpu as platform::Driver>::IdInfo,
+     [(of::DeviceId::new(c_str!("apple,agx-t8132")), ())]
+ );
+ 
+ impl platform::Driver for M4Gpu {
+     type IdInfo = ();
++    type Data<'bound> = M4GpuData<'bound>;
+     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
+ 
+-    fn probe(
+-        pdev: &platform::Device<Core>,
+-        _info: Option<&Self::IdInfo>,
+-    ) -> impl PinInit<Self, Error> {
++    fn probe<'bound>(
++        pdev: &'bound platform::Device<Core<'_>>,
++        _info: Option<&'bound Self::IdInfo>,
++    ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+         let dev = pdev.as_ref();
+-        if !(11..=g16_tvb::MAX_BLOCKS).contains(module_parameters::tvb_max_blocks.value()) {
++        if !(11..=g16_tvb::MAX_BLOCKS).contains(&module_parameters::tvb_max_blocks.value()) {
+             return Err(EINVAL);
+         }
+ 
+-        if *module_parameters::probe_only.value() == 0 {
+-            return Ok(Self {
++        if module_parameters::probe_only.value() == 0 {
++            return Ok(M4GpuData {
+                 _sgx: None,
+                 _drm: Some(g16_drm::register(pdev)?),
+             });
+         }
+         let request = pdev.io_request_by_name(c_str!("sgx")).ok_or(EINVAL)?;
+-        let sgx = KBox::pin_init(request.iomap_sized::<SGX_SIZE>(), GFP_KERNEL)?;
++        let sgx = request.iomap_sized::<SGX_SIZE>()?.into_devres()?;
+         {
+             let regs = sgx.try_access().ok_or(ENODEV)?;
+-            let version = regs.relaxed().read32(ID_VERSION);
++            let version = regs.as_view().relaxed().read32(ID_VERSION);
+             if version == 0 || version == u32::MAX {
+                 dev_err!(dev, "Invalid GPU ID {:#010x}\n", version);
+                 return Err(ENODEV);
+@@ -77,9 +79,9 @@ fn probe(
+                 dev,
+                 "Apple M4 GPU recognized: ID={:#010x} counts={:#010x}/{:#010x} clusters={:#010x}\n",
+                 version,
+-                regs.relaxed().read32(ID_COUNTS_1),
+-                regs.relaxed().read32(ID_COUNTS_2),
+-                regs.relaxed().read32(ID_CLUSTERS),
++                regs.as_view().relaxed().read32(ID_COUNTS_1),
++                regs.as_view().relaxed().read32(ID_COUNTS_2),
++                regs.as_view().relaxed().read32(ID_CLUSTERS),
+             );
+             dev_info!(
+                 dev,
+@@ -96,7 +98,7 @@ fn probe(
+             platform.registers.len(), platform.core_mask, platform.freq_a[10],
+             platform.maximum_power, platform.period_ms, platform.period_clocks,
+             hwdata.len(), region_c.len(), bundle.len());
+-        Ok(Self {
++        Ok(M4GpuData {
+             _sgx: Some(sgx),
+             _drm: None,
+         })
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index 2f17dbf1cc72..249ad43ac02b 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -5,13 +5,13 @@
+ //! G16 firmware bootstrap. Its 43-bit address space and initialization graph
+ //! must not be passed to a G13/G14 firmware manager.
+ 
+-use kernel::io::Io;
++use kernel::io::{Io, IoBase};
+ use kernel::{c_str, device::Core, platform, prelude::*};
+ 
+ const PAGE_SIZE: u64 = 0x4000;
+ 
+ /// Validate the memory contract supplied by m1n1 before starting firmware.
+-pub(crate) fn validate_boot_resources(pdev: &platform::Device<Core>) -> Result {
++pub(crate) fn validate_boot_resources(pdev: &platform::Device<Core<'_>>) -> Result {
+     let dev = pdev.as_ref();
+     let node = dev.of_node().ok_or(EINVAL)?;
+     let fwnode = dev.fwnode().ok_or(EINVAL)?;
+@@ -79,9 +79,7 @@ pub(crate) fn validate_boot_resources(pdev: &platform::Device<Core>) -> Result {
+ }
+ 
+ use kernel::{
+-    devres::Devres,
+-    io::{self, mem::IoMem},
+-    iosys_map::IoSysMapRef,
++    io::{self, mem::DevresIoMem, IoSysMap, SysMem},
+     soc::apple::rtkit,
+     sync::Arc,
+     sync::aref::ARef,
+@@ -105,8 +103,17 @@ fn iova(&self) -> Result<usize> {
+         Ok(self.iova)
+     }
+ 
+-    fn buf(&mut self) -> Result<IoSysMapRef<'_, u8>> {
+-        self.map.as_iosys_map(self.offset, self.size)
++    fn buf(&mut self) -> Result<IoSysMap<'_, [u8]>> {
++        if self.offset.checked_add(self.size).ok_or(EINVAL)? > self.map.size() {
++            return Err(EINVAL);
++        }
++        // SAFETY: `offset..offset + size` lies within the mapped reserved
++        // firmware region, which stays mapped while `self` (and the borrow) lives.
++        let region = unsafe {
++            core::ptr::slice_from_raw_parts_mut(self.map.ptr().add(self.offset), self.size)
++        };
++        // SAFETY: As above; the region is valid kernel memory for the borrow.
++        Ok(IoSysMap::Sys(unsafe { SysMem::new(region) }))
+     }
+ }
+ 
+@@ -189,8 +196,8 @@ pub(crate) struct Bootstrap {
+     dev: ARef<platform::Device>,
+     pub(crate) notifications: Arc<Notifications>,
+     _rtkit: Pin<KBox<rtkit::RtKit<BootOps>>>,
+-    _asc: Pin<KBox<Devres<IoMem<0x4000>>>>,
+-    _sgx: Pin<KBox<Devres<IoMem<0x4000000>>>>,
++    _asc: DevresIoMem<0x4000>,
++    _sgx: DevresIoMem<0x4000000>,
+     _handoff: io::mem::Mem,
+     _address_space: Option<crate::g16_vm::AddressSpace>,
+     _firmware_space: Option<crate::g16_vm::FirmwareSpace>,
+@@ -249,7 +256,7 @@ fn drop(&mut self) {
+ }
+ 
+ impl Bootstrap {
+-    pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
++    pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+         validate_boot_resources(pdev)?;
+         let platform = crate::g16_platform::Platform::new(pdev.as_ref())?;
+         // All board inputs are checked before any firmware is started.
+@@ -262,18 +269,16 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         let mut address_space = crate::g16_vm::AddressSpace::new()?;
+         address_space.check_geometry(dev)?;
+         address_space.check_borrowed_root(dev)?;
+-        let asc = KBox::pin_init(
+-            pdev.io_request_by_name(c_str!("asc"))
+-                .ok_or(EINVAL)?
+-                .iomap_sized::<0x4000>(),
+-            GFP_KERNEL,
+-        )?;
+-        let sgx = KBox::pin_init(
+-            pdev.io_request_by_name(c_str!("sgx"))
+-                .ok_or(EINVAL)?
+-                .iomap_sized::<0x4000000>(),
+-            GFP_KERNEL,
+-        )?;
++        let asc = pdev
++            .io_request_by_name(c_str!("asc"))
++            .ok_or(EINVAL)?
++            .iomap_sized::<0x4000>()?
++            .into_devres()?;
++        let sgx = pdev
++            .io_request_by_name(c_str!("sgx"))
++            .ok_or(EINVAL)?
++            .iomap_sized::<0x4000000>()?
++            .into_devres()?;
+         let res = dev
+             .of_node()
+             .ok_or(EINVAL)?
+@@ -283,8 +288,8 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         let handoff = unsafe { io::mem::Mem::try_new(res, io::mem::MemFlag::WB.into())? };
+         let asc_guard = asc.try_access().ok_or(ENODEV)?;
+         let asc_io = &*asc_guard;
+-        let control = asc_io.relaxed().read32(0x44);
+-        let status = asc_io.relaxed().read32(0x48);
++        let control = asc_io.as_view().relaxed().read32(0x44);
++        let status = asc_io.as_view().relaxed().read32(0x48);
+         drop(asc_guard);
+         dev_info!(
+             dev,
+@@ -297,7 +302,7 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         }
+         let sgx_guard = sgx.try_access().ok_or(ENODEV)?;
+         let sgx_io = &*sgx_guard;
+-        let gpu_id = sgx_io.relaxed().read32(crate::ID_VERSION);
++        let gpu_id = sgx_io.as_view().relaxed().read32(crate::ID_VERSION);
+         if gpu_id == 0 || gpu_id == u32::MAX {
+             dev_err!(dev, "Invalid GPU ID {:#010x}\n", gpu_id);
+             return Err(ENODEV);
+@@ -307,9 +312,9 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         let gpu_revision = (gpu_id >> 8) & 0xff;
+         dev_info!(dev, "G16: GPU ID={:#010x} revision={:#04x}\n", gpu_id, gpu_revision);
+         for offset in [0x1000104, 0x1000108] {
+-            sgx_io.relaxed().write32(sgx_io.relaxed().read32(offset) | 1, offset);
++            sgx_io.as_view().relaxed().write32(sgx_io.as_view().relaxed().read32(offset) | 1, offset);
+         }
+-        sgx_io.relaxed().write32(6, 0xd06030);
++        sgx_io.as_view().relaxed().write32(6, 0xd06030);
+         drop(sgx_guard);
+         // SAFETY: The region validation guarantees a full aligned page. The
+         // coprocessor is stopped, so these host-owned bootstrap fields are
+@@ -345,14 +350,12 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         )?;
+         rtkit.as_mut().set_early_crashlog();
+         let asc_guard = asc.try_access().ok_or(ENODEV)?;
+-        asc_guard.relaxed().write32(control | 0x10, 0x44);
++        asc_guard.as_view().relaxed().write32(control | 0x10, 0x44);
+         drop(asc_guard);
+         crate::mem::sync();
+         rtkit.as_mut().boot()?;
+         for ep in [0x20, 0x21] {
+-            if !rtkit.as_mut().has_endpoint(ep) {
+-                return Err(ENODEV);
+-            }
++            // Fails with EINVAL if the firmware did not advertise the endpoint.
+             rtkit.as_mut().start_endpoint(ep)?;
+         }
+         dev_info!(
+@@ -678,11 +681,11 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+             core_mask: platform.core_mask,
+             maximum_frequency_khz: platform.freq_a[10] * 1000,
+             tvb_pools: KVec::new(),
+-            render_publication: *crate::module_parameters::fw_counter_start.value(),
++            render_publication: crate::module_parameters::fw_counter_start.value(),
+             next_work_va: 0xffff_fc22_0000_0000,
+             work_arenas: [0..0, 0..0],
+             free_work: [KVec::new(), KVec::new()],
+-            compute_publication: *crate::module_parameters::fw_counter_start.value(),
++            compute_publication: crate::module_parameters::fw_counter_start.value(),
+             queue_events: Arc::new(core::sync::atomic::AtomicU64::new(0), GFP_KERNEL)?,
+             retired_queues: Arc::pin_init(kernel::new_mutex!(KVec::new()), GFP_KERNEL)?,
+             queue_regions: 0,
+@@ -701,7 +704,7 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+                 GFP_KERNEL,
+             )?,
+         };
+-        if *crate::module_parameters::fw_trace.value() & 1 != 0 {
++        if crate::module_parameters::fw_trace.value() & 1 != 0 {
+             // Region C starts with the firmware KTrace mask, as in the shim.
+             session
+                 ._firmware_space
+@@ -715,7 +718,7 @@ pub(crate) fn new(pdev: &platform::Device<Core>) -> Result<Self> {
+         Ok(session)
+     }
+ 
+-    fn submit_barrier(&mut self, pdev: &platform::Device<Core>) -> Result {
++    fn submit_barrier(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
+         use crate::g16_fw::queue as q;
+         let dev = pdev.as_ref();
+         let firmware = self._firmware_space.as_mut().ok_or(EINVAL)?;
+@@ -725,9 +728,9 @@ fn submit_barrier(&mut self, pdev: &platform::Device<Core>) -> Result {
+             firmware.write_live(addr, &0u32.to_le_bytes())?;
+         }
+         let before = (
+-            sgx.relaxed().read32(0xd64040),
+-            sgx.relaxed().read32(0xd64048),
+-            sgx.relaxed().read32(0xd60020),
++            sgx.as_view().relaxed().read32(0xd64040),
++            sgx.as_view().relaxed().read32(0xd64048),
++            sgx.as_view().relaxed().read32(0xd60020),
+         );
+         if before != (0, 0, 0) {
+             return Err(EBUSY);
+@@ -737,7 +740,7 @@ fn submit_barrier(&mut self, pdev: &platform::Device<Core>) -> Result {
+             crate::g16_fw::BUNDLE_ADDRESS + 0x16240,
+             &q::channel(BOOT_QUEUE, 2, 1, 1, true, 1),
+         )?;
+-        sgx.relaxed().write32(1, 0xd60020);
++        sgx.as_view().relaxed().write32(1, 0xd60020);
+         crate::mem::sync();
+         drop(sgx_guard);
+         let mut committed = false;
+@@ -765,8 +768,8 @@ fn submit_barrier(&mut self, pdev: &platform::Device<Core>) -> Result {
+         for _ in 0..3000 {
+             let sgx_guard = self._sgx.try_access().ok_or(ENODEV)?;
+             let sgx = &*sgx_guard;
+-            if sgx.relaxed().read32(0xd64040) == 1
+-                && sgx.relaxed().read32(0xd64048) == 1
++            if sgx.as_view().relaxed().read32(0xd64040) == 1
++                && sgx.as_view().relaxed().read32(0xd64048) == 1
+                 && firmware.read_u32(BOOT_POINTERS + 0x30)? == 2
+             {
+                 // Barriers consume the inner ring without advancing its
+@@ -782,16 +785,16 @@ fn submit_barrier(&mut self, pdev: &platform::Device<Core>) -> Result {
+         dev_err!(
+             dev,
+             "G16: barrier timeout; channel {}/{}/{} item done/read {}/{}\n",
+-            sgx.relaxed().read32(0xd64040),
+-            sgx.relaxed().read32(0xd64048),
+-            sgx.relaxed().read32(0xd60020),
++            sgx.as_view().relaxed().read32(0xd64040),
++            sgx.as_view().relaxed().read32(0xd64048),
++            sgx.as_view().relaxed().read32(0xd60020),
+             firmware.read_u32(BOOT_POINTERS)?,
+             firmware.read_u32(BOOT_POINTERS + 0x30)?
+         );
+         Err(ETIMEDOUT)
+     }
+ 
+-    fn open_control(&mut self, pdev: &platform::Device<Core>) -> Result {
++    fn open_control(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
+         let dev = pdev.as_ref();
+         let firmware = self._firmware_space.as_mut().ok_or(EINVAL)?;
+         let client = self._opening_client.as_ref().ok_or(EINVAL)?;
+@@ -844,15 +847,15 @@ fn open_control(&mut self, pdev: &platform::Device<Core>) -> Result {
+         let sgx_guard = self._sgx.try_access().ok_or(ENODEV)?;
+         let sgx = &*sgx_guard;
+         let before = (
+-            sgx.relaxed().read32(0xd640c0),
+-            sgx.relaxed().read32(0xd640c8),
+-            sgx.relaxed().read32(0xd60060),
++            sgx.as_view().relaxed().read32(0xd640c0),
++            sgx.as_view().relaxed().read32(0xd640c8),
++            sgx.as_view().relaxed().read32(0xd60060),
+         );
+         if before != (1, 1, 1) {
+             dev_err!(dev, "G16: unexpected opening cursors {:?}\n", before);
+             return Err(EIO);
+         }
+-        sgx.relaxed().write32(3, 0xd60060);
++        sgx.as_view().relaxed().write32(3, 0xd60060);
+         drop(sgx_guard);
+         for (address, value) in [
+             (0xffff_fc20_0003_4f88, 0xffff_fc21_8100_0000u64),
+@@ -871,9 +874,9 @@ fn open_control(&mut self, pdev: &platform::Device<Core>) -> Result {
+             let sgx_guard = self._sgx.try_access().ok_or(ENODEV)?;
+             let sgx = &*sgx_guard;
+             let cursors = (
+-                sgx.relaxed().read32(0xd640c0),
+-                sgx.relaxed().read32(0xd640c8),
+-                sgx.relaxed().read32(0xd60060),
++                sgx.as_view().relaxed().read32(0xd640c0),
++                sgx.as_view().relaxed().read32(0xd640c8),
++                sgx.as_view().relaxed().read32(0xd60060),
+             );
+             if cursors == (3, 3, 3) && firmware.read_u32(0xffff_fc20_0003_f19c)? == 1 {
+                 dev_info!(
+@@ -891,15 +894,15 @@ fn open_control(&mut self, pdev: &platform::Device<Core>) -> Result {
+         dev_err!(
+             dev,
+             "G16: control timeout; cursors {}/{}/{} completion {}\n",
+-            sgx.relaxed().read32(0xd640c0),
+-            sgx.relaxed().read32(0xd640c8),
+-            sgx.relaxed().read32(0xd60060),
++            sgx.as_view().relaxed().read32(0xd640c0),
++            sgx.as_view().relaxed().read32(0xd640c8),
++            sgx.as_view().relaxed().read32(0xd60060),
+             firmware.read_u32(0xffff_fc20_0003_f19c)?
+         );
+         Err(ETIMEDOUT)
+     }
+ 
+-    fn publish(&mut self, pdev: &platform::Device<Core>) -> Result {
++    fn publish(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
+         let dev = pdev.as_ref();
+         let address_space = self._address_space.as_ref().ok_or(EINVAL)?;
+         let firmware_space = self._firmware_space.as_ref().ok_or(EINVAL)?;
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index a16a563c3b36..8d77f1f49976 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -8,7 +8,7 @@
+ use crate::{g16_compute as compute, g16_render as render};
+ use core::{
+     ops::Range,
+-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
++    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+ };
+ use kernel::dma_fence::{self, RawDmaFence};
+ use kernel::drm::sched;
+@@ -20,7 +20,7 @@
+ use kernel::sync::aref::ARef;
+ use kernel::uaccess::{UserPtr, UserSlice};
+ use kernel::workqueue::{self, impl_has_work, new_work, Work, WorkItem};
+-use kernel::{bindings, c_str, device::Core, drm, platform, prelude::*, uapi};
++use kernel::{bindings, c_str, device::{Bound, Core}, drm, platform, prelude::*, scatterlist, uapi};
+ 
+ enum Command {
+     Render(uapi::drm_asahi_cmd_render),
+@@ -35,6 +35,12 @@ enum Parameters {
+ pub(crate) struct Driver;
+ pub(crate) type Device = drm::Device<Driver>;
+ pub(crate) type DeviceRef = ARef<Device>;
++pub(crate) type RegDevice = drm::Device<Driver, drm::Registered>;
++
++/// Registration-scoped data: the bound parent device, for DMA mappings.
++pub(crate) struct RegData<'a> {
++    pdev: &'a platform::Device<Bound>,
++}
+ type DrmFile = drm::File<File>;
+ type Object = shmem::Object<Buffer>;
+ const VM_END: u64 = (1 << 42) - 0x8000;
+@@ -47,7 +53,7 @@ struct Mapping {
+     permissions: u32,
+     offset: u64,
+     single: bool,
+-    sg: Arc<shmem::SGTable<Buffer>>,
++    obj: ARef<Object>,
+ }
+ 
+ impl Mapping {
+@@ -111,7 +117,8 @@ struct Queue {
+ #[derive(Clone)]
+ struct TimestampBuffer {
+     id: u32,
+-    sg: Arc<shmem::SGTable<Buffer>>,
++    /// Keeps the object, and so its pinned pages and DMA mapping, alive while mapped.
++    _obj: ARef<Object>,
+     base: u64,
+     extent: u64,
+     address: u64,
+@@ -137,8 +144,10 @@ pub(crate) struct Data {
+ #[vtable]
+ impl drm::driver::Driver for Driver {
+     type Data = Data;
++    type RegistrationData<'a> = RegData<'a>;
+     type File = File;
+     type Object = Object;
++    type ParentDevice<Ctx: kernel::device::DeviceContext> = platform::Device<Ctx>;
+     const INFO: drm::driver::DriverInfo = drm::driver::DriverInfo {
+         major: 0,
+         minor: 0,
+@@ -146,10 +155,9 @@ impl drm::driver::Driver for Driver {
+         name: c_str!("asahi"),
+         desc: c_str!("Apple G16 Graphics"),
+     };
+-    const FEATURES: u32 = drm::driver::FEAT_GEM
+-        | drm::driver::FEAT_RENDER
+-        | drm::driver::FEAT_SYNCOBJ
+-        | drm::driver::FEAT_SYNCOBJ_TIMELINE;
++    const FEAT_RENDER: bool = true;
++    const FEAT_SYNCOBJ: bool = true;
++    const FEAT_SYNCOBJ_TIMELINE: bool = true;
+ 
+     kernel::declare_drm_ioctls! {
+         (ASAHI_GET_PARAMS, drm_asahi_get_params, ioctl::RENDER_ALLOW, File::get_params),
+@@ -166,7 +174,9 @@ impl drm::driver::Driver for Driver {
+     }
+ }
+ 
+-pub(crate) fn register(pdev: &platform::Device<Core>) -> Result<DeviceRef> {
++pub(crate) fn register<'a>(
++    pdev: &'a platform::Device<Core<'_>>,
++) -> Result<drm::Registration<'a, Driver>> {
+     use kernel::dma::{Device as _, DmaMask};
+     // SAFETY: G16's hardware output address width was validated at bootstrap.
+     unsafe {
+@@ -182,9 +192,12 @@ pub(crate) fn register(pdev: &platform::Device<Core>) -> Result<DeviceRef> {
+         notifications: runtime.notifications.clone(),
+         runtime <- kernel::new_mutex!(runtime),
+         engine <- kernel::new_mutex!(Engine { running: false, cursor: 0, jobs: KVec::new(), issued: KVec::new() }), });
+-    let device = Device::new(pdev.as_ref(), data)?;
+-    drm::driver::Registration::new_foreign_owned(&device, pdev.as_ref(), 0)?;
+-    Ok(device)
++    let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
++    let bound: &'a platform::Device<Bound> = pdev;
++    // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
++    unsafe {
++        drm::Registration::new(pdev.as_ref(), device, Ok::<_, Error>(RegData { pdev: bound }), 0)
++    }
+ }
+ 
+ pub(crate) struct Buffer {
+@@ -225,13 +238,13 @@ fn close(obj: &Object, file: &DrmFile) {
+         let result: Result = (|| {
+             let mut state = inner.state.lock();
+             for vm in &mut state.vms {
+-                if !vm.mappings.iter().any(|m| core::ptr::eq(m.sg.object(), obj)) {
++                if !vm.mappings.iter().any(|m| core::ptr::eq(&*m.obj, obj)) {
+                     continue;
+                 }
+                 drain(&mut vm.pending)?;
+                 let runtime = inner.device.runtime.lock();
+                 while let Some(range) = vm.mappings.iter()
+-                    .find(|m| core::ptr::eq(m.sg.object(), obj))
++                    .find(|m| core::ptr::eq(&*m.obj, obj))
+                     .map(|m| m.range.clone())
+                 {
+                     vm.unmap(range, &runtime)?;
+@@ -251,7 +264,6 @@ fn close(obj: &Object, file: &DrmFile) {
+ #[pin_data(PinnedDrop)]
+ pub(crate) struct File {
+     device: DeviceRef,
+-    raw: AtomicPtr<bindings::drm_file>,
+     id: u64,
+     state: Arc<Mutex<FileState>>,
+ }
+@@ -261,7 +273,6 @@ fn open(device: &Device) -> Result<Pin<KBox<Self>>> {
+         KBox::pin_init(
+             try_pin_init!(Self {
+                 device: device.into(),
+-                raw: AtomicPtr::new(core::ptr::null_mut()),
+                 id: NEXT_FILE.fetch_add(1, Ordering::Relaxed),
+                 state: Arc::pin_init(
+                     kernel::new_mutex!(FileState {
+@@ -279,12 +290,6 @@ fn open(device: &Device) -> Result<Pin<KBox<Self>>> {
+             GFP_KERNEL,
+         )
+     }
+-    fn post_open(&self, file: &DrmFile) {
+-        self.raw.store(file.as_raw(), Ordering::Release);
+-    }
+-    fn as_raw(&self) -> *mut bindings::drm_file {
+-        self.raw.load(Ordering::Acquire)
+-    }
+ }
+ 
+ #[pinned_drop]
+@@ -328,7 +333,8 @@ fn drop(self: Pin<&mut Self>) {
+ 
+ impl File {
+     fn get_time(
+-        _device: &Device,
++        _device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_get_time,
+         _file: &DrmFile,
+     ) -> Result<u32> {
+@@ -350,10 +356,12 @@ fn get_time(
+     }
+ 
+     fn vm_create(
+-        device: &Device,
++        device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_vm_create,
+         file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         if data.pad != 0
+             || data.kernel_start < 0x4000
+             || data.kernel_end > VM_END
+@@ -408,10 +416,12 @@ fn vm_create(
+     }
+ 
+     fn vm_destroy(
+-        device: &Device,
++        device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_vm_destroy,
+         file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         if data.pad != 0 {
+             return Err(EINVAL);
+         }
+@@ -436,10 +446,12 @@ fn vm_destroy(
+     }
+ 
+     fn get_params(
+-        device: &Device,
++        device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_get_params,
+         _file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         if data.param_group != 0 || data.pad != 0 {
+             return Err(EINVAL);
+         }
+@@ -476,10 +488,12 @@ fn get_params(
+     }
+ 
+     fn queue_create(
+-        device: &Device,
++        device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_queue_create,
+         file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         if data.flags != 0 || data.priority > 1 || data.usc_exec_base != 1 << 40 {
+             return Err(EINVAL);
+         }
+@@ -516,10 +530,12 @@ fn queue_create(
+     }
+ 
+     fn queue_destroy(
+-        device: &Device,
++        device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_queue_destroy,
+         file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         if data.pad != 0 {
+             return Err(EINVAL);
+         }
+@@ -550,10 +566,12 @@ fn queue_destroy(
+     }
+ 
+     fn bind_object(
+-        device: &Device,
++        device: &RegDevice,
++        reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_gem_bind_object,
+         file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         if data.pad != 0 || data.vm_id != 0 {
+             return Err(EINVAL);
+         }
+@@ -576,7 +594,7 @@ fn bind_object(
+                 }
+                 let id = state.next_timestamp;
+                 let next = id.checked_add(1).ok_or(ENOSPC)?;
+-                let sg = Arc::new(bo.owned_sg_table()?, GFP_KERNEL)?;
++                let sgt = bo.sg_table(reg.pdev.as_ref())?;
+                 let first = data.offset & !0x3fff;
+                 let extent = ((data.offset + data.range + 0x3fff) & !0x3fff) - first;
+                 state.timestamps.reserve(1, GFP_KERNEL)?;
+@@ -585,7 +603,7 @@ fn bind_object(
+                 let base = runtime.reserve_timestamp(extent)?;
+                 let timestamp = TimestampBuffer {
+                     id,
+-                    sg,
++                    _obj: bo.clone(),
+                     base,
+                     extent,
+                     address: base + (data.offset - first),
+@@ -598,7 +616,7 @@ fn bind_object(
+                 let mut offset = first;
+                 let mut address = base;
+                 let result = (|| {
+-                    for segment in timestamp.sg.iter() {
++                    for segment in sgt.iter() {
+                         let length = u64::from(segment.dma_len());
+                         if offset >= length {
+                             offset -= length;
+@@ -646,7 +664,8 @@ fn bind_object(
+         Ok(0)
+     }
+ 
+-    fn vm_bind(device: &Device, data: &mut uapi::drm_asahi_vm_bind, file: &DrmFile) -> Result<u32> {
++    fn vm_bind(device: &RegDevice, reg: &RegData<'_>, data: &mut uapi::drm_asahi_vm_bind, file: &DrmFile) -> Result<u32> {
++        let device: &Device = device;
+         if data.pad != 0 || data.num_binds > 4096 || data.stride == 0 {
+             return Err(EINVAL);
+         }
+@@ -755,7 +774,8 @@ fn vm_bind(device: &Device, data: &mut uapi::drm_asahi_vm_bind, file: &DrmFile)
+             vm.map(
+                 address..end,
+                 offset,
+-                bo.owned_sg_table()?,
++                bo.clone(),
++                bo.sg_table(reg.pdev.as_ref())?,
+                 access,
+                 flags & 6,
+                 single,
+@@ -766,10 +786,12 @@ fn vm_bind(device: &Device, data: &mut uapi::drm_asahi_vm_bind, file: &DrmFile)
+     }
+ 
+     fn gem_create(
+-        device: &Device,
++        device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_gem_create,
+         file: &DrmFile,
+     ) -> Result<u32> {
++        let device: &Device = device;
+         let private = data.flags & uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_VM_PRIVATE != 0;
+         if data.flags
+             & !(uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_WRITEBACK
+@@ -811,7 +833,8 @@ fn gem_create(
+     }
+ 
+     fn gem_mmap_offset(
+-        _device: &Device,
++        _device: &RegDevice,
++        _reg: &RegData<'_>,
+         data: &mut uapi::drm_asahi_gem_mmap_offset,
+         file: &DrmFile,
+     ) -> Result<u32> {
+@@ -835,7 +858,8 @@ fn map(
+         &mut self,
+         range: Range<u64>,
+         mut offset: u64,
+-        sg: shmem::SGTable<Buffer>,
++        obj: ARef<Object>,
++        sgt: &scatterlist::SGTable,
+         access: crate::pgtable::Prot,
+         permissions: u32,
+         single: bool,
+@@ -849,10 +873,9 @@ fn map(
+             return Err(EEXIST);
+         }
+         let bo_offset = offset;
+-        let sg = Arc::new(sg, GFP_KERNEL)?;
+         let mut chunks = KVec::new();
+         let mut va = range.start;
+-        for segment in sg.iter() {
++        for segment in sgt.iter() {
+             let length = u64::from(segment.dma_len());
+             if offset >= length {
+                 offset -= length;
+@@ -880,7 +903,7 @@ fn map(
+                 permissions,
+                 offset: bo_offset,
+                 single,
+-                sg,
++                obj,
+             },
+             GFP_KERNEL,
+         )?;
+@@ -944,7 +967,7 @@ fn unmap(&mut self, range: Range<u64>, runtime: &crate::g16::Bootstrap) -> Resul
+             offset: m.offset + if m.single { 0 } else { range.end - m.range.start },
+             permissions: m.permissions,
+             single: m.single,
+-            sg: m.sg.clone(),
++            obj: m.obj.clone(),
+         });
+         if right.is_some() {
+             self.mappings.reserve(1, GFP_KERNEL)?;
+@@ -1352,7 +1375,8 @@ struct OutputSync {
+ }
+ 
+ impl File {
+-    fn submit(device: &Device, data: &mut uapi::drm_asahi_submit, file: &DrmFile) -> Result<u32> {
++    fn submit(device: &RegDevice, _reg: &RegData<'_>, data: &mut uapi::drm_asahi_submit, file: &DrmFile) -> Result<u32> {
++        let device: &Device = device;
+         if data.flags != 0
+             || data.pad != 0
+             || data.cmdbuf_size == 0
+@@ -1836,7 +1860,7 @@ fn render_parameters(&self, c: &uapi::drm_asahi_cmd_render) -> Result<render::Pa
+         p.tiling_work_stamp = 0x120;
+         p.fragment_work_stamp = 0x121;
+         // macOS writes 3; this driver's original value is 4 (debug: work_layout & 4).
+-        p.completion_control = if *crate::module_parameters::work_layout.value() & 4 != 0 { 3 } else { 4 };
++        p.completion_control = if crate::module_parameters::work_layout.value() & 4 != 0 { 3 } else { 4 };
+         p.layermeta = p.heapmeta;
+         if p.layers > 1 {
+             p.heapmeta += 0x100;
+diff --git a/drivers/gpu/drm/asahi/g16_platform.rs b/drivers/gpu/drm/asahi/g16_platform.rs
+index 205c2a8b8711..abd23cd19ee6 100644
+--- a/drivers/gpu/drm/asahi/g16_platform.rs
++++ b/drivers/gpu/drm/asahi/g16_platform.rs
+@@ -361,7 +361,7 @@ pub(crate) fn region_c(&self) -> Result<KVec<u8>> {
+         for (off, value) in [(0x54, u16::MAX), (0x56, 40), (0x58, u16::MAX)] {
+             out[off..off + 2].copy_from_slice(&value.to_le_bytes());
+         }
+-        if *crate::module_parameters::region_c_layout.value() != 0 {
++        if crate::module_parameters::region_c_layout.value() != 0 {
+             // Debug: the words macOS 26.6.2 (25G83) holds here once booted,
+             // observed under the hypervisor on this machine.
+             for (off, value, size) in [
+diff --git a/drivers/gpu/drm/asahi/g16_power.rs b/drivers/gpu/drm/asahi/g16_power.rs
+index da0875eb1dc8..b11859bb0bc7 100644
+--- a/drivers/gpu/drm/asahi/g16_power.rs
++++ b/drivers/gpu/drm/asahi/g16_power.rs
+@@ -153,7 +153,7 @@ macro_rules! floats {
+             0x5e3c => self.maximum_power, 0x5e48 => ppm.duration);
+         put64(out, 0x5e50, ppm.clocks);
+ 
+-        let base = match *crate::module_parameters::perf_base.value() {
++        let base = match crate::module_parameters::perf_base.value() {
+             0 => uint!("gpu-perf-base-pstate", 1),
+             forced => forced,
+         };
+diff --git a/drivers/gpu/drm/asahi/g16_render.rs b/drivers/gpu/drm/asahi/g16_render.rs
+index b5a7c0c6d6b6..43922c6f931e 100644
+--- a/drivers/gpu/drm/asahi/g16_render.rs
++++ b/drivers/gpu/drm/asahi/g16_render.rs
+@@ -626,7 +626,7 @@ impl Addresses {
+ }
+ 
+ fn macos_counters() -> bool {
+-    *crate::module_parameters::micro_layout.value() != 0
++    crate::module_parameters::micro_layout.value() != 0
+ }
+ 
+ impl Addresses {
+@@ -692,7 +692,7 @@ impl Parameters {
+         u64_at(&mut out, 0x880, a.tiling_firmware_stamp);
+         u32_at(&mut out, 0x888, a.tiling_stamp as u32);
+         // Flush notifier stamps before storage reuse. macOS writes 0 here.
+-        u32_at(&mut out, 0x894, *crate::module_parameters::notifier_flush.value());
++        u32_at(&mut out, 0x894, crate::module_parameters::notifier_flush.value());
+         u32_at(&mut out, 0x88c, a.tiling_event as u32);
+         u32_at(&mut out, 0x898, a.tiling_uuid as u32);
+         u64_at(&mut out, 0x8a0, self.layers - 0x1);
+diff --git a/drivers/gpu/drm/asahi/g16_runtime.rs b/drivers/gpu/drm/asahi/g16_runtime.rs
+index 0c36fa87e4ff..fd9f9755c3cc 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime.rs
+@@ -68,7 +68,7 @@ fn driver_stamp(&self) -> u64 {
+ }
+ 
+ fn shared_notifier() -> bool {
+-    *crate::module_parameters::shared_notifier.value() != 0
++    crate::module_parameters::shared_notifier.value() != 0
+ }
+ 
+ /// Reserve three distinct event IDs while this queue has unfinished work.
+@@ -110,8 +110,8 @@ pub(crate) fn new(priority: u32) -> Self {
+             priority,
+             events: None,
+             pending: 0,
+-            render_count: *crate::module_parameters::fw_counter_start.value(),
+-            compute_count: *crate::module_parameters::fw_counter_start.value(),
++            render_count: crate::module_parameters::fw_counter_start.value(),
++            compute_count: crate::module_parameters::fw_counter_start.value(),
+             notified_works: 0,
+             last: [None; 2],
+         }
+@@ -196,7 +196,7 @@ impl Bootstrap {
+     /// Report each exhausted resource once, without logging every retry or
+     /// enabling firmware KTrace (which changes command execution timing).
+     fn report_pressure(&self, bit: u64, resource: &str) {
+-        if *crate::module_parameters::fw_trace.value() & 2 != 0
++        if crate::module_parameters::fw_trace.value() & 2 != 0
+             && self.pressure_reported.fetch_or(bit, Ordering::Relaxed) & bit == 0
+         {
+             dev_info!(
+@@ -464,7 +464,7 @@ fn prepare_queues(&mut self, owner: &mut FirmwareQueues) -> Result {
+             });
+             owner.lanes = Some(lanes);
+             owner.notified_works = 0;
+-            if *crate::module_parameters::fw_trace.value() & 1 != 0 {
++            if crate::module_parameters::fw_trace.value() & 1 != 0 {
+                 dev_info!(
+                     self.dev.as_ref(),
+                     "G16: queues vertex={:#x} fragment={:#x} compute={:#x} priority={} recycled={}\n",
+@@ -680,7 +680,7 @@ pub(crate) fn flush(&mut self) -> Result {
+                 )?;
+             }
+         }
+-        if *crate::module_parameters::fw_trace.value() & 4 != 0 {
++        if crate::module_parameters::fw_trace.value() & 4 != 0 {
+             dev_info!(
+                 self.dev.as_ref(),
+                 "G16: batch works={} messages={} kicks={}\n",
+@@ -710,7 +710,7 @@ fn stamps_done(&self, flight: &Flight) -> Result<bool> {
+     }
+ 
+     fn trace_publication(&self, kind: &str, id: u64) -> Result {
+-        if *crate::module_parameters::fw_trace.value() & 1 != 0 {
++        if crate::module_parameters::fw_trace.value() & 1 != 0 {
+             let mut unretired = 0;
+             for flight in &self.flights {
+                 if !self.stamps_done(flight).unwrap_or(false) {
+@@ -743,7 +743,7 @@ fn trace_dependencies(
+         context: u32,
+         dependencies: &[Option<Stamp>; 2],
+     ) -> Result {
+-        if *crate::module_parameters::fw_trace.value() & 8 != 0 {
++        if crate::module_parameters::fw_trace.value() & 8 != 0 {
+             let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+             let mut unfinished = 0;
+             for dep in dependencies.iter().flatten() {
+@@ -1099,7 +1099,7 @@ pub(crate) fn retire(&mut self) -> Result<Option<(u64, Result)>> {
+                 continue;
+             }
+             let flight = &self.flights[index];
+-            if *crate::module_parameters::fw_trace.value() & 16 != 0 {
++            if crate::module_parameters::fw_trace.value() & 16 != 0 {
+                 dev_info!(
+                     self.dev.as_ref(),
+                     "G16: retire {:#x} render={} after_stamps_us={} last_blocked={:#x} flights={}\n",
+@@ -1409,7 +1409,7 @@ fn drain_trace_rx(&mut self) -> Result {
+                 );
+                 return Err(EIO);
+             }
+-            if read != write && *crate::module_parameters::fw_trace.value() & 64 != 0 {
++            if read != write && crate::module_parameters::fw_trace.value() & 64 != 0 {
+                 // SAFETY: ktime_get() has no preconditions.
+                 let now = unsafe { kernel::bindings::ktime_get() };
+                 let entry = if state == 0xffff_fc20_0003_f3c0 {
+@@ -1588,7 +1588,7 @@ fn submit_render_pool(
+         a.tiling_status_page = params.ta_status & !0x3fff;
+         a.fragment_status_page = params.fragment_status & !0x3fff;
+         let queue_ordinal = queue.render_count;
+-        if *crate::module_parameters::work_layout.value() & 8 != 0 && queue_ordinal % 40 != 0 {
++        if crate::module_parameters::work_layout.value() & 8 != 0 && queue_ordinal % 40 != 0 {
+             // As macOS: only the first render of each 40-render cycle uses
+             // 0xd5 in this fragment register; the others use 0xb5.
+             params.fragment_gate = 0xb5_0040_0020;
+@@ -1661,7 +1661,7 @@ fn submit_render_pool(
+         let mut frag = params.fragment_work(&a).ok_or(EINVAL)?;
+         // Keep firmware's internal profiling destinations distinct from the
+         // explicit user timestamp slots used for UAPI completion above.
+-        if *crate::module_parameters::work_timestamps.value() != 0 {
++        if crate::module_parameters::work_timestamps.value() != 0 {
+             ta[0x8c8..0x8d0].copy_from_slice(&(va + 0x100).to_le_bytes());
+             ta[0x8d0..0x8d8].copy_from_slice(&(va + 0x108).to_le_bytes());
+             frag[0xc10..0xc18].copy_from_slice(&(va + 0x110).to_le_bytes());
+@@ -1673,7 +1673,7 @@ fn submit_render_pool(
+             frag[0xc10..0xc18].fill(0);
+             frag[0xc18..0xc20].copy_from_slice(&(lanes[1].pointers + 0x2080).to_le_bytes());
+         }
+-        if *crate::module_parameters::fw_trace.value() & 128 != 0
++        if crate::module_parameters::fw_trace.value() & 128 != 0
+             && !CONFIG_DUMPED.swap(true, Ordering::Relaxed)
+         {
+             // Live firmware configuration, for comparison with macOS.
+@@ -1701,7 +1701,7 @@ fn submit_render_pool(
+                 }
+             }
+         }
+-        let layout = *crate::module_parameters::work_layout.value();
++        let layout = crate::module_parameters::work_layout.value();
+         if layout & 1 != 0 {
+             // As macOS in steady state: no TVB growth request and neither
+             // fragment flag that this driver set unconditionally.
+@@ -1721,7 +1721,7 @@ fn submit_render_pool(
+                 bytes[offset..offset + 8].copy_from_slice(&word.to_le_bytes());
+             }
+         }
+-        if *crate::module_parameters::fw_trace.value() & 32 != 0 && queue_ordinal == 10 {
++        if crate::module_parameters::fw_trace.value() & 32 != 0 && queue_ordinal == 10 {
+             pr_info!(
+                 "G16: work dump TA={:#x} 3D={:#x} queues={:#x}/{:#x} bm={:#x} thing={:#x} support={:#x} micro={:#x}/{:#x}\n",
+                 a.tiling_work, a.fragment_work, a.tiling_queue, a.fragment_queue,
+@@ -1848,7 +1848,7 @@ fn publish_render(
+         // Only the render dependency can move to fragment. Compute output
+         // may feed the vertex stage, and input fences were already consumed
+         // by the scheduler before either lane was published.
+-        let mode = *crate::module_parameters::render_barrier.value();
++        let mode = crate::module_parameters::render_barrier.value();
+         let vdm_barrier_fragment = vdm_barrier_fragment || mode & 1 != 0;
+         // A fragment-stage wait on this queue's own fragment lane is already
+         // satisfied by that lane's submission order.
+@@ -1930,7 +1930,7 @@ fn publish_render(
+             let mut pos = firsts[stage];
+             // The prelude page leaves +0x40..+0xc0 free before its
+             // microsequence. All barrier bytes share the Work's lifetime.
+-            let render_kind = *crate::module_parameters::dependency_kind.value();
++            let render_kind = crate::module_parameters::dependency_kind.value();
+             let deps = stage_dependencies[stage]
+                 .iter()
+                 .enumerate()
+@@ -2215,7 +2215,7 @@ fn service_render_events(
+         if cursor >= 256 || end >= 256 {
+             return Err(EIO);
+         }
+-        if cursor != end && *crate::module_parameters::fw_trace.value() & 64 != 0 {
++        if cursor != end && crate::module_parameters::fw_trace.value() & 64 != 0 {
+             // SAFETY: ktime_get() has no preconditions.
+             let now = unsafe { kernel::bindings::ktime_get() };
+             let base = RING + u64::from(cursor) * 0x48;
+diff --git a/drivers/gpu/drm/asahi/g16_tvb.rs b/drivers/gpu/drm/asahi/g16_tvb.rs
+index b485ea59bf7b..aa730244251f 100644
+--- a/drivers/gpu/drm/asahi/g16_tvb.rs
++++ b/drivers/gpu/drm/asahi/g16_tvb.rs
+@@ -141,12 +141,12 @@ pub(crate) fn grow(
+         {
+             return Err(EIO);
+         }
+-        let limit = (*crate::module_parameters::tvb_max_blocks.value()).min(MAX_BLOCKS);
++        let limit = (crate::module_parameters::tvb_max_blocks.value()).min(MAX_BLOCKS);
+         // A firmware allocation request tells us the current heap lacks free
+         // pages. Give it the same 3x headroom used by Apple8's growth policy.
+         // M4 expands its page list when it consumes this event's reply, so
+         // publication stays on the verified allocation-event path.
+-        let factor = (*crate::module_parameters::tvb_growth.value()).max(2);
++        let factor = (crate::module_parameters::tvb_growth.value()).max(2);
+         let mut new = old.saturating_mul(factor).min(limit).max(old);
+         if new > fw.read_u32(a.buffer_manager + 0x38)? || new * 8 > 0x10000 || new * 16 > 0x1c000 {
+             return Err(EIO);
+diff --git a/drivers/gpu/drm/asahi/g16_vm.rs b/drivers/gpu/drm/asahi/g16_vm.rs
+index 78fd91959456..b1220d208d40 100644
+--- a/drivers/gpu/drm/asahi/g16_vm.rs
++++ b/drivers/gpu/drm/asahi/g16_vm.rs
+@@ -515,7 +515,7 @@ pub(crate) fn alloc(&mut self, va: u64, size: usize, prot: crate::pgtable::Prot)
+         if size == 0 || (va as usize | size) & (UAT_PGSZ - 1) != 0 {
+             return Err(EINVAL);
+         }
+-        if *crate::module_parameters::fw_trace.value() & 128 != 0 {
++        if crate::module_parameters::fw_trace.value() & 128 != 0 {
+             pr_info!("G16: fwmap {:#x}+{:#x} {:?}\n", va, size, prot);
+         }
+         let end = va.checked_add(size as u64).ok_or(EINVAL)?;
+@@ -775,7 +775,7 @@ pub(crate) fn read_u32(&self, va: u64) -> Result<u32> {
+     }
+ 
+     pub(crate) fn sync(&self) {
+-        for va in self.dirty_regions.borrow_mut().drain(..) {
++        for va in self.dirty_regions.borrow_mut().drain_all() {
+             let region = self.regions.get(&va).unwrap();
+             region.pending.set(false);
+             for (page, dirty) in region.pages.iter().zip(&region.dirty_pages) {
+diff --git a/drivers/gpu/drm/asahi/m4_pgtable.rs b/drivers/gpu/drm/asahi/m4_pgtable.rs
+index eab02210d548..2ecc7de93f0f 100644
+--- a/drivers/gpu/drm/asahi/m4_pgtable.rs
++++ b/drivers/gpu/drm/asahi/m4_pgtable.rs
+@@ -327,7 +327,7 @@ pub(crate) fn new_with_ttb_and_ias(
+     /// Queue cache cleaning for edited tables, including borrowed ancestors.
+     /// The enclosing publication batch supplies the completion barrier.
+     pub(crate) fn clean(&self) {
+-        for phys in self.pending_tables.borrow_mut().drain(..) {
++        for phys in self.pending_tables.borrow_mut().drain_all() {
+             self.dirty_tables.get(&phys).unwrap().set(false);
+             // SAFETY: Every recorded table is live until this owner is dropped.
+             let page = unsafe { Page::borrow_phys_unchecked(&phys) };
