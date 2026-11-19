@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 19 Nov 2026 01:12:09 -0600
+Subject: [PATCH] drm/apple: Check the CRTC allocation
+
+apple_probe_per_dcp() used the CRTC without checking that kzalloc() returned one.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/apple_drv.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index befb3b8114fd..aa65d816576f 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -342,6 +342,8 @@ static int apple_probe_per_dcp(struct device *dev,
+ 	}
+ 
+ 	crtc = kzalloc(sizeof(*crtc), GFP_KERNEL);
++	if (!crtc)
++		return -ENOMEM;
+ 	ret = drm_crtc_init_with_planes(drm, &crtc->base, primary_plane,
+ 					NULL,
+ 					&apple_crtc_funcs, NULL);

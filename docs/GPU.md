@@ -255,8 +255,8 @@ the firmware retunes. The driver does not send that message yet.
 - **The chassis.** Under sustained GPU load the chassis passed the 45 C the
   chassis zone holds the CPUs to (48 C seen), as the zone had only the CPUs
   as cooling devices. Fixed: the GPU is now one ("In Firn" below).
-- **Display cadence** (message 0x22), as above; parked until DCP reports
-  real vblank timing ("In Firn" below).
+- **Display cadence** (message 0x22), as above. Fixed ("Display
+  cadence" below).
 - **Workarounds in the imported driver:** a 50 ms safety poll that retires
   Work whose completion notification never came (never fired on the J713
   so far); "A4 wedge" detection, which only reports a render whose fragment
@@ -265,6 +265,7 @@ the firmware retunes. The driver does not send that message yet.
 - **The native mesh experiment** stays off by default and advertises itself
   through a sysfs line, not the UAPI; Mesa treats a missing line as off.
 - **DCP:** `kmscube` without `-A` gets EBUSY on its first legacy page flip.
+  Fixed: the commit tail now waits for the flip ("Vblank timing" below).
 - **Region C** words above, and `0x7fffffff` in a sensor's current
   temperature now and then (between samples, by the look of it).
 
@@ -344,13 +345,66 @@ Through the system's own graphics stack, with no library paths set:
 kmscube reads its standard input to stop: over ssh, give it an idle pipe,
 as above, or it stops after the first frame.
 
-### Display cadence, parked
+### Vblank timing
 
-Publishing the display's frame period (+0x988 phase, +0x990 period in
-24 MHz ticks, then control message 0x22) works: with 400,000 published the
-firmware's controller words match macOS's (bundle +0x5384 400000, +0x7f68
-16666, +0x7f6c 2), and it paces rendering to the frame, headless vkmark
-falling to 3699. The driver needs a frame period to publish, and the only
-source is fence deadlines, which need DCP to report vblank timing; DCP has
-no `drm_vblank_init()` and fakes its vblank events. The work is kept in
-`~/Universal/M4-Nix/gpu/parked/` until DCP does.
+DCP raises no vblank interrupt the AP sees, so the display driver had no
+vblank support: flip events stamped by guesswork, events for commits
+without a swap faked 5 ms later, and no next-vblank time, so render
+fences never got a deadline.
+
+DCP does complete each swap on the frame boundary. Measured with
+`flipgrid` (`firn-gpu-runs/tests/flipgrid.c`, results in `runs-vblank/`):
+
+- 600 flips submitted at random times complete on a 16,666,476 ns grid,
+  15 us standard deviation, the submit-to-completion delay spread evenly
+  over 0.14 to 1.13 frames.
+- Swept against the predicted grid, a flip submitted 2.4 ms or more ahead
+  always makes the frame, 2.20 ms never does, and between 2.25 and 2.35 ms
+  it makes it but completes about 90 us late. Completions are late at
+  worst, never early.
+
+The driver now models the grid from the completions (early ones move it
+at once, late ones a sixteenth), measures the period over about ten
+seconds of them, and runs a timer on it for vblanks between swaps.
+Timestamps are placed so that the next vblank start is the 2.4 ms swap
+lead. Flip events carry real counts and times, a commit without a swap
+sends its event at the next vblank, and the commit tail waits for the
+flip.
+
+| Test | Result |
+|---|---|
+| flips at random and swept times, 2,730 | sequence steps exactly with frames; events 1.0 ms after their timestamps, as placed |
+| `drmWaitVBlank`, 600 in a row | each one frame apart, 26 us after its timestamp |
+| `kmscube` with legacy page flips | 60.00 FPS; before, EBUSY after the modeset |
+| `kmscube -A` | 60.02 FPS |
+
+CLOCK_MONOTONIC is slewed by NTP after boot, so the period measured in it
+moves by a few hundred ns a frame between runs; the model follows.
+
+### Display cadence
+
+A display commit that waits on a render fence gives it a deadline, the
+next vblank start. The driver publishes the latest one and the period
+from deadlines a frame apart (+0x988 phase, +0x990 period, in 24 MHz
+ticks, then control message 0x22), when the period changes or the phase
+moves by more than 100 us. With no deadlines for half a second it
+publishes the shortest period, 100,000 ticks (240 Hz), which is also what
+it publishes from boot. `asahi_m4.display_cadence=0` turns it off.
+
+Measured on the J713, on battery, system power:
+
+| Load | Cadence off | Cadence on |
+|---|---|---|
+| headless vkmark | 6,250-6,274 at 7.39 W | 7,315-7,537 at 8.25-8.39 W |
+| vsync-bound shader, `kmscube -A -S`, 60 FPS (four runs) | 3.90 W | 3.80 W |
+| idle | 3.20-3.24 W | 3.22 W |
+| headless vkmark after a display session, left at 60 Hz | | 3,571-3,770 |
+
+The last row is why the driver goes back to the shortest period: left at
+a display's period, the firmware holds headless work back to it. With
+400,000 published the firmware's controller words reach macOS's values
+(bundle +0x5384 400000, +0x7f68 16666, +0x7f6c 2).
+
+Only commits that hand KMS an unsignaled fence give a deadline:
+`kmscube -A` does, through its in-fences. vkmark's KMS mode gave none in
+these tests, so the GPU kept the shortest period under it.

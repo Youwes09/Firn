@@ -1,0 +1,687 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 19 Nov 2026 01:12:26 -0600
+Subject: [PATCH] drm/apple: Report vblanks from DCP's swap completions
+
+DCP raises no vblank interrupt the AP sees, so the driver had no vblank
+support: no vblank counts or timestamps, flip events stamped by guesswork
+from the time since the swap, events for commits without a swap faked
+5 ms later from a work item, and no next-vblank time, so the atomic
+helpers never gave render fences a deadline.
+
+DCP does complete each swap on the frame boundary. On the J713's panel,
+600 swaps submitted at random times complete on a 16,666,476 ns grid
+within 15 us, and a swap must reach DCP 2.4 ms before its completion to
+make the frame; one later than about 2.35 ms makes it but completes up
+to 100 us late. Model the grid from the completions, trusting early ones
+over late ones, measure its period over about ten seconds of them, and
+run a timer on it for vblanks between swaps. Timestamps are placed so the
+next vblank start is the latest time a swap still makes the next frame.
+
+Flip events now carry the vblank's count and time, a commit without a
+swap sends its event at the next vblank, and the commit tail waits for
+the flip, as DCP holds on to the old framebuffers until then.
+
+On the J713: over 2,730 flips at random and swept times, flip events
+step their sequence exactly with the frames, and arrive 1.0 ms after
+their timestamps, as placed; drmWaitVBlank returns 600 times in a row
+one frame apart; and kmscube's legacy page flips, which failed with
+EBUSY after the modeset, run at 60 FPS.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/apple/Makefile         |   1 +
+ drivers/gpu/drm/apple/apple_drv.c      |  39 ++++-
+ drivers/gpu/drm/apple/dcp-internal.h   |   4 -
+ drivers/gpu/drm/apple/dcp.c            | 120 +++----------
+ drivers/gpu/drm/apple/dcp.h            |  29 ++++
+ drivers/gpu/drm/apple/iomfb.c          |   6 +-
+ drivers/gpu/drm/apple/iomfb_template.c |   6 +-
+ drivers/gpu/drm/apple/vblank.c         | 226 +++++++++++++++++++++++++
+ 8 files changed, 322 insertions(+), 109 deletions(-)
+ create mode 100644 drivers/gpu/drm/apple/vblank.c
+
+diff --git a/drivers/gpu/drm/apple/Makefile b/drivers/gpu/drm/apple/Makefile
+index d624045a0db5..15c1fbc58c50 100644
+--- a/drivers/gpu/drm/apple/Makefile
++++ b/drivers/gpu/drm/apple/Makefile
+@@ -13,6 +13,7 @@ appledrm-y += iomfb_v13_3.o
+ appledrm-y += iomfb_v26_6.o
+ appledrm-y += epic/dpavservep.o
+ appledrm-y += plane.o
++appledrm-y += vblank.o
+ 
+ 
+ appledrm-$(CONFIG_TRACING) += trace.o
+diff --git a/drivers/gpu/drm/apple/apple_drv.c b/drivers/gpu/drm/apple/apple_drv.c
+index aa65d816576f..96080d24c8e3 100644
+--- a/drivers/gpu/drm/apple/apple_drv.c
++++ b/drivers/gpu/drm/apple/apple_drv.c
+@@ -114,6 +114,9 @@ static void apple_crtc_atomic_enable(struct drm_crtc *crtc,
+ 
+ 	if (crtc_state->active)
+ 		dcp_crtc_atomic_modeset(crtc, commit);
++
++	apple_crtc_vblank_reset(to_apple_crtc(crtc));
++	drm_crtc_vblank_on(crtc);
+ }
+ 
+ static void apple_crtc_atomic_disable(struct drm_crtc *crtc,
+@@ -127,6 +130,8 @@ static void apple_crtc_atomic_disable(struct drm_crtc *crtc,
+ 		dcp_poweroff(apple_crtc->dcp);
+ 	}
+ 
++	drm_crtc_vblank_off(crtc);
++
+ 	if (crtc->state->event && !crtc->state->active) {
+ 		spin_lock_irq(&crtc->dev->event_lock);
+ 		drm_crtc_send_vblank_event(crtc, crtc->state->event);
+@@ -143,8 +148,12 @@ static void apple_crtc_atomic_begin(struct drm_crtc *crtc,
+ 	unsigned long flags;
+ 
+ 	if (crtc->state->event) {
++		/* Keep vblanks counting until the event is sent. */
++		bool vblank_ref = drm_crtc_vblank_get(crtc) == 0;
++
+ 		spin_lock_irqsave(&crtc->dev->event_lock, flags);
+ 		apple_crtc->event = crtc->state->event;
++		apple_crtc->event_vblank_ref = vblank_ref;
+ 		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+ 		crtc->state->event = NULL;
+ 	}
+@@ -152,6 +161,7 @@ static void apple_crtc_atomic_begin(struct drm_crtc *crtc,
+ 
+ static void apple_crtc_cleanup(struct drm_crtc *crtc)
+ {
++	hrtimer_cancel(&to_apple_crtc(crtc)->vblank_timer);
+ 	drm_crtc_cleanup(crtc);
+ 	kfree(to_apple_crtc(crtc));
+ }
+@@ -219,7 +229,9 @@ static const struct drm_crtc_funcs apple_crtc_funcs = {
+ 	.set_crc_source		= apple_crtc_set_crc_source,
+ 	.verify_crc_source	= apple_crtc_verify_crc_source,
+ 	.get_crc_sources	= apple_crtc_get_crc_sources,
+-
++	.enable_vblank		= apple_crtc_enable_vblank,
++	.disable_vblank		= apple_crtc_disable_vblank,
++	.get_vblank_timestamp	= apple_crtc_get_vblank_timestamp,
+ };
+ 
+ static const struct drm_mode_config_funcs apple_mode_config_funcs = {
+@@ -228,8 +240,26 @@ static const struct drm_mode_config_funcs apple_mode_config_funcs = {
+ 	.fb_create		= drm_gem_fb_create,
+ };
+ 
++/*
++ * drm_atomic_helper_commit_tail_rpm(), but waiting for the flip: DCP holds
++ * on to the old framebuffers until the swap completes, and a blocking
++ * commit is done only once its frame is on screen.
++ */
++static void apple_commit_tail(struct drm_atomic_commit *state)
++{
++	struct drm_device *dev = state->dev;
++
++	drm_atomic_helper_commit_modeset_disables(dev, state);
++	drm_atomic_helper_commit_modeset_enables(dev, state);
++	drm_atomic_helper_commit_planes(dev, state, DRM_PLANE_COMMIT_ACTIVE_ONLY);
++	drm_atomic_helper_fake_vblank(state);
++	drm_atomic_helper_commit_hw_done(state);
++	drm_atomic_helper_wait_for_flip_done(dev, state);
++	drm_atomic_helper_cleanup_planes(dev, state);
++}
++
+ static const struct drm_mode_config_helper_funcs apple_mode_config_helpers = {
+-	.atomic_commit_tail	= drm_atomic_helper_commit_tail_rpm,
++	.atomic_commit_tail	= apple_commit_tail,
+ };
+ 
+ static void appledrm_connector_cleanup(struct drm_connector *connector)
+@@ -344,6 +374,7 @@ static int apple_probe_per_dcp(struct device *dev,
+ 	crtc = kzalloc(sizeof(*crtc), GFP_KERNEL);
+ 	if (!crtc)
+ 		return -ENOMEM;
++	apple_crtc_vblank_init(crtc);
+ 	ret = drm_crtc_init_with_planes(drm, &crtc->base, primary_plane,
+ 					NULL,
+ 					&apple_crtc_funcs, NULL);
+@@ -540,6 +571,10 @@ static int apple_drm_init(struct device *dev)
+ 	if (ret)
+ 		goto err_unbind;
+ 
++	ret = drm_vblank_init(&apple->drm, apple->drm.mode_config.num_crtc);
++	if (ret)
++		goto err_unbind;
++
+ 	drm_mode_config_reset(&apple->drm);
+ 
+ 	fb_size = fb_r.end - fb_r.start + 1;
+diff --git a/drivers/gpu/drm/apple/dcp-internal.h b/drivers/gpu/drm/apple/dcp-internal.h
+index 26d5c3eb5d17..f9a5b61ea304 100644
+--- a/drivers/gpu/drm/apple/dcp-internal.h
++++ b/drivers/gpu/drm/apple/dcp-internal.h
+@@ -192,7 +192,6 @@ struct apple_dcp {
+ 
+ 	/* swap id of the last completed swap */
+ 	u32 last_swap_id;
+-	ktime_t swap_start;
+ 
+ 	/* Current display mode */
+ 	bool during_modeset;
+@@ -234,9 +233,6 @@ struct apple_dcp {
+ 
+ 	unsigned notch_height;
+ 
+-	/* Workqueue for sending vblank events when a dcp swap is not possible */
+-	struct work_struct vblank_wq;
+-
+ 	/* List of referenced drm_framebuffers which can be unreferenced
+ 	 * on the next successfully completed swap.
+ 	 */
+diff --git a/drivers/gpu/drm/apple/dcp.c b/drivers/gpu/drm/apple/dcp.c
+index 615264e70b2b..55dc13ec4cef 100644
+--- a/drivers/gpu/drm/apple/dcp.c
++++ b/drivers/gpu/drm/apple/dcp.c
+@@ -78,104 +78,50 @@ static bool unstable_edid = true;
+ module_param(unstable_edid, bool, 0644);
+ MODULE_PARM_DESC(unstable_edid, "Enable unstable EDID retrival support");
+ 
+-/* copied and simplified from drm_vblank.c */
+-static void send_vblank_event(struct drm_device *dev,
+-		struct drm_pending_vblank_event *e,
+-		u64 seq, ktime_t now)
+-{
+-	struct timespec64 tv;
+-
+-	if (e->event.base.type != DRM_EVENT_FLIP_COMPLETE)
+-		return;
+-
+-	tv = ktime_to_timespec64(now);
+-	e->event.vbl.sequence = seq;
+-	/*
+-		* e->event is a user space structure, with hardcoded unsigned
+-		* 32-bit seconds/microseconds. This is safe as we always use
+-		* monotonic timestamps since linux-4.15
+-		*/
+-	e->event.vbl.tv_sec = tv.tv_sec;
+-	e->event.vbl.tv_usec = tv.tv_nsec / 1000;
+-
+-	/*
+-	 * Use the same timestamp for any associated fence signal to avoid
+-	 * mismatch in timestamps for vsync & fence events triggered by the
+-	 * same HW event. Frameworks like SurfaceFlinger in Android expects the
+-	 * retire-fence timestamp to match exactly with HW vsync as it uses it
+-	 * for its software vsync modeling.
+-	 */
+-	drm_send_event_timestamp_locked(dev, &e->base, now);
+-}
+-
+-/**
+- * dcp_crtc_send_page_flip_event - helper to send vblank event after pageflip
+- *
+- * Compensate for unknown slack between page flip and arrival of the
+- * swap_complete callback. Minimal observed duration on DCP with HDMI output
+- * was around 2.3 ms. If the fb swap was submitted closer to the expected
+- * swap_complete it gets a penalty of one frame duration. This is on the border
+- * of unreasonable considering that Apple advertises support for 240 Hz (frame
+- * duration of 4.167 ms).
+- * It is unreasonable considering kwin's kms commit scheduling. Kwin commits
+- * 1.5 ms + the mode's vblank time before the expected next page flip
+- * completion. This results in presenting at half the display's rate for HDMI
+- * outputs.
+- * This might be a difference between dcp and dcpext.
+- */
+-static void dcp_crtc_send_page_flip_event(struct apple_crtc *crtc,
+-					  struct drm_pending_vblank_event *e,
+-					  ktime_t now, ktime_t start)
+-{
+-	struct drm_device *dev = crtc->base.dev;
+-	u64 seq;
+-	unsigned int pipe = drm_crtc_index(&crtc->base);
+-	ktime_t flip;
+-
+-	seq = 0;
+-	if (start != KTIME_MIN) {
+-		s64 delta = ktime_us_delta(now, start);
+-		if (delta <= 500)
+-			flip = now;
+-		else if (delta >= 2500)
+-			flip = ktime_sub_us(now, 1000);
+-		else
+-			flip = ktime_sub_us(now, (delta - 500) / 2);
+-	} else {
+-		flip = now;
+-	}
+-	e->pipe = pipe;
+-	send_vblank_event(dev, e, seq, flip);
+-}
+-
+-/* HACK: moved here to avoid circular dependency between apple_drv and dcp */
++/* Send the pending event now, with the last vblank's count and time. */
+ void dcp_drm_crtc_vblank(struct apple_crtc *crtc)
+ {
+ 	unsigned long flags;
++	bool put = false;
+ 
+ 	spin_lock_irqsave(&crtc->base.dev->event_lock, flags);
+ 	if (crtc->event) {
+ 		drm_crtc_send_vblank_event(&crtc->base, crtc->event);
+ 		crtc->event = NULL;
++		put = crtc->event_vblank_ref;
++		crtc->event_vblank_ref = false;
+ 	}
+ 	spin_unlock_irqrestore(&crtc->base.dev->event_lock, flags);
++
++	if (put)
++		drm_crtc_vblank_put(&crtc->base);
+ }
+ 
+-void dcp_drm_crtc_page_flip(struct apple_dcp *dcp, ktime_t now)
++/* Send the pending event at the next vblank, for a commit without a swap. */
++void dcp_drm_crtc_vblank_next(struct apple_crtc *crtc)
+ {
+ 	unsigned long flags;
+-	struct apple_crtc *crtc = dcp->crtc;
+ 
+ 	spin_lock_irqsave(&crtc->base.dev->event_lock, flags);
+-	if (crtc->event) {
+-		if (crtc->event->event.base.type == DRM_EVENT_FLIP_COMPLETE)
+-			dcp_crtc_send_page_flip_event(crtc, crtc->event, now, dcp->swap_start);
+-		else
+-			drm_crtc_send_vblank_event(&crtc->base, crtc->event);
++	if (crtc->event && crtc->event_vblank_ref) {
++		/* The event takes over the vblank reference. */
++		drm_crtc_arm_vblank_event(&crtc->base, crtc->event);
+ 		crtc->event = NULL;
+-		dcp->swap_start = KTIME_MIN;
++		crtc->event_vblank_ref = false;
+ 	}
+ 	spin_unlock_irqrestore(&crtc->base.dev->event_lock, flags);
++
++	dcp_drm_crtc_vblank(crtc);
++}
++
++/* A swap completed: its frame's vblank is now. */
++void dcp_drm_crtc_page_flip(struct apple_dcp *dcp, ktime_t now)
++{
++	struct apple_crtc *crtc = dcp->crtc;
++
++	apple_crtc_vblank_completion(crtc, now);
++	drm_crtc_handle_vblank(&crtc->base);
++	dcp_drm_crtc_vblank(crtc);
+ }
+ 
+ void dcp_set_dimensions(struct apple_dcp *dcp)
+@@ -225,20 +171,6 @@ int dcp_set_crc(struct drm_crtc *crtc, bool enabled)
+ 	return 0;
+ }
+ 
+-/*
+- * Helper to send a DRM vblank event. We do not know how call swap_submit_dcp
+- * without surfaces. To avoid timeouts in drm_atomic_helper_wait_for_vblanks
+- * send a vblank event via a workqueue.
+- */
+-static void dcp_delayed_vblank(struct work_struct *work)
+-{
+-	struct apple_dcp *dcp;
+-
+-	dcp = container_of(work, struct apple_dcp, vblank_wq);
+-	mdelay(5);
+-	dcp_drm_crtc_vblank(dcp->crtc);
+-}
+-
+ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
+ {
+ 	struct apple_dcp *dcp = cookie;
+@@ -1771,7 +1703,6 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
+ 	// TDOD: mem_desc IDs start at 1, for simplicity just skip '0' entry
+ 	set_bit(0, dcp->memdesc_map);
+ 
+-	INIT_WORK(&dcp->vblank_wq, dcp_delayed_vblank);
+ 	dcp->swapped_out_fbs =
+ 		(struct list_head)LIST_HEAD_INIT(dcp->swapped_out_fbs);
+ 
+@@ -1895,7 +1826,6 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
+ 		cancel_work_sync(&dcp->bl_register_wq);
+ 		cancel_work_sync(&dcp->bl_update_wq);
+ 	}
+-	cancel_work_sync(&dcp->vblank_wq);
+ 
+ 	devm_clk_put(dev, dcp->clk);
+ 	dcp->clk = NULL;
+diff --git a/drivers/gpu/drm/apple/dcp.h b/drivers/gpu/drm/apple/dcp.h
+index 02efd732712b..17d9102d02b7 100644
+--- a/drivers/gpu/drm/apple/dcp.h
++++ b/drivers/gpu/drm/apple/dcp.h
+@@ -4,6 +4,9 @@
+ #ifndef __APPLE_DCP_H__
+ #define __APPLE_DCP_H__
+ 
++#include <linux/hrtimer.h>
++#include <linux/spinlock.h>
++
+ #include <drm/drm_atomic.h>
+ #include <drm/drm_encoder.h>
+ #include <drm/drm_fourcc.h>
+@@ -15,8 +18,25 @@
+ struct apple_crtc {
+ 	struct drm_crtc base;
+ 	struct drm_pending_vblank_event *event;
++	/* Whether @event holds a vblank reference. */
++	bool event_vblank_ref;
+ 	bool vsync_disabled;
+ 
++	/* Vblank timing, modelled from swap completions (vblank.c). */
++	spinlock_t vblank_lock;
++	struct hrtimer vblank_timer;
++	bool vblank_enabled;
++	/* Whether a completion has placed the grid. */
++	bool vblank_synced;
++	/* A vblank timestamp, and the grid's period in ns. */
++	ktime_t vblank_base;
++	u64 vblank_period;
++	/* Where the period measurement started, and frames since. */
++	ktime_t vblank_ref;
++	u64 vblank_ref_frames;
++	/* Swap completion minus its frame's vblank timestamp, in ns. */
++	s64 vblank_offset;
++
+ 	/* Reference to the DCP device owning this CRTC */
+ 	struct platform_device *dcp;
+ };
+@@ -44,6 +64,15 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit);
+ bool dcp_is_initialized(struct platform_device *pdev);
+ void apple_crtc_vblank(struct apple_crtc *apple);
+ void dcp_drm_crtc_vblank(struct apple_crtc *crtc);
++void dcp_drm_crtc_vblank_next(struct apple_crtc *crtc);
++
++void apple_crtc_vblank_init(struct apple_crtc *crtc);
++void apple_crtc_vblank_reset(struct apple_crtc *crtc);
++void apple_crtc_vblank_completion(struct apple_crtc *crtc, ktime_t now);
++int apple_crtc_enable_vblank(struct drm_crtc *crtc);
++void apple_crtc_disable_vblank(struct drm_crtc *crtc);
++bool apple_crtc_get_vblank_timestamp(struct drm_crtc *crtc, int *max_error,
++				     ktime_t *vblank_time, bool in_vblank_irq);
+ int dcp_get_modes(struct drm_connector *connector);
+ enum drm_mode_status dcp_mode_valid(struct drm_connector *connector,
+ 				    const struct drm_display_mode *mode);
+diff --git a/drivers/gpu/drm/apple/iomfb.c b/drivers/gpu/drm/apple/iomfb.c
+index 542a47460213..34c112a6f973 100644
+--- a/drivers/gpu/drm/apple/iomfb.c
++++ b/drivers/gpu/drm/apple/iomfb.c
+@@ -480,10 +480,8 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
+ 			dev_err(dcp->dev, "unexpected busy command channel\n");
+ 			dcp->ch_cmd.warned_busy = true;
+ 		}
+-		/* HACK: issue a delayed vblank event to avoid timeouts in
+-		 * drm_atomic_helper_wait_for_vblanks().
+-		 */
+-		schedule_work(&dcp->vblank_wq);
++		/* Nothing will be swapped, so nothing completes the event. */
++		dcp_drm_crtc_vblank_next(dcp->crtc);
+ 		return;
+ 	} else if (dcp->ch_cmd.warned_busy) {
+ 		dcp->ch_cmd.warned_busy = false;
+diff --git a/drivers/gpu/drm/apple/iomfb_template.c b/drivers/gpu/drm/apple/iomfb_template.c
+index 880eaec55347..58f46a9ec075 100644
+--- a/drivers/gpu/drm/apple/iomfb_template.c
++++ b/drivers/gpu/drm/apple/iomfb_template.c
+@@ -1328,7 +1328,7 @@ static void dcpep_cb_hotplug_state(struct apple_dcp *dcp, u64 connected)
+ 		dcp->valid_mode = false;
+ 		/* after unplug swap will not complete until the next
+ 		 * set_digital_out_mode */
+-		schedule_work(&dcp->vblank_wq);
++		dcp_drm_crtc_vblank_next(dcp->crtc);
+ 	}
+ 
+ 	if (connector && connector->connected != !!connected) {
+@@ -1474,8 +1474,6 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
+ 		dcp_drm_crtc_vblank(dcp->crtc);
+ 		return;
+ 	}
+-	dcp->swap_start = ktime_get();
+-
+ 	while (!list_empty(&dcp->swapped_out_fbs)) {
+ 		struct dcp_fb_reference *entry;
+ 		entry = list_first_entry(&dcp->swapped_out_fbs,
+@@ -1820,7 +1818,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
+ 	if (!has_surface && !crtc_state->color_mgmt_changed) {
+ 		if (crtc_state->enable && crtc_state->active &&
+ 		    !crtc_state->planes_changed) {
+-			schedule_work(&dcp->vblank_wq);
++			dcp_drm_crtc_vblank_next(dcp->crtc);
+ 			return;
+ 		}
+ 
+diff --git a/drivers/gpu/drm/apple/vblank.c b/drivers/gpu/drm/apple/vblank.c
+new file mode 100644
+index 000000000000..93f389d793a3
+--- /dev/null
++++ b/drivers/gpu/drm/apple/vblank.c
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/*
++ * Vblank timing for DCP.
++ *
++ * DCP raises no vblank interrupt the AP can see, but it completes each swap
++ * on the frame boundary: swaps submitted at any time complete on a grid of
++ * the frame period, within about 10 us. A swap must reach DCP about 2.4 ms
++ * before that completion to make the frame, and one that arrives later
++ * than about 2.35 ms makes it but completes up to 100 us late, so
++ * completions can be late but are never early.
++ *
++ * The grid is modelled from the completions: an early one moves it at
++ * once, a late one only by a sixteenth, and the period is measured over
++ * about ten seconds of them. A timer delivers vblanks between swaps.
++ * Timestamps are placed so that the next vblank start, as
++ * drm_crtc_next_vblank_start() computes it, is the latest time a swap
++ * still makes the next frame.
++ */
++
++#include <linux/hrtimer.h>
++#include <linux/ktime.h>
++#include <linux/math64.h>
++#include <linux/spinlock.h>
++
++#include <drm/drm_crtc.h>
++#include <drm/drm_vblank.h>
++
++#include "dcp.h"
++
++/* How long before its completion a swap must reach DCP, measured on J713. */
++#define DCP_SWAP_LEAD_NS (2400 * NSEC_PER_USEC)
++
++/* Completions at most this far off the grid only adjust it. */
++#define DCP_SYNC_WINDOW(period) ((period) / 4)
++
++/* Frames between period measurements: about ten seconds at 60 Hz. */
++#define DCP_PERIOD_FRAMES 600
++
++/* Off by more than this from the mode's period, a measurement is wrong. */
++#define DCP_PERIOD_TOLERANCE(period) ((period) / 200)
++
++static u64 mode_period(struct apple_crtc *crtc)
++{
++	return drm_crtc_vblank_crtc(&crtc->base)->framedur_ns;
++}
++
++/* Swap completion minus the vblank timestamp of its frame. */
++static s64 completion_offset(struct apple_crtc *crtc)
++{
++	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(&crtc->base);
++	const struct drm_display_mode *mode = &vblank->hwmode;
++	u64 blank;
++
++	if (!mode->crtc_vtotal)
++		return DCP_SWAP_LEAD_NS;
++
++	blank = div_u64((u64)vblank->framedur_ns *
++				(mode->crtc_vtotal - mode->crtc_vblank_start),
++			mode->crtc_vtotal);
++	return DCP_SWAP_LEAD_NS - blank;
++}
++
++/* The vblank timestamp at or before @t, or nearest to it if @nearest. */
++static ktime_t grid_point(struct apple_crtc *crtc, ktime_t t, bool nearest)
++{
++	s64 since = ktime_to_ns(ktime_sub(t, crtc->vblank_base));
++	s64 n;
++
++	if (nearest)
++		since += crtc->vblank_period / 2;
++	n = div64_s64(since, crtc->vblank_period);
++	if (since < 0 && n * (s64)crtc->vblank_period != since)
++		n--;
++	return ktime_add_ns(crtc->vblank_base, n * crtc->vblank_period);
++}
++
++static void reset_grid(struct apple_crtc *crtc, ktime_t base)
++{
++	crtc->vblank_base = base;
++	crtc->vblank_ref = base;
++	crtc->vblank_ref_frames = 0;
++}
++
++static enum hrtimer_restart vblank_timer_fn(struct hrtimer *timer)
++{
++	struct apple_crtc *crtc = container_of(timer, struct apple_crtc, vblank_timer);
++	unsigned long flags;
++	ktime_t next;
++
++	spin_lock_irqsave(&crtc->vblank_lock, flags);
++	if (!crtc->vblank_enabled) {
++		spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++		return HRTIMER_NORESTART;
++	}
++	next = ktime_add_ns(grid_point(crtc, ktime_get(), false), crtc->vblank_period);
++	hrtimer_set_expires(timer, next);
++	spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++
++	drm_crtc_handle_vblank(&crtc->base);
++	return HRTIMER_RESTART;
++}
++
++void apple_crtc_vblank_init(struct apple_crtc *crtc)
++{
++	spin_lock_init(&crtc->vblank_lock);
++	hrtimer_setup(&crtc->vblank_timer, vblank_timer_fn, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_ABS);
++}
++
++/* Forget the grid, for a new mode. */
++void apple_crtc_vblank_reset(struct apple_crtc *crtc)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&crtc->vblank_lock, flags);
++	crtc->vblank_synced = false;
++	crtc->vblank_period = mode_period(crtc);
++	crtc->vblank_offset = completion_offset(crtc);
++	reset_grid(crtc, ktime_get());
++	spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++}
++
++int apple_crtc_enable_vblank(struct drm_crtc *base)
++{
++	struct apple_crtc *crtc = to_apple_crtc(base);
++	unsigned long flags;
++	ktime_t next;
++
++	spin_lock_irqsave(&crtc->vblank_lock, flags);
++	if (!crtc->vblank_period) {
++		crtc->vblank_period = mode_period(crtc);
++		crtc->vblank_offset = completion_offset(crtc);
++		reset_grid(crtc, ktime_get());
++	}
++	if (!crtc->vblank_period) {
++		spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++		return -EINVAL;
++	}
++	crtc->vblank_enabled = true;
++	next = ktime_add_ns(grid_point(crtc, ktime_get(), false), crtc->vblank_period);
++	spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++
++	hrtimer_start(&crtc->vblank_timer, next, HRTIMER_MODE_ABS);
++	return 0;
++}
++
++void apple_crtc_disable_vblank(struct drm_crtc *base)
++{
++	struct apple_crtc *crtc = to_apple_crtc(base);
++	unsigned long flags;
++
++	/*
++	 * Called under the vblank core's locks, which the timer takes, so
++	 * it cannot wait for a running timer; that one stops by itself.
++	 */
++	spin_lock_irqsave(&crtc->vblank_lock, flags);
++	crtc->vblank_enabled = false;
++	spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++	hrtimer_try_to_cancel(&crtc->vblank_timer);
++}
++
++bool apple_crtc_get_vblank_timestamp(struct drm_crtc *base, int *max_error,
++				     ktime_t *vblank_time, bool in_vblank_irq)
++{
++	struct apple_crtc *crtc = to_apple_crtc(base);
++	unsigned long flags;
++	bool ok;
++
++	spin_lock_irqsave(&crtc->vblank_lock, flags);
++	ok = crtc->vblank_period != 0;
++	/*
++	 * In a vblank, the timer or a completion may run slightly before the
++	 * grid has caught up with it, so take the nearest point.
++	 */
++	if (ok)
++		*vblank_time = grid_point(crtc, ktime_get(), in_vblank_irq);
++	spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++
++	return ok;
++}
++
++/* Fit the grid to a swap completion at @now. */
++void apple_crtc_vblank_completion(struct apple_crtc *crtc, ktime_t now)
++{
++	ktime_t seen, expected;
++	unsigned long flags;
++	s64 error, frames;
++	u64 period;
++
++	spin_lock_irqsave(&crtc->vblank_lock, flags);
++	period = crtc->vblank_period;
++	if (!period) {
++		spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++		return;
++	}
++
++	seen = ktime_sub_ns(now, crtc->vblank_offset);
++	expected = grid_point(crtc, seen, true);
++	error = ktime_to_ns(ktime_sub(seen, expected));
++
++	if (!crtc->vblank_synced || abs(error) > DCP_SYNC_WINDOW(period)) {
++		crtc->vblank_synced = true;
++		reset_grid(crtc, seen);
++		goto out;
++	}
++
++	frames = div64_s64(ktime_to_ns(ktime_sub(expected, crtc->vblank_base)) +
++				   period / 2, period);
++	crtc->vblank_base = ktime_add_ns(expected, error < 0 ? error : error / 16);
++	crtc->vblank_ref_frames += frames;
++
++	if (crtc->vblank_ref_frames >= DCP_PERIOD_FRAMES) {
++		u64 measured = div64_u64(ktime_to_ns(ktime_sub(crtc->vblank_base,
++							      crtc->vblank_ref)),
++					 crtc->vblank_ref_frames);
++		u64 nominal = mode_period(crtc);
++
++		if (nominal && abs((s64)measured - (s64)nominal) <=
++				       DCP_PERIOD_TOLERANCE(nominal))
++			crtc->vblank_period = measured;
++		crtc->vblank_ref = crtc->vblank_base;
++		crtc->vblank_ref_frames = 0;
++	}
++out:
++	spin_unlock_irqrestore(&crtc->vblank_lock, flags);
++}

@@ -27,12 +27,11 @@ in [ISSUES.md](ISSUES.md).
 - [ ] AIC's skipped EL2 FIQ masks: find why the writes hang.
 - [ ] brcmfmac on a busy public network: `GET STA INFO failed, -52` and
       `escan_handler: Buffer is too small: ignoring`, not seen at home.
-- [ ] The page flip timestamp HACK in the DCP driver, which moves
-      completion up to 1 ms earlier. There is nothing to replace it with
-      yet: on 26.6 the swap complete callback carries no timestamp (only
-      two frame counters, at 0x3f0 and 0x700, change between frames), and
-      none of the nine ADT `disp0` interrupts reaches the AP during 60 Hz
-      flips. The callback arrives 16.05 to 16.11 ms after each swap.
+- [x] The page flip timestamp HACK in the DCP driver: replaced by vblank
+      timing modelled from swap completions, which land on the frame grid
+      (GPU.md, "Vblank timing").
+- [ ] DCP's swap lead (2.4 ms) is measured on the J713's panel only; check
+      it on an external display once DisplayPort works.
 - [ ] `nvme_apple.flush_interval=0`, kept from an Omarchy-M4-Native report.
 
 ## Kernel
@@ -47,9 +46,8 @@ in [ISSUES.md](ISSUES.md).
         slot 36.
   - [x] Render with Gravity Linux's Mesa (GPU.md, "Rendering").
   - [x] A GPU cooling device for the chassis zone (GPU.md, "In Firn").
-  - [ ] The display cadence message (0x22): written and tested, parked
-        until DCP reports vblank timing, the only source of a frame period
-        (GPU.md, "Display cadence, parked").
+  - [x] The display cadence message (0x22), from render fence deadlines
+        (GPU.md, "Display cadence").
   - [ ] Find the causes behind the safety poll, the A4 wedge and the
         operand-pool lower bound.
   - [x] Bring `firn/gpu-next` into the kernel series; let

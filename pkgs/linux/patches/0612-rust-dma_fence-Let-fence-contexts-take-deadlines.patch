@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 19 Nov 2026 01:21:31 -0600
+Subject: [PATCH] rust: dma_fence: Let fence contexts take deadlines
+
+A waiter can tell a fence when it would like it signaled, as the atomic
+helpers do with the next vblank for a display commit's fences. Add
+set_deadline to FenceContextOps, as an optional callback.
+
+The callback only runs for a fence found unsignaled under the RCU read
+lock: a DriverFence signals before it drops, and its data drops one
+grace period later, so the data and its context outlive the call.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ rust/kernel/dma_buf/dma_fence.rs | 64 +++++++++++++++++++++++++++++---
+ 1 file changed, 59 insertions(+), 5 deletions(-)
+
+diff --git a/rust/kernel/dma_buf/dma_fence.rs b/rust/kernel/dma_buf/dma_fence.rs
+index 75baa97a59c3..e00535f452b6 100644
+--- a/rust/kernel/dma_buf/dma_fence.rs
++++ b/rust/kernel/dma_buf/dma_fence.rs
+@@ -14,8 +14,16 @@
+     alloc::AllocError,
+     bindings,
+     container_of,
+-    error::to_result,
++    error::{
++        to_result,
++        VTABLE_DEFAULT_ERROR, //
++    },
+     prelude::*,
++    sync::rcu,
++    time::{
++        Instant,
++        Monotonic, //
++    },
+     types::ForeignOwnable,
+     types::Opaque, //
+ };
+@@ -51,9 +59,19 @@
+ //
+ // Mandatory dma_fence backend_ops are implemented implicitly through
+ // [`FenceContext`]. Additional ones shall get implemented on this trait.
++#[vtable]
+ pub trait FenceContextOps {
+     /// The generic payload data for [`DriverFence`]s created on this fctx.
+     type FenceDataType: Send + Sync;
++
++    /// A waiter would like the fence with `data` signaled by `deadline`, for
++    /// example the vblank a display commit waits for.
++    ///
++    /// This is only a hint, given for unsignaled fences. It may be called in
++    /// atomic context, so it must not sleep.
++    fn set_deadline(&self, _data: &Self::FenceDataType, _deadline: Instant<Monotonic>) {
++        build_error!(VTABLE_DEFAULT_ERROR)
++    }
+ }
+ 
+ /// A dma-fence context. A fence context takes care of associating related fences
+@@ -101,7 +119,11 @@ impl<'a, T: Send + Sync + FenceContextOps> FenceContext<T> {
+         wait: None,
+         // Must never be implemented for these abstractions.
+         release: None,
+-        set_deadline: None,
++        set_deadline: if T::HAS_SET_DEADLINE {
++            Some(Self::set_deadline)
++        } else {
++            None
++        },
+     };
+ 
+     /// Create a new `FenceContext`.
+@@ -231,6 +253,28 @@ extern "C" fn get_timeline_name(ptr: *mut bindings::dma_fence) -> *const c_char
+         fctx.timeline_name.as_char_ptr()
+     }
+ 
++    extern "C" fn set_deadline(ptr: *mut bindings::dma_fence, deadline: bindings::ktime_t) {
++        if deadline < 0 {
++            return;
++        }
++        // A `DriverFence` signals before it drops, and its data drops one RCU
++        // grace period later. A fence found unsignaled inside this read-side
++        // section therefore keeps its data, and its context, until the end of
++        // the section.
++        let _guard = rcu::read_lock();
++        // SAFETY: The C backend passes a fence it holds a reference to.
++        if unsafe { bindings::dma_fence_is_signaled(ptr) } {
++            return;
++        }
++        // SAFETY: All fences with these ops reside within a `Fence` within a
++        // `DriverFenceData`, which is alive as explained above.
++        let fence_data = unsafe { Self::fence_data(ptr) };
++        // SAFETY: `deadline` is not negative, and a `ktime_t` cannot exceed
++        // `KTIME_MAX`.
++        let deadline = unsafe { Instant::from_ktime(deadline) };
++        fence_data.fctx.data.set_deadline(&fence_data.data, deadline);
++    }
++
+     /// Create a [`FenceContext`] from an associated [`bindings::dma_fence`].
+     ///
+     /// # Safety
+@@ -238,6 +282,17 @@ extern "C" fn get_timeline_name(ptr: *mut bindings::dma_fence) -> *const c_char
+     /// `ptr` must be a valid pointer to a [`bindings::dma_fence`] which resides
+     /// within a [`Fence`], which in turn resides in a [`DriverFenceData`].
+     unsafe fn from_raw_fence(ptr: *mut bindings::dma_fence) -> &'a Self {
++        // SAFETY: Safe due to the function's overall safety requirements.
++        unsafe { Self::fence_data(ptr) }.fctx
++    }
++
++    /// Get the [`DriverFenceData`] an associated [`bindings::dma_fence`] resides in.
++    ///
++    /// # Safety
++    ///
++    /// `ptr` must be a valid pointer to a [`bindings::dma_fence`] which resides
++    /// within a [`Fence`], which in turn resides in a [`DriverFenceData`].
++    unsafe fn fence_data(ptr: *mut bindings::dma_fence) -> &'a DriverFenceData<'a, T> {
+         let opaque_fence = Opaque::cast_from(ptr);
+ 
+         // SAFETY: Safe due to the function's overall safety requirements.
+@@ -247,9 +302,7 @@ unsafe fn from_raw_fence(ptr: *mut bindings::dma_fence) -> &'a Self {
+         let fence_data_ptr: *const DriverFenceData<'a, T> = fence_ptr.cast();
+ 
+         // SAFETY: Safe because of the comments directly above.
+-        let fence_data = unsafe { &*fence_data_ptr };
+-
+-        fence_data.fctx
++        unsafe { &*fence_data_ptr }
+     }
+ }
+ 
+@@ -749,6 +802,7 @@ struct DriverFenceData<'a, T: Send + Sync + FenceContextOps> {
+ ///     }
+ /// }
+ ///
++/// #[vtable]
+ /// impl FenceContextOps for FenceContextData {
+ ///     type FenceDataType = FenceData;
+ /// }

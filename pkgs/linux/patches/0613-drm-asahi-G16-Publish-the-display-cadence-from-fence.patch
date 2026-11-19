@@ -1,0 +1,352 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Thu, 19 Nov 2026 01:21:39 -0600
+Subject: [PATCH] drm/asahi: G16: Publish the display cadence from fence
+ deadlines
+
+macOS publishes the display's frame period to region C, +0x988 holding
+a vblank and +0x990 the period, both in 24 MHz counter ticks, with the
+period between 100,000 and 400,000, then sends control message 0x22 so
+the firmware rereads them. After boot, macOS 26.6.2 holds 399,997 there,
+the 60 Hz panel.
+
+A display commit that waits on a render fence gives it the next vblank
+start as its deadline, and deadlines a frame apart give the period.
+Publish them, before each publication pass, when the period changes or
+the phase moves by more than 100 us. With no deadlines for half a
+second, publish the shortest period: left at a display's period, the
+firmware holds headless work back to it. display_cadence=0 turns this
+off.
+
+On the J713, on battery, against display_cadence=0:
+- headless vkmark scores 7,315 to 7,537 at 8.3 W, against 6,250 to
+  6,274 at 7.4 W, so 18 % faster and 5 % more work per joule;
+- a vsync-bound shader at 60 FPS on the panel draws 3.80 W, against
+  3.90 W (means of four runs);
+- idle power is unchanged, 3.22 W;
+- left at 60 Hz once the display stops, headless vkmark scores only
+  3,571 to 3,770, which the shortest period avoids.
+
+The cadence's layout and message are from interface notes by Ibrahim
+Syed <ibrahim.syed787b@gmail.com>, written from macOS's GPU driver. With
+400,000 published, the firmware's controller words on the J713 reach
+macOS's values (bundle +0x5384 400000, +0x7f68 16666, +0x7f6c 2).
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ drivers/gpu/drm/asahi/asahi_m4.rs            |  5 ++
+ drivers/gpu/drm/asahi/g16.rs                 |  6 ++
+ drivers/gpu/drm/asahi/g16_cadence.rs         | 71 ++++++++++++++++++++
+ drivers/gpu/drm/asahi/g16_drm.rs             | 11 ++-
+ drivers/gpu/drm/asahi/g16_fw.rs              | 13 ++++
+ drivers/gpu/drm/asahi/g16_runtime_publish.rs | 61 +++++++++++++++++
+ drivers/gpu/drm/asahi/g16_runtime_queues.rs  | 14 ++--
+ 7 files changed, 174 insertions(+), 7 deletions(-)
+ create mode 100644 drivers/gpu/drm/asahi/g16_cadence.rs
+
+diff --git a/drivers/gpu/drm/asahi/asahi_m4.rs b/drivers/gpu/drm/asahi/asahi_m4.rs
+index 7a8ed53fb96e..6a67a4bba50c 100644
+--- a/drivers/gpu/drm/asahi/asahi_m4.rs
++++ b/drivers/gpu/drm/asahi/asahi_m4.rs
+@@ -8,6 +8,7 @@
+ mod float;
+ mod g16;
+ mod g16_alloc;
++mod g16_cadence;
+ mod g16_compute;
+ mod g16_cooling;
+ mod g16_deferred;
+@@ -130,6 +131,10 @@ fn unbind<'bound>(pdev: &'bound platform::Device<Core<'_>>, this: Pin<&Self::Dat
+     description: "Apple M4 GPU driver",
+     license: "GPL v2",
+     params: {
++        display_cadence: u32 {
++            default: 1,
++            description: "Publish the display's frame cadence, from render fence deadlines, to the firmware's performance control (0: off)",
++        },
+         fw_counter_start: u64 {
+             default: 0,
+             description: "Initial submission counters for firmware rollover qualification (normally 0)",
+diff --git a/drivers/gpu/drm/asahi/g16.rs b/drivers/gpu/drm/asahi/g16.rs
+index c44ed3b2bb4f..0dbd4f60f462 100644
+--- a/drivers/gpu/drm/asahi/g16.rs
++++ b/drivers/gpu/drm/asahi/g16.rs
+@@ -288,6 +288,10 @@ pub(crate) struct Bootstrap {
+     /// written to region C.
+     pub(crate) cooling: kernel::sync::Arc<crate::g16_cooling::Cooling>,
+     applied_cap: u32,
++    /// Render fence deadlines, and the cadence last published from them:
++    /// phase and period in counter ticks.
++    pub(crate) cadence: kernel::sync::Arc<crate::g16_cadence::Cadence>,
++    published_cadence: Option<(u64, u64)>,
+     context_roots: [Option<crate::g16_vm::Roots>; 64],
+     context_users: [u32; 64],
+     render_support: kernel::sync::Arc<core::sync::atomic::AtomicU64>,
+@@ -866,6 +870,8 @@ pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+             submissions: 0,
+             cooling: crate::g16_cooling::Cooling::new(&platform)?,
+             applied_cap: platform.max_pstate(),
++            cadence: crate::g16_cadence::Cadence::new()?,
++            published_cadence: None,
+             context_roots: [None; 64],
+             context_users: [0; 64],
+             render_support: kernel::sync::Arc::new(
+diff --git a/drivers/gpu/drm/asahi/g16_cadence.rs b/drivers/gpu/drm/asahi/g16_cadence.rs
+new file mode 100644
+index 000000000000..c867e7078cdc
+--- /dev/null
++++ b/drivers/gpu/drm/asahi/g16_cadence.rs
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++//! The display's frame cadence, for the firmware's performance control.
++//!
++//! A display commit that waits on a render fence gives it a deadline: the
++//! next vblank start. Deadlines a frame apart give the frame period. The
++//! driver publishes the latest deadline and the period to region C, in
++//! counter ticks, and control message 0x22 has the firmware reread them.
++//! With no deadlines coming, the last cadence stays, as macOS leaves it.
++
++use kernel::{
++    new_spinlock,
++    prelude::*,
++    sync::{Arc, SpinLock},
++    time::{Instant, Monotonic},
++};
++
++/// Gaps between deadlines that are one frame: 240 Hz to just under 59 Hz.
++const FRAME_NS: core::ops::RangeInclusive<i64> = 4_100_000..=17_000_000;
++
++/// Deadlines older than this no longer describe a display being driven.
++const STALE_NS: i64 = 500_000_000;
++
++struct Track {
++    /// The latest deadline.
++    deadline: Option<Instant<Monotonic>>,
++    /// The frame period in ns, from deadlines a frame apart; 0 until known.
++    period: i64,
++}
++
++#[pin_data]
++pub(crate) struct Cadence {
++    #[pin]
++    track: SpinLock<Track>,
++}
++
++impl Cadence {
++    pub(crate) fn new() -> Result<Arc<Self>> {
++        Arc::pin_init(
++            pin_init!(Self {
++                track <- new_spinlock!(Track { deadline: None, period: 0 }),
++            }),
++            GFP_KERNEL,
++        )
++    }
++
++    /// Note a fence deadline. Fences of one commit share theirs.
++    pub(crate) fn add_deadline(&self, deadline: Instant<Monotonic>) {
++        let mut track = self.track.lock();
++        if let Some(last) = track.deadline {
++            let gap = (deadline - last).as_nanos();
++            if gap <= 0 {
++                return;
++            }
++            if FRAME_NS.contains(&gap) {
++                track.period = gap;
++            }
++        }
++        track.deadline = Some(deadline);
++    }
++
++    /// The latest deadline and the frame period in ns, while deadlines come.
++    pub(crate) fn current(&self, now: Instant<Monotonic>) -> Option<(Instant<Monotonic>, i64)> {
++        let track = self.track.lock();
++        let deadline = track.deadline?;
++        if track.period == 0 || (now - deadline).as_nanos() > STALE_NS {
++            return None;
++        }
++        Some((deadline, track.period))
++    }
++}
+diff --git a/drivers/gpu/drm/asahi/g16_drm.rs b/drivers/gpu/drm/asahi/g16_drm.rs
+index 61308545d106..159c1dec3a44 100644
+--- a/drivers/gpu/drm/asahi/g16_drm.rs
++++ b/drivers/gpu/drm/asahi/g16_drm.rs
+@@ -441,6 +441,7 @@ pub(crate) fn register<'a>(
+     )
+     .inspect_err(|e| dev_warn!(pdev.as_ref(), "G16: no cooling device: {:?}\n", e))
+     .ok();
++    let cadence = runtime.cadence.clone();
+     let data = try_pin_init!(Data {
+         gpu_revision: runtime.gpu_revision,
+         core_mask: runtime.core_mask, maximum_frequency_khz: runtime.maximum_frequency_khz,
+@@ -470,7 +471,7 @@ pub(crate) fn register<'a>(
+         _dep_stats: dep_stats,
+         _lane_cap: lane_cap,
+         _debugfs: dir,
+-        fences <- FenceContext::new_unordered(c_str!("asahi"), c_str!("m4-execution"), Timelines), });
++        fences <- FenceContext::new_unordered(c_str!("asahi"), c_str!("m4-execution"), Timelines(cadence)), });
+     let device = drm::UnregisteredDevice::<Driver>::new(pdev, data)?;
+     // SAFETY: The registration is stored in the platform driver data and dropped on unbind.
+     Ok(unsafe {
+@@ -860,10 +861,16 @@ fn drop(self: Pin<&mut Self>) {
+ /// Completion fences. Render and compute work on one queue can finish out of
+ /// order, so each submission's fence is a timeline of its own: a later
+ /// completion must never stand in for an earlier dependency.
+-struct Timelines;
++/// They pass display deadlines on to the cadence.
++struct Timelines(kernel::sync::Arc<crate::g16_cadence::Cadence>);
+ 
++#[vtable]
+ impl FenceContextOps for Timelines {
+     type FenceDataType = ();
++
++    fn set_deadline(&self, _data: &(), deadline: kernel::time::Instant<kernel::time::Monotonic>) {
++        self.0.add_deadline(deadline);
++    }
+ }
+ 
+ /// The completion fence's signaling side lives as long as the device data that
+diff --git a/drivers/gpu/drm/asahi/g16_fw.rs b/drivers/gpu/drm/asahi/g16_fw.rs
+index c52dc07302de..1faa73203c43 100644
+--- a/drivers/gpu/drm/asahi/g16_fw.rs
++++ b/drivers/gpu/drm/asahi/g16_fw.rs
+@@ -27,6 +27,19 @@
+ pub(crate) const REGION_C_STARTED: u64 = 0x80;
+ /// Region C performance-state cap, in hundredths of a state.
+ pub(crate) const REGION_C_PSTATE_CAP: u64 = 0x98;
++/// Region C display cadence: a vblank, and the frame period, in counter
++/// ticks. The firmware rereads both on control message 0x22.
++pub(crate) const REGION_C_DISPLAY_PHASE: u64 = 0x988;
++pub(crate) const REGION_C_DISPLAY_PERIOD: u64 = 0x990;
++/// The frame periods macOS publishes: 240 Hz to 60 Hz.
++pub(crate) const DISPLAY_PERIODS: core::ops::RangeInclusive<u64> = 100_000..=400_000;
++
++/// Control message telling the firmware to reread the display cadence.
++pub(crate) fn display_cadence() -> [u8; 0x40] {
++    let mut out = [0; 0x40];
++    out[..4].copy_from_slice(&0x22u32.to_le_bytes());
++    out
++}
+ 
+ /// Control message releasing firmware's GPU context ID binding for a context
+ /// object. The fields are copied from bytes firmware maintains in the context.
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_publish.rs b/drivers/gpu/drm/asahi/g16_runtime_publish.rs
+index a9c7b410e4a9..f3705298a00e 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_publish.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_publish.rs
+@@ -254,6 +254,7 @@ pub(crate) fn flush(&mut self) -> Result {
+             return Ok(());
+         }
+         self.render_failed = true;
++        self.publish_cadence()?;
+         let config = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS);
+         let fw = self._firmware_space.as_mut().ok_or(EIO)?;
+         // The firmware rereads its performance-state cap by itself.
+@@ -329,6 +330,66 @@ pub(crate) fn flush(&mut self) -> Result {
+         Ok(())
+     }
+ 
++    /// Publish the display cadence when it has changed: a new period, or a
++    /// phase more than 100 us off the published grid. With no display
++    /// deadlines coming, publish the shortest period. A full control ring
++    /// leaves it for the next pass.
++    fn publish_cadence(&mut self) -> Result {
++        if crate::module_parameters::display_cadence.value() == 0 {
++            return Ok(());
++        }
++        let now = kernel::time::Instant::<kernel::time::Monotonic>::now();
++        let display = self.cadence.current(now);
++        let release = *g16_fw::DISPLAY_PERIODS.start();
++        if display.is_none() && self.published_cadence.is_some_and(|(_, last)| last == release) {
++            return Ok(());
++        }
++        let (counter, hz): (u64, u64);
++        // SAFETY: These instructions only read architectural timer registers.
++        unsafe {
++            core::arch::asm!("isb", "mrs {c}, cntpct_el0", "mrs {f}, cntfrq_el0",
++                             c = out(reg) counter, f = out(reg) hz);
++        }
++        if hz == 0 {
++            return Err(EIO);
++        }
++        // Both spans are under a second, so this cannot overflow.
++        let ticks = |ns: i64| ns * hz as i64 / 1_000_000_000;
++        let (phase, period) = match display {
++            Some((deadline, period_ns)) => (
++                counter.wrapping_add_signed(ticks((deadline - now).as_nanos())),
++                (ticks(period_ns) as u64)
++                    .clamp(*g16_fw::DISPLAY_PERIODS.start(), *g16_fw::DISPLAY_PERIODS.end()),
++            ),
++            // Left at a display's period, the firmware holds headless work
++            // back to it: on the J713, vkmark scores about 3,700 at 60 Hz,
++            // 6,000 with no cadence ever published, and 7,300 at 240 Hz.
++            None => (counter, release),
++        };
++        if let Some((last_phase, last_period)) = self.published_cadence {
++            let off = (phase.wrapping_sub(last_phase) as i64).rem_euclid(last_period as i64) as u64;
++            let off = off.min(last_period - off);
++            if last_period == period && off <= hz / 10_000 {
++                return Ok(());
++            }
++        }
++        let region_c = g16_fw::RootPointers::bootstrap().region_c;
++        let words = [
++            (g16_fw::REGION_C_DISPLAY_PHASE, phase.to_le_bytes()),
++            (g16_fw::REGION_C_DISPLAY_PERIOD, period.to_le_bytes()),
++        ];
++        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
++        fw.write_batch(words.len(), |n| (region_c + words[n].0, &words[n].1[..]))?;
++        crate::mem::sync();
++        if self.publish_control(&g16_fw::display_cadence())?.is_some() {
++            if self.published_cadence.map(|(_, last)| last) != Some(period) {
++                dev_info!(self.dev.as_ref(), "G16: display cadence {} ticks\n", period);
++            }
++            self.published_cadence = Some((phase, period));
++        }
++        Ok(())
++    }
++
+     /// Publish region C's submission counters, as macOS does: the number of
+     /// submissions in flight, and a count of every one started.
+     pub(super) fn count_submissions(&mut self, started: u32) -> Result {
+diff --git a/drivers/gpu/drm/asahi/g16_runtime_queues.rs b/drivers/gpu/drm/asahi/g16_runtime_queues.rs
+index 0c1b9a611300..a3d717dacaaf 100644
+--- a/drivers/gpu/drm/asahi/g16_runtime_queues.rs
++++ b/drivers/gpu/drm/asahi/g16_runtime_queues.rs
+@@ -132,7 +132,7 @@ pub(super) fn recycle_queues(&mut self) -> Result {
+     /// Returns the control cursor that acknowledges it, or None when full.
+     pub(super) fn destroy_queue_context(&mut self, base: u64) -> Result<Option<u32>> {
+         let context = base + 0x4140;
+-        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
++        let fw = self._firmware_space.as_ref().ok_or(EIO)?;
+         let ids = fw.read_u32(context)?;
+         let fields = [
+             (fw.read_u32(context + 0x24)? >> 16) as u8,
+@@ -140,6 +140,12 @@ pub(super) fn destroy_queue_context(&mut self, base: u64) -> Result<Option<u32>>
+             (ids >> 8) as u8,
+             fw.read_u32(context + 4)? as u8,
+         ];
++        self.publish_control(&g16_fw::destroy_context(context, fields))
++    }
++
++    /// Publish one device-control message without waiting. Returns the
++    /// control cursor that acknowledges it, or None when the ring is full.
++    pub(crate) fn publish_control(&mut self, message: &[u8; 0x40]) -> Result<Option<u32>> {
+         let guard = self._sgx.try_access().ok_or(ENODEV)?;
+         let head = guard.try_read32(0xd640c0)?;
+         let ack = guard.try_read32(0xd640c8)?;
+@@ -153,10 +159,8 @@ pub(super) fn destroy_queue_context(&mut self, base: u64) -> Result<Option<u32>>
+             return Ok(None);
+         }
+         let control = g16_fw::MainConfig::bootstrap(g16_fw::BUNDLE_ADDRESS).channels[12].ring;
+-        fw.write_live(
+-            control + u64::from(tail) * 64,
+-            &g16_fw::destroy_context(context, fields),
+-        )?;
++        let fw = self._firmware_space.as_mut().ok_or(EIO)?;
++        fw.write_live(control + u64::from(tail) * 64, message)?;
+         crate::mem::sync();
+         let guard = self._sgx.try_access().ok_or(ENODEV)?;
+         guard.try_write32(successor, 0xd60060)?;
