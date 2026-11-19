@@ -16,10 +16,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 2 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
-index 76bb5f70f368..0639a3097d9e 100644
+index f1bb584f8442..88405dc9193c 100644
 --- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
 +++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
-@@ -1126,7 +1126,7 @@ static void dchid_packet_work(struct work_struct *ws)
+@@ -1089,7 +1089,7 @@ static void dchid_packet_work(struct work_struct *ws)
  	if (shdr->length + sizeof(*shdr) > work->hdr.length) {
  		dev_err(dchid->dev, "Bad sub header length (%hu > %zu)\n",
  			shdr->length, work->hdr.length - sizeof(*shdr));
@@ -28,7 +28,7 @@ index 76bb5f70f368..0639a3097d9e 100644
  	}
  
  	switch (type) {
-@@ -1141,6 +1141,7 @@ static void dchid_packet_work(struct work_struct *ws)
+@@ -1104,6 +1104,7 @@ static void dchid_packet_work(struct work_struct *ws)
  		break;
  	}
  

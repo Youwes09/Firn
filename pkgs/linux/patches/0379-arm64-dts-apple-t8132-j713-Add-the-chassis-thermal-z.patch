@@ -20,7 +20,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 51 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index 1067dc1ab9db..0679d87ad7e9 100644
+index f846dd57d2c6..5a3a8ac8d0ce 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -81,6 +81,57 @@ map0 {

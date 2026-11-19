@@ -15,10 +15,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 11 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index 0ac2de464c0c..472a05969bcb 100644
+index 3b2e807b2360..408b6c2e0fcf 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
-@@ -307,6 +307,17 @@ temperature-Tp0f {
+@@ -312,6 +312,17 @@ temperature-Tp0f {
  		apple,key-id = "Tp0f";
  	};
  

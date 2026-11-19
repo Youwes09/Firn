@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Wed, 11 Nov 2026 20:42:33 -0600
+Subject: [PATCH] dt-bindings: gpio: apple,smc-gpio: Add apple,output-templates
+
+The SMC sets some lines, such as resets it sequences itself, through a
+function value instead of its output command: the J713's ADT gives the
+multi-touch AFE reset as a 4-byte write of 0x10000 to gP1c, with the
+argument in the low bits. The output command on that line does not
+reset the AFE. Describe such lines and their templates.
+
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ .../devicetree/bindings/gpio/apple,smc-gpio.yaml     | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/gpio/apple,smc-gpio.yaml b/Documentation/devicetree/bindings/gpio/apple,smc-gpio.yaml
+index 42b1bc0a10c9..d9308dea0232 100644
+--- a/Documentation/devicetree/bindings/gpio/apple,smc-gpio.yaml
++++ b/Documentation/devicetree/bindings/gpio/apple,smc-gpio.yaml
+@@ -21,6 +21,18 @@ properties:
+   '#gpio-cells':
+     const: 2
+ 
++  apple,output-templates:
++    description:
++      Lines that the SMC sets through a function value rather than its output
++      command, as some resets need. Setting such a line writes its template
++      with the line's value in the low 16 bits.
++    $ref: /schemas/types.yaml#/definitions/uint32-matrix
++    items:
++      items:
++        - description: GPIO line
++          maximum: 63
++        - description: Template, with the low 16 bits clear
++
+ required:
+   - compatible
+   - gpio-controller

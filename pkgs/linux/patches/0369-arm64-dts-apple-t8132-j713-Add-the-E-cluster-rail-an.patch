@@ -13,10 +13,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 11 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index 40b46d5a34a3..0ac2de464c0c 100644
+index 3fba13575227..3b2e807b2360 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
-@@ -291,6 +291,17 @@ power-PP0b {
+@@ -296,6 +296,17 @@ power-PP0b {
  		apple,key-id = "PP0b";
  	};
  

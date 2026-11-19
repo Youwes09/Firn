@@ -12,10 +12,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
-index 8f71ac5c4b9a..76bb5f70f368 100644
+index 049a6e1e91df..f1bb584f8442 100644
 --- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
 +++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
-@@ -970,7 +970,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
+@@ -933,7 +933,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
  		case INIT_GPIO_REQUEST: {
  			struct dchid_gpio_request *req = data;
  
@@ -24,7 +24,7 @@ index 8f71ac5c4b9a..76bb5f70f368 100644
  				break;
  
  			if (iface->gpio_id) {
-@@ -990,7 +990,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
+@@ -953,7 +953,7 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t
  		case INIT_PRODUCT_NAME: {
  			char *product = data;
  

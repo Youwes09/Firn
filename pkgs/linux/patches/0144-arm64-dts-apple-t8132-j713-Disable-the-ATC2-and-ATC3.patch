@@ -15,7 +15,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 60 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index ed87a263b264..0a527bac4b6a 100644
+index 2f7a389f0c2b..91d4956bb458 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -169,6 +169,66 @@ &pmp_report_soc_ni5 {
@@ -82,6 +82,6 @@ index ed87a263b264..0a527bac4b6a 100644
 +	status = "disabled";
 +};
 +
- #include "hwmon-laptop.dtsi"
- 
- &smc_hwmon {
+ /* The ADT's function-afe-reset: 1 holds the AFE in reset, 0 releases it. */
+ &smc_gpio {
+ 	apple,output-templates = <28 0x10000>;

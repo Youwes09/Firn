@@ -18,10 +18,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 3 insertions(+)
 
 diff --git a/drivers/hid/dockchannel-hid/dockchannel-hid.c b/drivers/hid/dockchannel-hid/dockchannel-hid.c
-index 0639a3097d9e..d8b43cabbc6a 100644
+index 88405dc9193c..7c5855550a44 100644
 --- a/drivers/hid/dockchannel-hid/dockchannel-hid.c
 +++ b/drivers/hid/dockchannel-hid/dockchannel-hid.c
-@@ -1222,6 +1222,9 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, struct dchid_hdr *hdr,
+@@ -1185,6 +1185,9 @@ static int dchid_dispatch(struct dockchannel_hid *dchid, struct dchid_hdr *hdr,
  
  	if (hdr->iface >= MAX_INTERFACES || hdr->length < sizeof(struct dchid_subhdr))
  		return 0;

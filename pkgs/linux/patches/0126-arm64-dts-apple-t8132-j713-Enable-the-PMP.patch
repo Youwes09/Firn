@@ -13,7 +13,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 78 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index c495dc64235f..ed87a263b264 100644
+index ff333a1f28be..2f7a389f0c2b 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -21,6 +21,8 @@ aliases {
@@ -105,6 +105,6 @@ index c495dc64235f..ed87a263b264 100644
 +	apple,always-on;
 +};
 +
- #include "hwmon-laptop.dtsi"
- 
- &smc_hwmon {
+ /* The ADT's function-afe-reset: 1 holds the AFE in reset, 0 releases it. */
+ &smc_gpio {
+ 	apple,output-templates = <28 0x10000>;

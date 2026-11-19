@@ -9,16 +9,16 @@ announces, and the AFE reset on SMC GPIO 28. m1n1 fills in the
 keyboard layout and maps the MTP firmware through the keyboard and mtp
 aliases.
 
-Based on Josh Rodd's J715 enablement, 10480d4c0dd6 in Niklas Sheth's
-tree.
+Based on Josh Rodd's J715 enablement, as carried in Niklas Sheth's tree
+10480d4c0dd6.
 
 Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
 ---
- arch/arm64/boot/dts/apple/t8132-j713.dts | 49 ++++++++++++++++++++++++
- 1 file changed, 49 insertions(+)
+ arch/arm64/boot/dts/apple/t8132-j713.dts | 54 ++++++++++++++++++++++++
+ 1 file changed, 54 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index ec49d88ca313..c495dc64235f 100644
+index ec49d88ca313..ff333a1f28be 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -17,6 +17,12 @@ / {
@@ -34,7 +34,7 @@ index ec49d88ca313..c495dc64235f 100644
  	led-controller {
  		compatible = "pwm-leds";
  		led-0 {
-@@ -42,6 +48,49 @@ &fpwm1 {
+@@ -42,6 +48,54 @@ &fpwm1 {
  	status = "okay";
  };
  
@@ -51,7 +51,7 @@ index ec49d88ca313..c495dc64235f 100644
 +};
 +
 +&mtp_hid {
-+	apple,afe-reset-gpios = <&smc_gpio 28 GPIO_ACTIVE_LOW>;
++	apple,afe-reset-gpios = <&smc_gpio 28 GPIO_ACTIVE_HIGH>;
 +
 +	status = "okay";
 +
@@ -79,6 +79,11 @@ index ec49d88ca313..c495dc64235f 100644
 +
 +&mtp_mbox {
 +	status = "okay";
++};
++
++/* The ADT's function-afe-reset: 1 holds the AFE in reset, 0 releases it. */
++&smc_gpio {
++	apple,output-templates = <28 0x10000>;
 +};
 +
  #include "hwmon-laptop.dtsi"

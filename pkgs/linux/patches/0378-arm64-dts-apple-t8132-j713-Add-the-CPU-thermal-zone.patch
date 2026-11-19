@@ -30,7 +30,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 49 insertions(+)
 
 diff --git a/arch/arm64/boot/dts/apple/t8132-j713.dts b/arch/arm64/boot/dts/apple/t8132-j713.dts
-index 472a05969bcb..1067dc1ab9db 100644
+index 408b6c2e0fcf..f846dd57d2c6 100644
 --- a/arch/arm64/boot/dts/apple/t8132-j713.dts
 +++ b/arch/arm64/boot/dts/apple/t8132-j713.dts
 @@ -12,6 +12,7 @@
@@ -94,7 +94,7 @@ index 472a05969bcb..1067dc1ab9db 100644
  };
  
  &wifi0 {
-@@ -281,6 +328,8 @@ &ps_nub_spi0 {
+@@ -286,6 +333,8 @@ &smc_gpio {
  #include "hwmon-laptop.dtsi"
  
  &smc_hwmon {
