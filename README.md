@@ -82,6 +82,10 @@ git tree leaves untracked files out, so build the system with
 Patches keep their authors. Upstream kernel patches are as posted, and
 changes from [Omarchy-M4-Native](https://github.com/Kb2uka/Omarchy-M4-Native)
 are credited to KB2UKA, in the kernel series and in m1n1's patches.
+Some imported commits, most of them in the GPU series from Gravity Linux,
+do not yet carry their authors' `Signed-off-by`; they are listed in
+[docs/TODO.md](docs/TODO.md) and are not ready to send upstream until
+their authors sign them off.
 The installer patches credit the Gravity Linux installer, as shipped by
 Omarchy-M4-Native, where they follow it. The installer kit ships the
 licence notices of everything in the installer. The logo
