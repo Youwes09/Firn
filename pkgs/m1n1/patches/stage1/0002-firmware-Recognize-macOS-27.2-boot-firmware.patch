@@ -1,4 +1,4 @@
-From 9e4f47ccfd9577714661338f3144d356b7d69701 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Wed, 4 Nov 2026 15:42:35 -0600
 Subject: [PATCH] firmware: Recognize macOS 27.2 boot firmware
@@ -14,7 +14,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  2 files changed, 2 insertions(+)
 
 diff --git a/src/firmware.c b/src/firmware.c
-index 18465c8..92966a5 100644
+index 18465c80..92966a5a 100644
 --- a/src/firmware.c
 +++ b/src/firmware.c
 @@ -203,6 +203,7 @@ const struct fw_version_info fw_versions[NUM_FW_VERSIONS] = {
@@ -26,7 +26,7 @@ index 18465c8..92966a5 100644
  };
  
 diff --git a/src/firmware.h b/src/firmware.h
-index 80955ef..be7b64e 100644
+index 80955ef9..be7b64e9 100644
 --- a/src/firmware.h
 +++ b/src/firmware.h
 @@ -186,6 +186,7 @@ enum fw_version {
@@ -37,6 +37,3 @@ index 80955ef..be7b64e 100644
      NUM_FW_VERSIONS,
  };
  
--- 
-2.54.0
-

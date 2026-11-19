@@ -18,6 +18,9 @@ in [ISSUES.md](ISSUES.md).
 - [ ] firn-link: the build machine's access point drops the Air after
       about ten idle minutes, and iwd on the Air does not notice. After a
       reboot the Air takes about five minutes to rejoin it.
+- [ ] m1n1 stage 1 on Gravity's 15 November base, through the installer.
+- [ ] Why headless vkmark is about 14 % faster on Gravity's 15 November
+      m1n1 than on the 14 October one, with the same GPU calibration.
 - [ ] The GPU cooling device at the chassis zone's real trips (42 and
       45 C), under a long combined CPU and GPU load.
 

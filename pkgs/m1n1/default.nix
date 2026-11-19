@@ -11,14 +11,14 @@ assert lib.elem stage [
 ];
 (m1n1.override { customLogo = ../../artwork/firn-logo.png; }).overrideAttrs (
   finalAttrs: old: {
-    version = "1.6.1-unstable-2026-10-14";
+    version = "1.6.1-unstable-2026-11-15";
 
     src = fetchFromGitHub {
       owner = "GravityLinux";
       repo = "bootloader";
-      rev = "f02d4a52017915febb222539636b5b025a70407a";
+      rev = "8d7217dabe8ad677ea7f1054ed3b29a66291e8a7";
       fetchSubmodules = true;
-      hash = "sha256-9OPkQgDi2PTqfZCi0F9G3mu4URLArQgy151hd43Da48=";
+      hash = "sha256-gHZSyy2u80JoRRb/ZAuJro+q9UgKVqb/Wo45MwwIuq0=";
     };
 
     cargoDeps = rustPlatform.fetchCargoVendor {
@@ -47,7 +47,7 @@ assert lib.elem stage [
     '';
 
     env = (old.env or { }) // {
-      M1N1_VERSION_TAG = "firn-f02d4a5-stage${toString stage}";
+      M1N1_VERSION_TAG = "firn-8d7217d-stage${toString stage}";
     };
   }
 )

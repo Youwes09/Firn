@@ -1,11 +1,12 @@
-From 7978f07ee067cda7012dfb14cb80e03ad574db51 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Wed, 28 Oct 2026 23:35:56 -0500
 Subject: [PATCH] kboot_gpu: Boot without the GPU when the T8132 handoff fails
 
-The T8132 handoff accepts only the J773g's performance tables: eleven
-voltage steps, where the J713 has ten. A mismatch failed the whole boot
-and left m1n1 in the proxy.
+A board without a calibration entry gets its GPU node disabled, but any
+other failure in the T8132 handoff, such as performance tables that do
+not match the board's calibration or a missing memory region, still
+fails the whole boot and leaves m1n1 in the proxy.
 
 The handoff enables the GPU node last, so on failure it is still
 disabled. Log the failure and boot without the GPU instead.
@@ -16,10 +17,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 6 insertions(+), 2 deletions(-)
 
 diff --git a/src/kboot_gpu.c b/src/kboot_gpu.c
-index f394e52..990202c 100644
+index 4f130f5c..a4e2dad9 100644
 --- a/src/kboot_gpu.c
 +++ b/src/kboot_gpu.c
-@@ -632,8 +632,12 @@ static int dt_set_gpu_t8132(void *dt)
+@@ -738,8 +738,12 @@ static int dt_set_gpu_t8132(void *dt)
  
  int dt_set_gpu(void *dt)
  {

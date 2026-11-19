@@ -29,8 +29,8 @@ the work happened.
 - **m1n1's GPU handoff**, in Gravity Linux's bootloader: the memory regions,
   firmware build, core mask and performance tables. When it fails, stage 2
   boots without the GPU instead of stopping. The J713 needs Niklas's
-  per-board calibration (stage 2 patches 0012 to 0017); without it m1n1
-  leaves the GPU node disabled.
+  per-board calibration, which Gravity's bootloader carries since
+  15 November; without it m1n1 leaves the GPU node disabled.
 
 ## First runs (2026-11-13)
 
@@ -102,7 +102,7 @@ Our driver left it zero, so the firmware read no sensors, and when PMP's
 GPU loop raised an alarm the firmware found no sensor to match it. On
 the J713 it is 0x6b79: sensor IDs 0, 3, 4, 5, 6, 8, 9, 11, 13 and 14,
 exactly the IDs `/arm-io/pmgr` `mtr-polynom-fuse-agx` lists. m1n1 passes
-them as `apple,m4-sensor-mask` (stage 2 patch 0018), and the driver writes
+them as `apple,m4-sensor-mask` (Firn's stage 2 patch 0007), and the driver writes
 the mask. Setting only this word stops the crash and starts sampling:
 nine records from bundle 0x8498 (0x28 bytes per sensor ID) and a summary
 at 0x8e9c fill in, at about 400 samples a second, around 30 °C at idle.
@@ -408,3 +408,16 @@ a display's period, the firmware holds headless work back to it. With
 Only commits that hand KMS an unsignaled fence give a deadline:
 `kmscube -A` does, through its in-fences. vkmark's KMS mode gave none in
 these tests, so the GPU kept the shortest period under it.
+
+### m1n1 from Gravity's tip
+
+m1n1 now builds from Gravity's bootloader of 15 November (`8d7217dabe8`),
+which carries the J713 GPU calibration and the DAPF work Firn patched in
+before; Firn keeps seven stage 2 patches and two stage 1 patches on top.
+Booted on the J713 on 2026-11-19: keyboard and trackpad, the GPU handoff
+with the same calibration (frequencies, voltages, 26,250 mW, core mask
+0x3bd, sensor mask 0x6b79), PMP with no MTR crash, and every GPU test
+above. Headless vkmark then scored 8,369 to 8,701 at 8.1 to 8.3 W, against
+7,315 to 7,537 at the same power on the earlier m1n1; why is not known
+yet. Stage 1 lives in the macOS stub and has not been reinstalled with the
+new base.

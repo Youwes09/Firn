@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Youwes09 <yuvi.shen@outlook.com>
+Date: Tue, 17 Nov 2026 00:03:17 -0600
+Subject: [PATCH] kboot_gpu: Pass the T8132 GPU's temperature sensors to Linux
+
+The G16 firmware reads only the MTR sensors the driver enables. They
+are the IDs listed in /arm-io/pmgr mtr-polynom-fuse-agx, so hand them
+over as a bit mask in apple,m4-sensor-mask. The J713 lists 0, 3, 4, 5,
+6, 8, 9, 11, 13 and 14 (0x6b79), as macOS sets.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
+---
+ src/kboot_gpu.c | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/src/kboot_gpu.c b/src/kboot_gpu.c
+index a4e2dad9..b568e26e 100644
+--- a/src/kboot_gpu.c
++++ b/src/kboot_gpu.c
+@@ -609,6 +609,36 @@ static const struct t8132_gpu_board *t8132_gpu_board(void)
+     return NULL;
+ }
+ 
++/* The GPU's temperature sensors are the IDs present in the fuse table. */
++static int t8132_gpu_sensor_mask(u32 *mask)
++{
++    int pmgr = adt_path_offset(adt, "/arm-io/pmgr");
++    if (pmgr < 0)
++        bail("ADT: GPU: missing pmgr node\n");
++
++    u32 len;
++    const u8 *fuse = adt_getprop(adt, pmgr, "mtr-polynom-fuse-agx", &len);
++    if (!fuse)
++        bail("ADT: GPU: missing mtr-polynom-fuse-agx\n");
++
++    *mask = 0;
++    u32 off = 0;
++    while (off < len) {
++        u32 id, size;
++        if (len - off < 8)
++            bail("ADT: GPU: truncated mtr-polynom-fuse-agx\n");
++        memcpy(&id, fuse + off, 4);
++        memcpy(&size, fuse + off + 4, 4);
++        if (id >= 32 || size > len - off - 8)
++            bail("ADT: GPU: bad mtr-polynom-fuse-agx entry\n");
++        *mask |= BIT(id);
++        off += 8 + size;
++    }
++    if (!*mask)
++        bail("ADT: GPU: no MTR sensors\n");
++    return 0;
++}
++
+ static int dt_set_gpu_t8132_perf(void *dt, int gpu, int sgx,
+                                  const struct t8132_gpu_board *board)
+ {
+@@ -674,6 +704,11 @@ static int dt_set_gpu_t8132_perf(void *dt, int gpu, int sgx,
+         fdt_setprop_u32(dt, gpu, "apple,m4-max-power-mw", board->max_power_mw) ||
+         fdt_setprop_u32(dt, gpu, "apple,m4-core-mask", t8132_gpu_core_mask(board)))
+         return -1;
++
++    u32 sensors;
++    if (t8132_gpu_sensor_mask(&sensors) ||
++        fdt_setprop_u32(dt, gpu, "apple,m4-sensor-mask", sensors))
++        return -1;
+     return 0;
+ }
+ 

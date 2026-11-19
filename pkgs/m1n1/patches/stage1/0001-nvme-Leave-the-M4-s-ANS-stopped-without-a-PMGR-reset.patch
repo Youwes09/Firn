@@ -1,4 +1,4 @@
-From a2509f76dfa5ad9cb514118d399e1586b4895deb Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: KB2UKA <kb2uka80@gmail.com>
 Date: Tue, 27 Oct 2026 22:06:39 -0500
 Subject: [PATCH] nvme: Leave the M4's ANS stopped without a PMGR reset
@@ -23,7 +23,7 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 18 insertions(+), 6 deletions(-)
 
 diff --git a/src/nvme.c b/src/nvme.c
-index 5ced2c79..0775fdbf 100644
+index 65cc7d7b..4bea09e4 100644
 --- a/src/nvme.c
 +++ b/src/nvme.c
 @@ -176,6 +176,22 @@ static void free_queue(struct nvme_queue *q)
@@ -71,6 +71,3 @@ index 5ced2c79..0775fdbf 100644
      rtkit_free(nvme_rtkit);
      sart_free(nvme_sart);
      asc_free(nvme_asc);
--- 
-2.54.0
-

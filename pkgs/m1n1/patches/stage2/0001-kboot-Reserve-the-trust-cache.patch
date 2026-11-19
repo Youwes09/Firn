@@ -1,4 +1,4 @@
-From fbf3775d0b1a238521821d1d385d148485128aa8 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Youwes09 <yuvi.shen@outlook.com>
 Date: Wed, 28 Oct 2026 21:13:32 -0500
 Subject: [PATCH] kboot: Reserve the trust cache
@@ -17,10 +17,10 @@ Signed-off-by: Youwes09 <yuvi.shen@outlook.com>
  1 file changed, 9 insertions(+)
 
 diff --git a/src/kboot.c b/src/kboot.c
-index c5ed848..7b8585b 100644
+index f6271198..7f09a66f 100644
 --- a/src/kboot.c
 +++ b/src/kboot.c
-@@ -2787,6 +2787,15 @@ int kboot_prepare_dt(void *fdt)
+@@ -2802,6 +2802,15 @@ int kboot_prepare_dt(void *fdt)
      if (fdt_add_mem_rsv(dt, (u64)_base, ((u64)_end) - ((u64)_base)))
          bail("FDT: couldn't add reservation for m1n1\n");
  
