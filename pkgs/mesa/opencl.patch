@@ -1,0 +1,41 @@
+diff --git a/meson.build b/meson.build
+index 58b0111..fb231aa 100644
+--- a/meson.build
++++ b/meson.build
+@@ -2112,7 +2112,7 @@ endif
+ 
+ dep_clang = null_dep
+ if with_clc
+-  llvm_libdir = dep_llvm.get_variable(cmake : 'LLVM_LIBRARY_DIR', configtool: 'libdir')
++  llvm_libdir = get_option('clang-libdir')
+ 
+   dep_clang = cpp.find_library('clang-cpp', dirs : llvm_libdir, required : false)
+ 
+diff --git a/meson.options b/meson.options
+index e7ad4e8..875e726 100644
+--- a/meson.options
++++ b/meson.options
+@@ -924,3 +924,10 @@ option('hk-cpu-sub-timing', type : 'boolean', value : false,
+ 
+ option('hk-gpu-busy-counters', type : 'boolean', value : false,
+        description : 'Build HK firmware-timestamp GPU busy intervals (runtime: HK_GPU_BUSY_FILE)')
++
++option(
++  'clang-libdir',
++  type : 'string',
++  value : '',
++  description : 'Locations to search for clang libraries.'
++)
+diff --git a/src/gallium/targets/rusticl/meson.build b/src/gallium/targets/rusticl/meson.build
+index 2b214ad..7f91939 100644
+--- a/src/gallium/targets/rusticl/meson.build
++++ b/src/gallium/targets/rusticl/meson.build
+@@ -64,7 +64,7 @@ configure_file(
+   configuration : _config,
+   input : 'rusticl.icd.in',
+   output : 'rusticl.icd',
+-  install : true,
++  install : false,
+   install_tag : 'runtime',
+   install_dir : join_paths(get_option('sysconfdir'), 'OpenCL', 'vendors'),
+ )
