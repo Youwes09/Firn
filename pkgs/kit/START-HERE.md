@@ -2,7 +2,8 @@
 
 Firn is an experimental NixOS for the 13-inch M4 MacBook Air (Mac16,12 /
 J713) only, with a minimal-risk profile: the parts that are not finished
-(speakers, GPU and others) stay off, and the CPU clocks are capped.
+(speakers and others) stay off, and the CPUs and GPU are throttled where
+macOS holds them.
 
 The installer is Gravity Linux's installer with the J713 added, built by
 the Firn project. Firn is not made, endorsed or supported by Gravity

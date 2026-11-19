@@ -8,6 +8,7 @@ Everything that runs on the Air is built from source here:
 - the kernel: mainline Linux with a J713-only patch series, each patch
   credited to its authors;
 - m1n1 stage 1 and stage 2: upstream m1n1 with Firn's patches;
+- Mesa: Gravity Linux's, whose asahi drivers support the M4's GPU;
 - the macOS-side installer: Gravity Linux's installer with the J713 added.
 
 The installer runs under python.org's Python for macOS and Homebrew's libffi,
@@ -16,14 +17,15 @@ both pinned by hash, as Asahi Linux's own installer does.
 ## What works
 
 Keyboard, trackpad, NVMe, Wi-Fi, Bluetooth, the power management
-coprocessor (PMP), and the internal display through its display
-controller (DCP), with brightness and blanking. Set
-`hardware.firn.wifiRegion` (for example `"US"`) for 5 GHz Wi-Fi.
+coprocessor (PMP), the internal display through its display controller
+(DCP), with brightness and blanking, and the GPU: OpenGL, OpenGL ES,
+Vulkan and OpenCL through Gravity Linux's Mesa
+([docs/GPU.md](docs/GPU.md)). Thermal zones throttle the CPUs and the
+GPU. Set `hardware.firn.wifiRegion` (for example `"US"`) for 5 GHz Wi-Fi.
 
 USB-C is built but not yet tested ([docs/TODO.md](docs/TODO.md)).
 
-Not supported: speakers, headphones, GPU, external displays, CPU clocks
-above the heat caps, suspend. Closing the lid powers off. Sustained writes of
+Not supported: speakers, headphones, external displays, suspend. Closing the lid powers off. Sustained writes of
 several GB can crash the storage controller; see
 [docs/ISSUES.md](docs/ISSUES.md).
 
@@ -31,15 +33,16 @@ several GB can crash the storage controller; see
 
 | Path | What |
 |---|---|
-| `modules/` | The NixOS module: kernel, boot, firmware, power, root image |
+| `modules/` | The NixOS module: kernel, boot, firmware, power, graphics, root image |
 | `pkgs/linux/` | The kernel and devicetree: configuration, patch series, module list |
 | `pkgs/m1n1/` | m1n1 stage 1 and stage 2 |
+| `pkgs/mesa/` | Mesa, for the GPU |
 | `pkgs/installer/` | The macOS-side installer |
 | `pkgs/firn-boot/` | Writes each generation into `boot.bin`, with tests |
 | `pkgs/firn-report/` | A read-only hardware report |
 | `pkgs/kit/` | The installer kit: installer, OS package and guide |
 | `tests/` | Policy checks, kernel module list, devicetree schema, VM boot |
-| `examples/minimal/` | A console-only system |
+| `examples/minimal/` | A console-only system, with graphics for GPU work |
 
 ## Booting
 
@@ -64,6 +67,9 @@ nix build .#checks.x86_64-linux.policy .#checks.x86_64-linux.kernel-modules
 
 The rest of the system needs an aarch64 builder, or
 `boot.binfmt.emulatedSystems = [ "aarch64-linux" ]` on the build machine.
+Mesa is the one large build, and slow under emulation: build
+`.#packages.aarch64-linux.mesa` on an aarch64 machine, the Air itself
+included, and copy it back.
 [docs/RUNBOOK.md](docs/RUNBOOK.md) lists the test tiers;
 [docs/GUIDE.md](docs/GUIDE.md) is the install guide, also shipped in the kit.
 Machine-local settings such as SSH keys go in `examples/minimal/access.nix`,

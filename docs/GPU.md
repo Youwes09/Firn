@@ -1,14 +1,15 @@
 # GPU (T8132, G16)
 
-Not supported yet. The kernel series has no GPU driver, and the policy check
-makes sure none is built.
+Supported. The kernel series carries `asahi_m4`, Cody Ho's and Niklas
+Sheth's G16 driver from Gravity Linux on mainline's DRM, dma_fence and
+RTKit, and `pkgs/mesa` is Gravity Linux's Mesa. With `hardware.graphics`
+on, the Air renders OpenGL, OpenGL ES and Vulkan and runs OpenCL, on the
+internal display too, with PMP running (see "In Firn" below).
 
-The driver is being ported on its own branch, `firn/gpu-next` (in
-`~/Universal/M4-Nix/src/firn-gpu`): Cody Ho's and Niklas Sheth's `asahi_m4`
-history on Firn's kernel, moved to mainline's dma_fence and to an RTKit
-registration the device owns. With Gravity Linux's Mesa it renders OpenGL ES
-and Vulkan on the J713, on the internal display too, with PMP running (see
-"Rendering" below). `firn/gpu` is the earlier, firmware-only state.
+The driver was ported on its own branch, `firn/gpu-next` (in
+`~/Universal/M4-Nix/src/firn-gpu`), now merged into `firn/next`. `firn/gpu`
+is the earlier, firmware-only state. The sections below are in the order
+the work happened.
 
 ## Measured on the J713
 
@@ -186,14 +187,10 @@ of Niklas's newer commits carry no `Signed-off-by` (see TODO).
 
 ### Mesa
 
-Gravity's Mesa (`GravityLinux/mesa` `f66f380c648`, 11 November), built on the
-Air with four to six cores from `scratchpad/gpudeploy-next/mesa.nix`, an
-override of nixpkgs' Mesa 26.1.8 recipe: asahi, llvmpipe and softpipe, the
-asahi and swrast Vulkan drivers, no rusticl, and Mesa 26.3's clang library
-path. It is installed beside the system, not in it; tests point
-`LD_LIBRARY_PATH`, `__EGL_VENDOR_LIBRARY_FILENAMES` or `VK_ICD_FILENAMES` at
-it. It reports "Apple M4 (G16G B1)", OpenGL ES 3.0 and Vulkan 1.4.359
-(Honeykrisp).
+Gravity's Mesa (`GravityLinux/mesa` `f66f380c648`, 11 November). For these
+first tests it was a scratch override of nixpkgs' Mesa, installed beside
+the system; it is now `pkgs/mesa` ("In Firn" below). It reports "Apple M4
+(G16G B1)", OpenGL ES 3.0 and Vulkan 1.4.359 (Honeykrisp).
 
 It is 1,117 commits and about 148,000 lines on top of upstream Mesa from
 21 August, almost all Niklas's: the Apple9 compiler, Honeykrisp support and
@@ -255,12 +252,11 @@ the firmware retunes. The driver does not send that message yet.
 
 ### Open
 
-- **The chassis.** Under sustained GPU load the chassis passes the 45 C the
-  chassis zone holds the CPUs to (48 C seen): the zone has only the CPUs as
-  cooling devices. The GPU needs a cooling device that lowers its
-  performance-state limit at runtime; how macOS does that is a question for
-  Syd.
-- **Display cadence** (message 0x22), as above.
+- **The chassis.** Under sustained GPU load the chassis passed the 45 C the
+  chassis zone holds the CPUs to (48 C seen), as the zone had only the CPUs
+  as cooling devices. Fixed: the GPU is now one ("In Firn" below).
+- **Display cadence** (message 0x22), as above; parked until DCP reports
+  real vblank timing ("In Firn" below).
 - **Workarounds in the imported driver:** a 50 ms safety poll that retires
   Work whose completion notification never came (never fired on the J713
   so far); "A4 wedge" detection, which only reports a render whose fragment
@@ -271,8 +267,6 @@ the firmware retunes. The driver does not send that message yet.
 - **DCP:** `kmscube` without `-A` gets EBUSY on its first legacy page flip.
 - **Region C** words above, and `0x7fffffff` in a sensor's current
   temperature now and then (between samples, by the look of it).
-- **Mesa in Firn:** a package and `hardware.graphics` once the kernel series
-  takes the driver.
 
 ### Memory clock
 
@@ -282,3 +276,81 @@ Measured with a single-core pointer chase and memcpy
 101 ns and 44 GB/s, within 5 s of the load starting and back within 5 s of
 it ending. PMP scales memory with GPU demand by itself, so the GPU does not
 need Gravity's activity hook. CPU work gets no floor at all (TODO).
+
+## In Firn (2026-11-19)
+
+### Driver additions
+
+- **Submission counters.** Region C +0x7c holds the submissions in
+  flight and +0x80 every submission started; macOS keeps both (17,982
+  started after boot), the driver left them zero. The firmware reads them:
+  with both kept, headless vkmark scores 6000 to 6124 over three runs,
+  against 5319 to 5604.
+- **The performance-state cap.** Region C +0x98, in hundredths of a state,
+  caps the state the firmware picks, and the firmware rereads it as it
+  runs, with no message. Lowered to 300 at run time, effect2d falls from
+  5460 to 3260 FPS; back at 900 it recovers.
+- **A cooling device.** The driver registers the GPU as cooling device
+  `gpu`, with states 0 to 8 lowering the cap from the top state 9 to state
+  1. It is a power actor for the power allocator governor: power at each
+  state is dynamic power, frequency times the square of the core voltage
+  (`apple,m4-freq-a`, `apple,m4-core-voltage`), scaled to
+  `apple,m4-max-power-mw` (26,250 mW), and the requested power is that
+  maximum times the time the GPU had work in flight. The chassis zone maps
+  it beside the P cores, with the same weight. With the zone's trips
+  lowered to 28 and 31 C, under combined CPU and GPU load, the governor
+  moved the GPU through states 1 to 3, the P cores to 19 of 19 and the E
+  cores to 6 of 7, and held the chassis at 28 to 29 C for 13 minutes.
+  Still to run: a soak at the real 42 and 45 C trips.
+- **The binding.** `apple,agx.yaml` documents `apple,agx-t8132`, with its
+  five memory regions and `#cooling-cells`, so
+  `checks.devicetree-schema` validates the node.
+
+The facts behind the counters and the cap are from interface notes by
+Ibrahim Syed, written from macOS's GPU driver, and checked on the J713 as
+above; those behind the thermal and power limits at +0x88 and +0x8c are
+from Syd Garlathy's.
+
+### Mesa
+
+`pkgs/mesa` is nixpkgs' Mesa recipe on Gravity's tree, with the drivers
+this machine runs: asahi for OpenGL, OpenGL ES, Vulkan and OpenCL
+(rusticl), and llvmpipe and lavapipe. The features that need drivers it
+leaves out are off, each with its reason in the file. nixpkgs' clang
+library patch is rebased onto the tree, and the Rust crates come from the
+tree's own wraps (`update-wraps.py`), five of which nixpkgs' list lacks.
+`modules/graphics.nix` makes it `hardware.graphics.package`, ahead of
+nixpkgs' Mesa, and the policy check holds the example to it.
+
+OpenCL is Mesa's `opencl` output, left out of the system as nixpkgs does,
+since it brings in most of LLVM. To use it:
+`hardware.graphics.extraPackages = [ config.hardware.firn.mesa.opencl ];`.
+Rusticl warns at start that it did not find Mesa's patched libclc; nixpkgs'
+libclc is upstream's.
+
+### Tests on the J713
+
+Through the system's own graphics stack, with no library paths set:
+
+| Test | Result |
+|---|---|
+| `eglclear` (`firn-gpu-runs/tests/`) | 1,000 frames, every pixel right |
+| `vulkaninfo --summary` | Apple M4 (G16G B1), Honeykrisp, Vulkan 1.4.359; lavapipe beside it |
+| `eglinfo -B -p surfaceless` | OpenGL core, compatibility and ES on the M4 |
+| OpenCL: `clinfo`, then `fma(a, b, sqrt(a))` over 16 M floats | OpenCL 3.1, 8 compute units; results within float rounding, 4.8 ms a pass |
+| `vkmark --winsys headless`, three runs | 6027, 6013, 5569, on battery, no fault |
+| `sleep 60 \| kmscube -D /dev/dri/card1 -A -c 600` | 60.01 FPS on the panel |
+
+kmscube reads its standard input to stop: over ssh, give it an idle pipe,
+as above, or it stops after the first frame.
+
+### Display cadence, parked
+
+Publishing the display's frame period (+0x988 phase, +0x990 period in
+24 MHz ticks, then control message 0x22) works: with 400,000 published the
+firmware's controller words match macOS's (bundle +0x5384 400000, +0x7f68
+16666, +0x7f6c 2), and it paces rendering to the frame, headless vkmark
+falling to 3699. The driver needs a frame period to publish, and the only
+source is fence deadlines, which need DCP to report vblank timing; DCP has
+no `drm_vblank_init()` and fakes its vblank events. The work is kept in
+`~/Universal/M4-Nix/gpu/parked/` until DCP does.

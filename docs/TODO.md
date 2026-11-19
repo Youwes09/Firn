@@ -16,7 +16,10 @@ in [ISSUES.md](ISSUES.md).
       6 and 7 opaque.
 - [ ] The NVMe write crash (ISSUES.md 1) on the mainline series.
 - [ ] firn-link: the build machine's access point drops the Air after
-      about ten idle minutes, and iwd on the Air does not notice.
+      about ten idle minutes, and iwd on the Air does not notice. After a
+      reboot the Air takes about five minutes to rejoin it.
+- [ ] The GPU cooling device at the chassis zone's real trips (42 and
+      45 C), under a long combined CPU and GPU load.
 
 ## Workarounds to replace
 
@@ -43,11 +46,13 @@ in [ISSUES.md](ISSUES.md).
   - [x] The watchdog thresholds, the register-window access flags and
         slot 36.
   - [x] Render with Gravity Linux's Mesa (GPU.md, "Rendering").
-  - [ ] A GPU cooling device for the chassis zone.
-  - [ ] The display cadence message (0x22).
+  - [x] A GPU cooling device for the chassis zone (GPU.md, "In Firn").
+  - [ ] The display cadence message (0x22): written and tested, parked
+        until DCP reports vblank timing, the only source of a frame period
+        (GPU.md, "Display cadence, parked").
   - [ ] Find the causes behind the safety poll, the A4 wedge and the
         operand-pool lower bound.
-  - [ ] Bring `firn/gpu-next` into the kernel series; let
+  - [x] Bring `firn/gpu-next` into the kernel series; let
         `tests/policy.nix` allow `DRM_ASAHI_M4`; package Mesa and enable
         `hardware.graphics`.
   - [ ] Mesa as a clean series of its own (1,117 commits on upstream).
@@ -57,8 +62,11 @@ in [ISSUES.md](ISSUES.md).
         state. Gravity's vote driver votes a fixed F6/VOVD; find what macOS
         votes first. It writes PMP votes and CPM registers: ask before
         testing. Its GPU hook is not needed for the GPU's own memory.
-  - [ ] Document `apple,agx-t8132` in `apple,agx.yaml`; the node is not
-        validated today.
+        Blocked for now: a floor needs CPU stall counts, and the J713's
+        stall counters read zero and refuse writes from Linux (an enable
+        write is undefined). How macOS enables them is an open question
+        to Ibrahim Syed.
+  - [x] Document `apple,agx-t8132` in `apple,agx.yaml`.
 - [ ] DisplayPort alt mode and external displays.
 - [ ] RTKit oslog types 3, 4 and 5: 4 and 5 are the firmware's image ID and
       name; decode 3 before handling them.
@@ -89,10 +97,11 @@ in [ISSUES.md](ISSUES.md).
       PMP devicetree and his two display fixes from Gravity 83fb190f1108;
       KB2UKA's reboot and AIC commits; Janne Grunau's "Warn only once
       about failed calls" and 12.3 flush fix, unsigned in Asahi's tree.
-      On `firn/gpu`: Cody Ho's RTKit early crashlog (1d87a283bc6b) and
-      Niklas Sheth's GPU devicetree (a4092eb5b591). On `firn/gpu-next`:
-      47 of Niklas Sheth's 50 newer G16 commits, and his `show_fdinfo`
-      Rust hook.
+      From the GPU series: 124 of Niklas Sheth's commits and 15 of Cody
+      Ho's, including the RTKit early crash log and the GPU devicetree,
+      and Asahi Lina's "rust: io: mem: Add Mem abstraction", unsigned in
+      Asahi's tree too. A request to Niklas and Cody is drafted in
+      `~/Universal/M4-Nix/gpu/signoff-request-niklas-cody.txt`.
 - [ ] checkpatch clean-ups in cpuidle-apple, Sasha's M3 ATC PHY and Alba
       Mendez's SPMI commits; a fuller Kconfig help and MAINTAINERS entries
       for the PMP drivers, whose bindings name Sven Peter as maintainer.

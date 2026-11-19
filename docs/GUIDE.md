@@ -25,9 +25,9 @@ What can still go wrong, and why the backup matters:
   with Apple Configurator, can restore it ("DFU restore"). That erases the Mac,
   which is the other reason for the backup.
 
-Hardware risk is kept low: speakers, GPU and other unfinished parts are
-switched off and cannot be switched on by mistake, and the CPU clocks are
-capped at boot, as nothing throttles them yet.
+Hardware risk is kept low: speakers and other unfinished parts are
+switched off and cannot be switched on by mistake, and thermal zones
+throttle the CPUs and the GPU where macOS holds them.
 
 ## Part 1: prepare (about an hour, mostly the backup)
 

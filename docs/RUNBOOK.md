@@ -11,6 +11,7 @@ Test tiers, in order. Do not go on past a failed gate.
 | Kit | PC | `nix build .#packages.x86_64-linux.kit` | Builds; `BUILD-REPORT.json` lists the installer's own checks |
 | T3 preflight | Mac, read-only | `bash preflight.command` | `RESULT: ready to install`, or WARN lines understood |
 | T4 install | Mac | [GUIDE.md](GUIDE.md), parts 4 and 5 | Each stage's checks |
+| T5 GPU | Air | [GPU.md](GPU.md), "In Firn" | `renderD128` and the `gpu` cooling device exist; eglclear exact; vkmark, kmscube and OpenCL as listed there |
 
 T2 boots the shipped initrd in QEMU's virtual arm64 machine, on the J713 kernel
 plus the drivers that machine needs (`pkgs/linux/qemu-virt.config`). It tests
