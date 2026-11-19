@@ -12,6 +12,7 @@
     ./power.nix
     ./image.nix
     ./link.nix
+    ./graphics.nix
   ];
 
   options.hardware.firn = {

@@ -20,6 +20,7 @@
   };
 
   hardware.bluetooth.enable = true;
+  hardware.graphics.enable = true;
 
   users.users.m4 = {
     isNormalUser = true;

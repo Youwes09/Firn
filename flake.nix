@@ -45,6 +45,7 @@
             inherit (packages) installer;
           };
           minimal = minimal.config.system.build.toplevel;
+          mesa = minimal.config.hardware.firn.mesa;
           linux = aarch64.callPackage ./pkgs/linux { kernelPatches = [ ]; };
           m1n1-stage1 = aarch64.callPackage ./pkgs/m1n1 { stage = 1; };
           m1n1-stage2 = aarch64.callPackage ./pkgs/m1n1 { stage = 2; };

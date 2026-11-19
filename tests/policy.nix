@@ -43,6 +43,8 @@ let
     "no audio server is enabled" =
       !cfg.services.pipewire.enable && !(cfg.services.pulseaudio.enable or false);
     "the GPU driver is built" = (kernel.config.CONFIG_DRM_ASAHI_M4 or "n") == "m";
+    "graphics are on, with Firn's Mesa" =
+      cfg.hardware.graphics.enable && cfg.hardware.graphics.package == cfg.hardware.firn.mesa;
   };
   failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) rules);
 in
